@@ -1,0 +1,23 @@
+node_modules
+dist
+.DS_Store
+.env
+.env.local
+*.log
+__pycache__/
+*.pyc
+
+# Generated SDK-safe variants of content
+src/content/sdk-variants/
+
+# Generated content bundle for --compile builds
+src/content-bundle.json
+
+# Compiled binary outputs and release artifacts
+build/dist/
+build/npm/
+/vigolium-results
+/vigolium-results-*
+
+# Local override sandbox (for testing)
+.vigolium-audit-cache/

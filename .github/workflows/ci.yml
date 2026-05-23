@@ -1,0 +1,160 @@
+name: CI
+
+# Manual-only: CI runs when you start it from the Actions tab or via
+# `gh workflow run ci.yml`, not automatically on push or pull_request.
+on:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The rod browser-automation package is vendored and excluded from vet/test
+  # the same way the Makefile does it.
+  GOFLAGS: -mod=readonly
+
+jobs:
+  build-and-test:
+    name: Lint, vet & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # jsscan is compiled with bun and embedded via //go:embed
+      # (internal/resources/deparos/jsscan/jsscan-linux-amd64). That file is
+      # generated, not committed, so the tree won't build until it exists.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build embedded jsscan binaries
+        run: make ensure-jsscan
+
+      - name: Verify generated/managed sources (gofmt + go.mod tidy)
+        run: make verify-generated
+
+      # Filter mirrors GOLIST_EXCLUDE in the Makefile: drop vendored rod browser
+      # tests and external tooling under platform/ (incl. node_modules trees that
+      # can hold stray buildable Go packages).
+      - name: go vet
+        run: go vet $(go list ./... | grep -Ev '/pkg/spitolas/rod|/platform/|/node_modules/')
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.9.0
+
+      - name: Unit tests
+        run: go test -short -coverprofile=coverage.out $(go list ./... | grep -Ev '/pkg/spitolas/rod|/platform/|/node_modules/')
+
+      # Enforce the coverage floor against the profile produced above (no second
+      # test run). Reuses the same COVERAGE_MIN gate as `make test-ci`.
+      - name: Enforce coverage floor
+        run: make coverage-gate
+
+  coverage-report:
+    name: Combined coverage (report only)
+    runs-on: ubuntu-latest
+    # Report-only: this never gates a merge. The enforced floor lives in the
+    # build-and-test job above (coverage-gate over the -short unit profile).
+    # This job folds in the no-Docker e2e tier so the headline number reflects
+    # code exercised end-to-end (REST handlers, scan-runner orchestration) that
+    # per-package unit coverage can't credit. No Docker required.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build embedded jsscan binaries
+        run: make ensure-jsscan
+
+      - name: Combined coverage report
+        run: make coverage-combined
+
+      - name: Upload combined coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-combined
+          path: |
+            coverage-combined.html
+            coverage-combined.out
+          if-no-files-found: ignore
+
+  govulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    # Informational: advisories can appear without any code change, so a finding
+    # here should prompt a triage rather than hard-fail every unrelated PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build embedded jsscan binaries
+        run: make ensure-jsscan
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck $(go list ./... | grep -Ev '/pkg/spitolas/rod|/platform/|/node_modules/')
+
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    # Informational supply-chain artifact, not a gate. syft reads go.mod
+    # directly, so this needs neither a build nor the embedded jsscan binaries.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          artifact-name: vigolium-sbom.cdx.json
+
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    # Diffs the dependency graph against the PR base for known-vulnerable or
+    # license-incompatible additions; only meaningful on pull requests.
+    if: github.event_name == 'pull_request'
+    # Non-blocking for now (mirrors the govulncheck stance): surface advisories
+    # for triage rather than hard-failing unrelated PRs.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
