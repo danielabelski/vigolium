@@ -24,6 +24,19 @@ public/dist
 **/.vitepress/cache/**
 .netlify
 bin
+
+# The broad `bin` / `bin/` rules above match at every directory depth, which
+# also swallowed pkg/audit/bin/ — the Go package that embeds the vigolium-audit
+# host binary. That dropped its sources (embed.go, extract.go) from git, so
+# fresh clones failed to build with "no required module provides package
+# github.com/vigolium/vigolium/pkg/audit/bin". Re-include the package source
+# and the _bin placeholder; the multi-MiB binary under _bin/ stays ignored via
+# pkg/audit/bin/_bin/.gitignore.
+!pkg/audit/bin/
+!pkg/audit/bin/*.go
+!pkg/audit/bin/_bin/
+!pkg/audit/bin/_bin/.gitkeep
+!pkg/audit/bin/_bin/.gitignore
 .vscode
 
 # Go build artifacts
@@ -94,15 +107,6 @@ internal/resources/spitolas/chromium/*
 /vigolium
 
 .claude
-OPTIMIZE.md
-OPTIMIZE-*.md
-PLANNING.md
-PLANNING-*.md
-INTERNAL.md
-INTERNAL-*.md
 build/dist-license/
 build/dist-public/
 build/dist-npm/
-
-# Private deployment infra — never publish to the open-source repo
-platform/vigolium-console/
