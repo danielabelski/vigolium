@@ -60,7 +60,8 @@ func registerNativeScanFlags(flags *pflag.FlagSet, includeAuth bool) {
 	// Stateless mode
 	flags.BoolVarP(&globalStateless, "stateless", "S", false, "Use a temporary database that is discarded after the scan (pass --output/--format to persist results)")
 	flags.BoolVar(&globalSplitByHost, "split-by-host", false, "In stateless multi-target mode (-S -T file), write a separate per-host output file (base-<host>.<ext>) instead of one unified file")
-	flags.BoolVar(&globalDBIsolate, "db-isolate", false, "Scan into a private temporary database, then merge results into --db (or the default DB) at the end — lets many parallel scans share one --db without write contention (SQLite only, not with --stateless)")
+	flags.BoolVar(&globalDBIsolate, "db-isolate", false, "Scan into a private temporary database, then merge results into --db (or the default DB) at the end — lets many parallel scans share one --db without write contention (SQLite only, not with --stateless; combine with -P -T to fan out targets and export one unified output from the merged DB)")
+	flags.IntVarP(&globalParallel, "parallel", "P", 1, "Scan up to N targets concurrently as isolated child processes (requires -S -T --split-by-host, OR --db-isolate -T which merges into --db and exports one unified output; each target keeps its own --concurrency, so real in-flight requests ≈ N × --concurrency)")
 
 	if includeAuth {
 		flags.StringSliceVar(&scanOpts.AuthFiles, "auth-file", nil,

@@ -86,7 +86,7 @@ func testPathVariant(
 	defer resp.Close()
 
 	change := detectChange(baseline, resp.Body().String(), resp.Response().StatusCode)
-	if change.IsInteresting {
+	if confirmChange(ctx, httpClient, baseline, raw, change) {
 		return buildProbeResult(
 			urlStr, raw, resp.FullResponseString(),
 			"path", probeType, payload, change,

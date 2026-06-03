@@ -176,18 +176,38 @@ func (m *Module) testPayload(
 
 	var detected bool
 	var detectionDesc string
+	// Auth bypass is a directly observable 401/403→2xx transition (re-confirmed
+	// interleaved), so it stays high/firm. The size-increase path only INFERS
+	// exfiltration from response growth — it never proves leaked data is in the
+	// body — so it is FP-prone and reported as suspect/tentative, matching the
+	// time-based path.
+	findingSeverity := severity.High
+	findingConfidence := severity.Firm
 
 	switch payload.detectType {
 	case detectAuthBypass:
-		if analyzeAuthBypass(baselineStatus, probeStatus) {
+		if analyzeAuthBypass(baselineStatus, probeStatus) &&
+			m.confirmAuthBypass(ctx, ip, httpClient, fuzzedValue) {
 			detected = true
 			detectionDesc = fmt.Sprintf("Auth bypass: status changed from %d to %d", baselineStatus, probeStatus)
 		}
 	case detectSizeChange:
-		// Require a real captured baseline. Without one (baselineStatus == 0) any
-		// non-trivial response would be misread as a size increase from zero.
-		if baselineStatus != 0 && analyzeSizeIncrease(len(baselineBody), len(body)) &&
-			m.confirmSizeIncrease(ctx, ip, httpClient, fuzzedValue, len(body)) {
+		findingSeverity = severity.Suspect
+		findingConfidence = severity.Tentative
+		// Require a real captured baseline: a status AND a non-empty body. A
+		// served (2xx) page that captured as 0 bytes is almost always an
+		// encoding/capture artifact (gzip not decoded at capture, streamed/HEAD
+		// body) — and analyzeSizeIncrease(0, N) would misread any non-trivial
+		// response as a size increase from zero. This is exactly the reported
+		// Cloudflare-Access SSO-page false positive: empty captured baseline,
+		// 200 status, a 22 KB static login page returned for every value.
+		//
+		// Beyond the captured-baseline delta, confirmSizeIncrease must reproduce
+		// the growth against a FRESH clean fetch AND find the payload body
+		// structurally divergent from it.
+		if baselineStatus != 0 && len(baselineBody) > 0 &&
+			analyzeSizeIncrease(len(baselineBody), len(body)) &&
+			m.confirmSizeIncrease(ctx, ip, httpClient, fuzzedValue, body) {
 			detected = true
 			detectionDesc = fmt.Sprintf("Data exfiltration: body size increased from %d to %d bytes", len(baselineBody), len(body))
 		}
@@ -197,60 +217,147 @@ func (m *Module) testPayload(
 		return nil, nil
 	}
 
+	ev := modkit.NewEvidenceCollector()
+	ev.Add("baseline", modkit.CtxRequestRaw(ctx), modkit.CtxResponseRaw(ctx))
+
 	urlx, _ := ctx.URL()
 	return &output.ResultEvent{
-		URL:              urlx.String(),
-		Matched:          urlx.String(),
-		Request:          string(fuzzedRaw),
-		FuzzingParameter: ip.Name(),
-		ExtractedResults: []string{payload.value},
+		URL:                urlx.String(),
+		Matched:            urlx.String(),
+		Request:            string(fuzzedRaw),
+		FuzzingParameter:   ip.Name(),
+		ExtractedResults:   []string{payload.value},
+		AdditionalEvidence: ev.Entries(),
 		Info: output.Info{
 			Name:        "NoSQL Operator Injection",
 			Description: fmt.Sprintf("%s — %s via parameter %q", detectionDesc, payload.desc, ip.Name()),
-			Severity:    severity.High,
-			Confidence:  severity.Firm,
+			Severity:    findingSeverity,
+			Confidence:  findingConfidence,
 			Tags:        []string{"nosqli", "injection", "mongodb"},
 			Reference:   []string{"https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05.6-Testing_for_NoSQL_Injection"},
 		},
 	}, nil
 }
 
+// confirmAuthBypass verifies an apparent 401/403→200 transition is genuinely
+// caused by the operator payload, not a transient block — a 401/403 from a
+// WAF/rate-limit layer that simply cleared between requests, or auth that is
+// enforced intermittently. It re-runs the pair interleaved with the payload as
+// the only variable: each round the ORIGINAL base value must STILL be denied
+// (401/403) and the payload value must STILL be allowed (2xx). The fetches bypass
+// the response cache so a stale replay can't mask flapping. Fails open on a
+// transport error so a transient failure never suppresses a true positive.
+func (m *Module) confirmAuthBypass(
+	ctx *httpmsg.HttpRequestResponse,
+	ip httpmsg.InsertionPoint,
+	httpClient *http.Requester,
+	payloadValue string,
+) bool {
+	const rounds = 2
+	for range rounds {
+		controlStatus, err := m.freshStatus(ctx, ip, httpClient, ip.BaseValue())
+		if err != nil {
+			return true // fail open on transport error
+		}
+		if controlStatus != 401 && controlStatus != 403 {
+			return false // not denied WITHOUT the payload → the block isn't payload-attributable
+		}
+		probeStatus, err := m.freshStatus(ctx, ip, httpClient, payloadValue)
+		if err != nil {
+			return true
+		}
+		if probeStatus < 200 || probeStatus >= 300 {
+			return false // not allowed WITH the payload → not a reproducible bypass
+		}
+	}
+	return true
+}
+
+// freshStatus issues the insertion point built with value and returns the status
+// code, bypassing the response cache (NoClustering) so a confirmation re-fetch is
+// a genuinely fresh observation rather than a replayed one.
+func (m *Module) freshStatus(
+	ctx *httpmsg.HttpRequestResponse,
+	ip httpmsg.InsertionPoint,
+	httpClient *http.Requester,
+	value string,
+) (int, error) {
+	req, err := httpmsg.ParseRawRequest(string(ip.BuildRequest([]byte(value))))
+	if err != nil {
+		return 0, err
+	}
+	req = req.WithService(ctx.Service())
+	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Close()
+	if resp.Response() == nil {
+		return 0, nil
+	}
+	return resp.Response().StatusCode, nil
+}
+
 // confirmSizeIncrease re-confirms a detectSizeChange hit by checking the body
 // growth is payload-driven rather than the endpoint's own per-request size
-// variance. It fetches the ORIGINAL value twice (taking the largest clean
-// response) and re-sends the payload once; the SMALLER of the two payload
-// responses must still exceed the LARGEST clean response by the size-increase
-// thresholds. A non-deterministic or large-by-default endpoint — where a fresh
-// clean fetch is just as big as the payload response — fails this and is
-// dropped. Fails open on a transport error so a transient failure never
-// suppresses a true positive.
+// variance or a capture artifact. It fetches the ORIGINAL value twice (taking
+// the largest clean response) and re-sends the payload once. To survive, ALL of:
+//
+//   - the fresh clean fetches must produce a NON-EMPTY body — without a real
+//     live baseline the "growth" is unverifiable (the captured 0-byte baseline
+//     that can trigger this path cannot be trusted), so we drop;
+//   - the SMALLER of the two payload responses must still exceed the LARGEST
+//     clean response by the size-increase thresholds (rejects large-by-default
+//     and non-deterministic endpoints);
+//   - the payload body must STRUCTURALLY DIVERGE from the clean body — a static
+//     page that renders identically regardless of the operator (e.g. an SSO
+//     login page) is rejected even if a measurement glitch inflated a length.
+//
+// Unlike the auth-bypass path this fails CLOSED on a transport error: the size
+// oracle is weak and already prone to baseline artifacts, so a re-fetch we
+// cannot complete must DROP the finding rather than confirm it — a transient
+// upstream error (rate-limit, reset) must never become a confirmed
+// data-exfiltration report.
 func (m *Module) confirmSizeIncrease(
 	ctx *httpmsg.HttpRequestResponse,
 	ip httpmsg.InsertionPoint,
 	httpClient *http.Requester,
 	payloadValue string,
-	firstProbeLen int,
+	firstProbeBody string,
 ) bool {
 	maxClean := 0
+	var cleanBody string
 	for i := 0; i < 2; i++ {
 		_, body, _, err := m.measureDuration(ctx, ip, httpClient, ip.BaseValue())
 		if err != nil {
-			return true
+			return false // fail closed: cannot reproduce a clean baseline
 		}
 		if len(body) > maxClean {
 			maxClean = len(body)
+			cleanBody = body
 		}
+	}
+	// A served response that yields no live clean body is an encoding/capture
+	// artifact, not a measurable baseline — drop rather than treat 0→N as growth.
+	if maxClean == 0 {
+		return false
 	}
 
 	_, probeBody, _, err := m.measureDuration(ctx, ip, httpClient, payloadValue)
 	if err != nil {
-		return true
+		return false // fail closed
 	}
-	smallestProbe := firstProbeLen
-	if len(probeBody) < smallestProbe {
-		smallestProbe = len(probeBody)
+	smallestProbe := firstProbeBody
+	if len(probeBody) < len(smallestProbe) {
+		smallestProbe = probeBody
 	}
-	return analyzeSizeIncrease(maxClean, smallestProbe)
+	if !analyzeSizeIncrease(maxClean, len(smallestProbe)) {
+		return false
+	}
+	// Reproducible growth alone is not enough: the larger payload body must also
+	// be structurally different from the clean body. Identical content that
+	// merely measured larger is the same page, not exfiltrated data.
+	return responsesDiverge(cleanBody, smallestProbe)
 }
 
 // testTimeBasedPayload confirms a time-based NoSQL injection by measuring a
@@ -288,13 +395,17 @@ func (m *Module) testTimeBasedPayload(
 		lastDelay = probeDuration - baselineDuration
 	}
 
+	ev := modkit.NewEvidenceCollector()
+	ev.Add("baseline", modkit.CtxRequestRaw(ctx), modkit.CtxResponseRaw(ctx))
+
 	urlx, _ := ctx.URL()
 	return &output.ResultEvent{
-		URL:              urlx.String(),
-		Matched:          urlx.String(),
-		Request:          string(fuzzedRaw),
-		FuzzingParameter: ip.Name(),
-		ExtractedResults: []string{payload.value},
+		URL:                urlx.String(),
+		Matched:            urlx.String(),
+		Request:            string(fuzzedRaw),
+		FuzzingParameter:   ip.Name(),
+		ExtractedResults:   []string{payload.value},
+		AdditionalEvidence: ev.Entries(),
 		Info: output.Info{
 			Name: "NoSQL Operator Injection",
 			Description: fmt.Sprintf(
@@ -416,13 +527,19 @@ func (m *Module) testBooleanDiff(
 			continue
 		}
 
+		ev := modkit.NewEvidenceCollector()
+		ev.Add("baseline", modkit.CtxRequestRaw(ctx), modkit.CtxResponseRaw(ctx))
+		ev.Add("true-payload", string(ip.BuildRequest([]byte(ip.BaseValue()+truePayload.value))), trueBody)
+		ev.Add("false-payload", string(ip.BuildRequest([]byte(ip.BaseValue()+falsePayload.value))), falseBody)
+
 		urlx, _ := ctx.URL()
 		return &output.ResultEvent{
-			URL:              urlx.String(),
-			Matched:          urlx.String(),
-			Request:          string(ip.BuildRequest([]byte(ip.BaseValue() + truePayload.value))),
-			FuzzingParameter: ip.Name(),
-			ExtractedResults: []string{truePayload.value, falsePayload.value},
+			URL:                urlx.String(),
+			Matched:            urlx.String(),
+			Request:            string(ip.BuildRequest([]byte(ip.BaseValue() + truePayload.value))),
+			FuzzingParameter:   ip.Name(),
+			ExtractedResults:   []string{truePayload.value, falsePayload.value},
+			AdditionalEvidence: ev.Entries(),
 			Info: output.Info{
 				Name:        "NoSQL Boolean-based Injection",
 				Description: fmt.Sprintf("Boolean differential confirmed: always-true and always-false conditions produce structurally different responses (beyond the endpoint's own per-request variance) via parameter %q — %s", ip.Name(), truePayload.desc),

@@ -132,8 +132,12 @@ func runScanCmd(cmd *cobra.Command, args []string) error {
 	scanOpts.Stateless = globalStateless
 	scanOpts.SplitByHost = globalSplitByHost
 	scanOpts.DBIsolate = globalDBIsolate
+	scanOpts.Parallel = globalParallel
 	if scanOpts.DBIsolate && scanOpts.Stateless {
 		return fmt.Errorf("--db-isolate and --stateless are mutually exclusive (--stateless discards results; --db-isolate merges them into --db)")
+	}
+	if err := validateParallelScan(scanOpts); err != nil {
+		return err
 	}
 	if scanOpts.Stateless {
 		if globalDB != "" {
@@ -420,6 +424,14 @@ func runScanCmd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// DB-isolate parallel fan-out (-P > 1 with --db-isolate): scan each target as
+	// an isolated child that merges into --db, then export one unified output from
+	// the merged DB. -P 1 / a single target falls through to the single-process
+	// path below, which already scans the whole file into one scratch and merges.
+	if scanOpts.DBIsolate && scanOpts.Parallel > 1 && scanOpts.TargetsFilePath != "" {
+		return runIsolatedTargetsParallel(cmd, settings, strategyName)
+	}
+
 	// Multi-target stateless with --split-by-host: iterate per line with a fresh
 	// temp DB each time, writing one per-host output file per target. Without the
 	// flag, fall through to a single shared pass so the whole target file scans
@@ -688,6 +700,14 @@ func runStatelessTargetFile(cmd *cobra.Command, settings *config.Settings, strat
 	}
 	if len(targets) == 0 {
 		return fmt.Errorf("target file %q contains no targets", scanOpts.TargetsFilePath)
+	}
+
+	// Parallel fan-out: with -P > 1 and more than one target, scan targets
+	// concurrently as isolated child processes instead of looping sequentially
+	// in this process. A single target (or -P 1) keeps the in-process path
+	// below unchanged — there is nothing to parallelize and no exec overhead.
+	if scanOpts.Parallel > 1 && len(targets) > 1 {
+		return runStatelessTargetsParallel(cmd, settings, strategyName, targets)
 	}
 
 	origTargets := append([]string(nil), scanOpts.Targets...)
@@ -1051,6 +1071,24 @@ const dbIsolateAgentFlagUsage = "Run into a private temporary database, then mer
 // those, so we stash it here for the config banner (printScanSummary) to show.
 var dbIsolateDestPath string
 
+// resolveDBIsolateDest resolves the real destination database a --db-isolate run
+// merges into: the global --db when set, otherwise the configured database. It
+// errors when that destination is not SQLite (the merge is SQLite-to-SQLite).
+// Shared by dbIsolateBegin (single-process runs) and the db-isolate parallel
+// fan-out, which needs the destination both to validate up front and to export
+// the unified output from once every child has merged in.
+func resolveDBIsolateDest(settings *config.Settings) (config.DatabaseConfig, error) {
+	destCfg := settings.Database
+	if globalDB != "" {
+		destCfg.Driver = "sqlite"
+		destCfg.SQLite.Path = globalDB
+	}
+	if destCfg.Driver != "sqlite" {
+		return destCfg, fmt.Errorf("--db-isolate requires a SQLite database (got driver %q)", destCfg.Driver)
+	}
+	return destCfg, nil
+}
+
 // dbIsolateBegin, when --db-isolate is active, swaps the run's database to a
 // private scratch SQLite file and returns a finisher that merges the scratch
 // into the real destination (--db when set, else the configured DB) and cleans
@@ -1068,13 +1106,9 @@ func dbIsolateBegin(settings *config.Settings, silent bool) (finish func(error) 
 		return noop, nil
 	}
 	// Resolve the real destination: --db wins, else the configured DB.
-	destCfg := settings.Database
-	if globalDB != "" {
-		destCfg.Driver = "sqlite"
-		destCfg.SQLite.Path = globalDB
-	}
-	if destCfg.Driver != "sqlite" {
-		return nil, fmt.Errorf("--db-isolate requires a SQLite database (got driver %q)", destCfg.Driver)
+	destCfg, err := resolveDBIsolateDest(settings)
+	if err != nil {
+		return nil, err
 	}
 	// Stash the destination before we repoint settings/globalDB below, so the
 	// config banner can report where results will be merged.
@@ -1499,7 +1533,7 @@ func printScanSummary(opts *types.Options, settings *config.Settings, strategyNa
 	if opts.ScanningProfile != "" {
 		fmt.Fprintf(os.Stderr, "  %s Profile: %s\n", terminal.Purple(terminal.SymbolInfo), terminal.HiTeal(opts.ScanningProfile))
 	}
-	targetsLine := fmt.Sprintf("Targets: %s (CLI: %s)", terminal.Orange(fmt.Sprintf("%d", len(opts.Targets))), terminal.HiBlue(strings.Join(opts.Targets, ", ")))
+	targetsLine := fmt.Sprintf("Targets: %s (CLI: %s)", terminal.Orange(fmt.Sprintf("%d", len(opts.Targets))), terminal.HiBlue(summarizeTargetList(opts.Targets, 3)))
 	if opts.TargetsFilePath != "" {
 		targetsLine += fmt.Sprintf(" (+ file: %s)", terminal.HiTeal(opts.TargetsFilePath))
 	}

@@ -225,6 +225,14 @@ type Options struct {
 	// mutually exclusive with --stateless (which discards results entirely).
 	DBIsolate bool
 
+	// Parallel is how many targets to scan at once in stateless multi-target
+	// mode (-S -T file --split-by-host). Each target runs as an isolated child
+	// vigolium process that keeps its own --concurrency worker pool, so the real
+	// in-flight request count is roughly Parallel × Concurrency. Default 1
+	// (sequential). Values > 1 require --stateless, a target file, and
+	// --split-by-host; outside that combination the flag is rejected up front.
+	Parallel int
+
 	// NoTechFilter disables the tech-stack allowlist gate so every module runs
 	// regardless of the host's detected stack. Set by --no-tech-filter and
 	// applied automatically when Intensity == "deep".
@@ -243,6 +251,7 @@ func DefaultOptions() *Options {
 		PassiveModules:       []string{"all"},
 		ClusterRequests:      true,
 		ShutdownTimeout:      30 * time.Second,
+		Parallel:             1,
 	}
 }
 func (options *Options) ShouldUseHostError() bool {

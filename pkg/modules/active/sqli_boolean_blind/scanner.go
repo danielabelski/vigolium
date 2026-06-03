@@ -79,7 +79,7 @@ ipScan:
 		// This lets us detect cases where both TRUE and FALSE payloads differ
 		// from baseline in the same way (e.g., mangled header values causing
 		// different responses due to syntax breakage, not SQL logic).
-		_, baselineSig, err := m.sendPayload(ctx, httpClient, ip, baseValue)
+		baselineFull, baselineSig, err := m.sendPayload(ctx, httpClient, ip, baseValue)
 		if err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 				return results, nil
@@ -99,7 +99,7 @@ ipScan:
 		}
 
 		for _, pair := range payloads {
-			result, err := m.testPayloadPair(ctx, httpClient, ip, baseValue, pair, baselineSig)
+			result, err := m.testPayloadPair(ctx, httpClient, ip, baseValue, pair, baselineSig, baselineFull)
 			if err != nil {
 				if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 					return results, nil
@@ -131,18 +131,19 @@ func (m *Module) testPayloadPair(
 	baseValue string,
 	pair payloadPair,
 	baselineSig responseSignature,
+	baselineFull string,
 ) (*output.ResultEvent, error) {
 	truePayload := baseValue + pair.trueVal
 	falsePayload := baseValue + pair.falseVal
 
 	// Step 1: Send TRUE payload
-	_, trueSig1, err := m.sendPayload(ctx, httpClient, ip, truePayload)
+	trueFull, trueSig1, err := m.sendPayload(ctx, httpClient, ip, truePayload)
 	if err != nil {
 		return nil, err
 	}
 
 	// Step 2: Send FALSE payload
-	_, falseSig1, err := m.sendPayload(ctx, httpClient, ip, falsePayload)
+	falseFull, falseSig1, err := m.sendPayload(ctx, httpClient, ip, falsePayload)
 	if err != nil {
 		return nil, err
 	}
@@ -242,12 +243,20 @@ func (m *Module) testPayloadPair(
 		return nil, nil
 	}
 
-	// All checks passed — confirmed blind SQLi
+	// All checks passed — confirmed blind SQLi. Attach the differential that proves
+	// it: the TRUE payload is the primary (proof) pair; the clean baseline and the
+	// FALSE payload — the two responses TRUE was discriminated against — go in the
+	// evidence so a reviewer can see all three sides of the comparison.
 	fuzzedRaw := ip.BuildRequest([]byte(truePayload))
+	ev := modkit.NewEvidenceCollector()
+	ev.Add("baseline (unmodified value)", string(ip.BuildRequest([]byte(baseValue))), baselineFull)
+	ev.Add("false-payload", string(ip.BuildRequest([]byte(falsePayload))), falseFull)
 	return &output.ResultEvent{
-		Request:          string(fuzzedRaw),
-		FuzzingParameter: ip.Name(),
-		ExtractedResults: []string{truePayload, falsePayload},
+		Request:            string(fuzzedRaw),
+		Response:           trueFull,
+		AdditionalEvidence: ev.Entries(),
+		FuzzingParameter:   ip.Name(),
+		ExtractedResults:   []string{truePayload, falsePayload},
 		Info: output.Info{
 			Description: "Boolean-based blind SQL injection confirmed via TRUE/FALSE response differential with baseline verification",
 		},

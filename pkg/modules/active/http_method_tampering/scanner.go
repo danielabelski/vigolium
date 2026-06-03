@@ -192,7 +192,7 @@ func (m *Module) endpointAcceptsAnyMethod(
 	if resp.Response() == nil {
 		return false
 	}
-	return isSuccessfulMethod(resp.Response().StatusCode, resp.FullResponseString()) &&
+	return isSuccessfulMethod(resp.Response().StatusCode, resp.BodyString()) &&
 		!looksLikeWildcardShell(resp.Response().StatusCode, resp.Body().Bytes(), wildcard, baseline)
 }
 
@@ -232,18 +232,21 @@ func (m *Module) testDangerousMethods(
 			continue
 		}
 
-		if resp.Response() != nil && isSuccessfulMethod(resp.Response().StatusCode, resp.FullResponseString()) &&
+		if resp.Response() != nil && isSuccessfulMethod(resp.Response().StatusCode, resp.BodyString()) &&
 			!looksLikeWildcardShell(resp.Response().StatusCode, resp.Body().Bytes(), wildcard, baseline) {
 			if isCatchAll() {
 				resp.Close()
 				return results, nil // endpoint 2xx-es any method — not a real finding
 			}
+			ev := modkit.NewEvidenceCollector()
+			ev.Add("baseline", string(ctx.Request().Raw()), baselineFullResponse(baseline))
 			results = append(results, &output.ResultEvent{
-				URL:              urlx.String(),
-				Request:          string(modifiedRaw),
-				Response:         resp.FullResponseString(),
-				FuzzingParameter: "method",
-				ExtractedResults: []string{method + " method returned 2xx"},
+				URL:                urlx.String(),
+				Request:            string(modifiedRaw),
+				Response:           resp.FullResponseString(),
+				AdditionalEvidence: ev.Entries(),
+				FuzzingParameter:   "method",
+				ExtractedResults:   []string{method + " method returned 2xx"},
 				Info: output.Info{
 					Description: "Dangerous HTTP method " + method + " is enabled on this endpoint",
 				},
@@ -267,6 +270,24 @@ func (m *Module) testMethodOverrideHeaders(
 	isCatchAll func() bool,
 ) ([]*output.ResultEvent, error) {
 	var results []*output.ResultEvent
+
+	// Lazily fetch (once) a plain-POST control: the SAME request as the override
+	// probe but WITHOUT the override header. The override is only "respected" if
+	// it materially changes the response relative to this control — so an ignored
+	// override that returns the same page (e.g. a body-less 200 from an SSO/auth
+	// endpoint that answers POST identically with or without the header) is not a
+	// finding. Memoized so we issue at most one control request per endpoint, and
+	// only when a candidate is actually found.
+	controlFetched := false
+	var control postControl
+	var controlOK bool
+	getControl := func() (postControl, bool) {
+		if !controlFetched {
+			controlFetched = true
+			control, controlOK = m.fetchPostControl(ctx, httpClient)
+		}
+		return control, controlOK
+	}
 
 	for _, header := range methodOverrideHeaders {
 		for _, overrideMethod := range []string{"DELETE", "PUT"} {
@@ -293,18 +314,35 @@ func (m *Module) testMethodOverrideHeaders(
 				continue
 			}
 
-			if resp.Response() != nil && isSuccessfulMethod(resp.Response().StatusCode, resp.FullResponseString()) &&
+			if resp.Response() != nil && isSuccessfulMethod(resp.Response().StatusCode, resp.BodyString()) &&
 				!looksLikeWildcardShell(resp.Response().StatusCode, resp.Body().Bytes(), wildcard, baseline) {
 				if isCatchAll() {
 					resp.Close()
 					return results, nil // endpoint 2xx-es any method — override proves nothing
 				}
+
+				// Differential confirmation: the override must change the response
+				// versus a plain POST. If it returns effectively the same page, the
+				// header was ignored — drop the candidate and try the next variant.
+				overrideSig := modkit.NewResponseSignature(resp.Response().StatusCode, resp.BodyString(), "")
+				ctrl, ctrlOK := getControl()
+				if ctrlOK && modkit.RatioSimilar(ctrl.sig, overrideSig) {
+					resp.Close()
+					continue
+				}
+
+				ev := modkit.NewEvidenceCollector()
+				ev.Add("baseline", string(ctx.Request().Raw()), baselineFullResponse(baseline))
+				if ctrlOK {
+					ev.Add("control: plain POST without "+header, ctrl.reqRaw, ctrl.respRaw)
+				}
 				results = append(results, &output.ResultEvent{
-					URL:              urlx.String(),
-					Request:          string(modifiedRaw),
-					Response:         resp.FullResponseString(),
-					FuzzingParameter: header,
-					ExtractedResults: []string{"POST with " + header + ": " + overrideMethod},
+					URL:                urlx.String(),
+					Request:            string(modifiedRaw),
+					Response:           resp.FullResponseString(),
+					AdditionalEvidence: ev.Entries(),
+					FuzzingParameter:   header,
+					ExtractedResults:   []string{"POST with " + header + ": " + overrideMethod + " changes the response vs a plain POST"},
 					Info: output.Info{
 						Description: "Method override header " + header + " is respected (overrides to " + overrideMethod + ")",
 					},
@@ -317,6 +355,49 @@ func (m *Module) testMethodOverrideHeaders(
 	}
 
 	return results, nil
+}
+
+// postControl is a memoized plain-POST control response (no method-override
+// header) used as the differential baseline for the override check.
+type postControl struct {
+	sig     modkit.ResponseSignature
+	reqRaw  string
+	respRaw string
+}
+
+// fetchPostControl issues the request as a plain POST WITHOUT any method-override
+// header and returns its response signature plus the raw request/response for
+// evidence. ok is false on any transport/parse error so the caller falls back to
+// the success+shell gates rather than dropping a finding on a transient failure.
+// NoClustering bypasses the response cache so the control is a genuinely fresh
+// observation rather than a replay of a previously-cached probe.
+func (m *Module) fetchPostControl(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+) (postControl, bool) {
+	controlRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "POST")
+	if err != nil {
+		return postControl{}, false
+	}
+	req, err := httpmsg.ParseRawRequest(string(controlRaw))
+	if err != nil {
+		return postControl{}, false
+	}
+	req = req.WithService(ctx.Service())
+
+	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
+	if err != nil {
+		return postControl{}, false
+	}
+	defer resp.Close()
+	if resp.Response() == nil {
+		return postControl{}, false
+	}
+	return postControl{
+		sig:     modkit.NewResponseSignature(resp.Response().StatusCode, resp.BodyString(), ""),
+		reqRaw:  string(controlRaw),
+		respRaw: resp.FullResponseString(),
+	}, true
 }
 
 // isSuccessfulMethod checks if a response indicates the method was accepted.
@@ -340,6 +421,15 @@ func isSuccessfulMethod(statusCode int, body string) bool {
 	}
 
 	return true
+}
+
+// baselineFullResponse renders the cached same-method baseline as a full raw
+// response string for evidence capture, returning "" when no baseline is present.
+func baselineFullResponse(baseline *modkit.BaselineEntry) string {
+	if baseline == nil || baseline.Response == nil {
+		return ""
+	}
+	return string(baseline.Response.Raw())
 }
 
 // markAndShouldContinue limits checks per host.

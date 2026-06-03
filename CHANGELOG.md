@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.20-beta] - 2026-06-02
+
+A detection-expansion and false-positive-reduction release: OS command-injection detection, a `-P/--parallel` multi-target fan-out, finding evidence in output, and a broad hardening pass across the active modules and shared diffscan engine.
+
+### Added
+
+- **OS command-injection detection** — three new active modules covering results-based (in-band), out-of-band (OAST callback), and time-based blind techniques, each confirming execution across multiple rounds against a baseline to avoid false positives.
+- **`-P`/`--parallel` flag** (`scan`, default `1`): scan up to N targets concurrently via isolated child processes. Pair with `-S -T --split-by-host` for per-host output files, or `--db-isolate -T` to merge every target into one shared `--db` and export a single unified result. Single target / `-P 1` is unchanged.
+- **Finding evidence** — findings now carry the supporting request/response pairs (baselines, confirmation rounds, control fetches) behind each decision, surfaced in console output and stored in the database.
+
+### Changed
+
+- **Broad false-positive hardening** across the active modules: findings now have to reproduce and show real content-level changes, so they survive WAF/rate-limit pages, dynamic-content jitter, transient flaps, and reflection artifacts instead of misreading them as vulnerabilities. Confirmation replays also bypass the response cache so each sample is genuinely fresh.
+- **diffscan engine** — excludes reflection-prone and volatile attributes from comparisons, gates out responses where the payload couldn't have been evaluated (redirects, empty bodies, 404s), and surfaces which attributes actually differed across confirmation rounds.
+- **Severity recalibration** — server-side template injection lowered to Info (a human-confirmation lead) and HTTP method tampering to Suspect (frequently non-exploitable alone).
+- **Passive checks** — missing-security-header detection now also flags weak `Referrer-Policy` values and cacheable sensitive HTTPS responses; CSRF detection filters out requests that aren't actually CSRF-reachable (JSON bodies, header-based auth, no session cookie).
+- **OAST service** — command-injection callbacks are now classified as confirmed OS command injection rather than generic SSRF/XXE.
+- **Olium autopilot** — project custom skills now load from `.agents/skills/`, with a startup summary of available skills by source.
+
+### Removed
+
+- Folded the standalone cacheable-HTTPS and Referrer-Policy passive checks into the missing-security-header module.
+
 ## [v0.1.19-beta] - 2026-06-01
 
 ### Added

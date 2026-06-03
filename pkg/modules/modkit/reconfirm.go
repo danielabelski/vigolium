@@ -2,6 +2,7 @@ package modkit
 
 import (
 	"crypto/sha256"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -192,6 +193,36 @@ func absInt(n int) int {
 	return n
 }
 
+// SizeShiftGap reports whether a payload reproducibly shifts the response size
+// outside the page's natural variance. Given the lengths of two no-payload
+// samples (baselineLen, controlLen) and two with-payload samples (probeLen,
+// probe2Len), it returns the gap by which the with-payload band sits entirely on
+// ONE side of, and clear of, the no-payload band — and whether that gap exceeds
+// the variance threshold max(30% of baselineLen, 256 bytes). When the two bands
+// overlap (jitter) or the gap is within the threshold, gap is 0 and ok is false.
+func SizeShiftGap(baselineLen, controlLen, probeLen, probe2Len int) (gap int, ok bool) {
+	noHdrMin, noHdrMax := min(baselineLen, controlLen), max(baselineLen, controlLen)
+	probeMin, probeMax := min(probeLen, probe2Len), max(probeLen, probe2Len)
+
+	switch {
+	case probeMin > noHdrMax:
+		gap = probeMin - noHdrMax // payload consistently enlarges the response
+	case probeMax < noHdrMin:
+		gap = noHdrMin - probeMax // payload consistently shrinks the response
+	default:
+		return 0, false // bands overlap → jitter, not the payload
+	}
+
+	threshold := baselineLen * 30 / 100
+	if threshold < 256 {
+		threshold = 256
+	}
+	if gap <= threshold {
+		return 0, false
+	}
+	return gap, true
+}
+
 // ----------------------------------------------------------------------------
 // High-level re-confirmation strategies
 // ----------------------------------------------------------------------------
@@ -204,6 +235,11 @@ type ReconfirmConfig struct {
 	// NoRedirects controls whether the requester follows 3xx. Default true so a
 	// redirect isn't transparently followed and mistaken for a content diff.
 	NoRedirects bool
+	// Evidence, when non-nil, collects the request/response pairs this helper
+	// fetches (each payload replay and the fresh baseline) so the module can
+	// attach the confirmation evidence to its finding instead of discarding it.
+	// nil-safe: leave unset to skip evidence capture.
+	Evidence *EvidenceCollector
 }
 
 func (c ReconfirmConfig) withDefaults() ReconfirmConfig {
@@ -272,6 +308,7 @@ func ConfirmBodyDifferential(
 		if !ok {
 			return BodyDifferentialResult{Ran: false, Reason: "payload request fetch failed"}
 		}
+		cfg.Evidence.Add(fmt.Sprintf("confirm-payload round %d", i+1), string(payloadRaw), raw)
 		payloadTokenSets = append(payloadTokenSets, deltaTokenSet(raw))
 	}
 
@@ -280,6 +317,7 @@ func ConfirmBodyDifferential(
 	if !ok {
 		return BodyDifferentialResult{Ran: false, Reason: "baseline request fetch failed"}
 	}
+	cfg.Evidence.Add("confirm-baseline", string(baselineRaw), baseRaw)
 
 	// Fold every baseline sample (fresh + cached) into one token set: a token
 	// must be absent from all of them to be considered payload-introduced.
@@ -360,7 +398,12 @@ func fetchResponse(client *http.Requester, service *httpmsg.Service, raw []byte,
 	if service != nil {
 		req = req.WithService(service)
 	}
-	resp, _, err := client.Execute(req, http.Options{NoRedirects: noRedirects})
+	// NoClustering bypasses the requester's 500ms response cache. These
+	// confirmation replays run back-to-back (well within the TTL); a cached replay
+	// would return a byte-identical response and collapse the measured run-to-run
+	// variance to zero — making dynamic noise look like stable introduced content
+	// and defeating the very differential this helper exists to compute.
+	resp, _, err := client.Execute(req, http.Options{NoRedirects: noRedirects, NoClustering: true})
 	if err != nil {
 		return 0, "", false
 	}
@@ -458,6 +501,10 @@ type CrossIDConfig struct {
 	// self-refetch. Default false so the refetch mirrors the IDOR modules'
 	// probes, which follow redirects.
 	NoRedirects bool
+	// Evidence, when non-nil, collects the same-id refetch responses used to
+	// measure the endpoint's determinism, so the module can attach the
+	// determinism evidence to its finding. nil-safe: leave unset to skip.
+	Evidence *EvidenceCollector
 }
 
 func (c CrossIDConfig) withDefaults() CrossIDConfig {
@@ -534,6 +581,7 @@ func ConfirmCrossIDDifferential(
 		if !ok {
 			return CrossIDVerdict{Ran: false, CrossRatio: crossRatio, Reason: "same-id refetch failed"}
 		}
+		cfg.Evidence.Add(fmt.Sprintf("confirm-original round %d", i+1), string(originalRaw), body)
 		// A status flap for an unchanged id means the endpoint is non-deterministic
 		// at the status level — treat it as maximally unstable.
 		if status != baselineStatus {
@@ -586,7 +634,11 @@ func fetchResponseBody(client *http.Requester, service *httpmsg.Service, raw []b
 	if service != nil {
 		req = req.WithService(service)
 	}
-	resp, _, err := client.Execute(req, http.Options{NoRedirects: noRedirects})
+	// NoClustering bypasses the 500ms response cache so each same-id refetch is a
+	// genuinely fresh observation. A cached replay would report perfect self-
+	// similarity (selfRatio≈1.0) and make a non-deterministic endpoint look stable,
+	// defeating the determinism gate.
+	resp, _, err := client.Execute(req, http.Options{NoRedirects: noRedirects, NoClustering: true})
 	if err != nil {
 		return 0, "", false
 	}

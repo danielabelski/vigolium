@@ -98,6 +98,7 @@ var (
 	globalStateless   bool
 	globalSplitByHost bool
 	globalDBIsolate   bool
+	globalParallel    int
 
 	// Request clustering
 	globalNoClustering bool

@@ -2,7 +2,6 @@ package sqli_time_blind
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/pkg/errors"
@@ -154,7 +153,7 @@ func (m *Module) deriveThreshold(
 		samples = append(samples, d)
 	}
 
-	mean, stdev := meanStdev(samples)
+	mean, stdev := infra.MeanStdev(samples)
 	margin := time.Duration(timeStdevCoeff) * stdev
 	if margin < minSleepMargin {
 		margin = minSleepMargin
@@ -164,25 +163,6 @@ func (m *Module) deriveThreshold(
 		threshold = absoluteFloor
 	}
 	return threshold, nil
-}
-
-// meanStdev computes the mean and (population) standard deviation of durations.
-func meanStdev(samples []time.Duration) (mean, stdev time.Duration) {
-	if len(samples) == 0 {
-		return 0, 0
-	}
-	var sum float64
-	for _, s := range samples {
-		sum += float64(s)
-	}
-	m := sum / float64(len(samples))
-	var variance float64
-	for _, s := range samples {
-		d := float64(s) - m
-		variance += d * d
-	}
-	variance /= float64(len(samples))
-	return time.Duration(m), time.Duration(math.Sqrt(variance))
 }
 
 const (

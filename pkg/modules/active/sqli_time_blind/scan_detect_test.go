@@ -125,27 +125,6 @@ func TestScanPerRequest_NoFalsePositive_FixedDelay(t *testing.T) {
 	assert.Empty(t, res, "a fixed (non-scaling) delay must not be reported as time-based SQLi")
 }
 
-// TestMeanStdev verifies the baseline statistics helper.
-func TestMeanStdev(t *testing.T) {
-	t.Parallel()
-	// Constant samples → zero deviation, mean equals the value.
-	mean, stdev := meanStdev([]time.Duration{
-		100 * time.Millisecond, 100 * time.Millisecond, 100 * time.Millisecond,
-	})
-	assert.Equal(t, 100*time.Millisecond, mean)
-	assert.Equal(t, time.Duration(0), stdev)
-
-	// Empty input is safe.
-	mean, stdev = meanStdev(nil)
-	assert.Equal(t, time.Duration(0), mean)
-	assert.Equal(t, time.Duration(0), stdev)
-
-	// Known spread: values 0ms and 200ms → mean 100ms, population stdev 100ms.
-	mean, stdev = meanStdev([]time.Duration{0, 200 * time.Millisecond})
-	assert.Equal(t, 100*time.Millisecond, mean)
-	assert.Equal(t, 100*time.Millisecond, stdev)
-}
-
 // TestPrioritizeByDBMS confirms a recorded backend hint moves matching payloads
 // to the front while preserving the rest (no coverage dropped).
 func TestPrioritizeByDBMS(t *testing.T) {

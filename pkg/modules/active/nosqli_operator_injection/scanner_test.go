@@ -211,6 +211,54 @@ func TestScanPerInsertionPoint_LargeByDefaultEndpoint(t *testing.T) {
 	}
 }
 
+// TestScanPerInsertionPoint_EmptyBaselineStaticPage reproduces the reported
+// Cloudflare-Access false positive: a static SSO login page that renders the
+// SAME large HTML regardless of the injected operator, captured with an EMPTY
+// baseline body (the gzip body was not decoded at capture time) but a served
+// 200 status. The size oracle must not read 0→N as data exfiltration.
+func TestScanPerInsertionPoint_EmptyBaselineStaticPage(t *testing.T) {
+	page := "<html><body>" + strings.Repeat("<div>please sign in</div>", 1500) + "</body></html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprint(w, page)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "GET", srv.URL+"/cdn-cgi/access/login?redirect_url=%2F", "")
+	// Served 200 but captured with an empty body (gzip not decoded at capture).
+	rr = modtest.Response(rr, "text/html", "")
+	ip := modtest.InsertionPoint(t, rr, "redirect_url")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("expected no finding on a static page with an empty captured baseline, got %d: %+v", len(res), res)
+	}
+}
+
+func TestResponsesDiverge(t *testing.T) {
+	// Same static page returned for clean and payload — must NOT diverge.
+	page := "<html><body>" + strings.Repeat("<div>login form</div>", 200) + "</body></html>"
+	if responsesDiverge(page, page) {
+		t.Error("identical static pages must not be treated as divergent (data exfiltration)")
+	}
+
+	// Genuine exfiltration: clean has no records, the payload returns a record list.
+	clean := `{"items":[]}`
+	leaked := `{"items":[` + strings.TrimSuffix(strings.Repeat(`{"user":"x","email":"y"},`, 50), ",") + `]}`
+	if !responsesDiverge(clean, leaked) {
+		t.Error("an empty result set vs a populated one should diverge")
+	}
+
+	// Empty bodies cannot establish divergence.
+	if responsesDiverge("", page) || responsesDiverge(page, "") {
+		t.Error("empty body must not count as divergent")
+	}
+}
+
 func TestGetPayloadsForType(t *testing.T) {
 	jsonPayloads := getPayloadsForType(httpmsg.INS_PARAM_JSON)
 	if len(jsonPayloads) == 0 {

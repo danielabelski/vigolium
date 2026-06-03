@@ -33,6 +33,13 @@ const (
 	sizeIncreasePercent         = 50  // percent body size increase to consider data exfiltration
 	sizeIncreaseMinBytes        = 200 // minimum absolute increase in bytes
 
+	// sizeDivergeMax is the maximum normalized clean-vs-payload similarity that
+	// can still count as exfiltrated data. At or above it the larger payload
+	// response is structurally the SAME content as the clean response (a static
+	// page that merely measured bigger — e.g. an SSO login page, or a gzip /
+	// capture-encoding asymmetry), not new data pulled by the operator.
+	sizeDivergeMax = 0.95
+
 	// Boolean-diff thresholds. Detection compares the always-true vs always-false
 	// response, but only after establishing the endpoint's intrinsic per-request
 	// variance via a stability re-probe (the always-true payload sent twice).
@@ -176,6 +183,23 @@ func analyzeSizeIncrease(baselineLen, probeLen int) bool {
 	}
 	percentIncrease := (float64(increase) / float64(baselineLen)) * 100
 	return percentIncrease >= sizeIncreasePercent
+}
+
+// responsesDiverge reports whether the payload body is structurally DIFFERENT
+// from a fresh clean body, after stripping per-request noise (rotating tokens,
+// timestamps, whitespace). A page that renders identically regardless of the
+// injected operator — e.g. a static SSO login page — normalizes to near-identical
+// text and is rejected, so a body that merely measured larger (gzip / capture
+// encoding asymmetry, transient truncation) is not mistaken for exfiltrated data.
+// Genuine exfiltration appends records the clean response does not contain, so it
+// diverges well below the threshold.
+func responsesDiverge(cleanBody, probeBody string) bool {
+	nc := normalizeResponse(cleanBody)
+	np := normalizeResponse(probeBody)
+	if nc == "" || np == "" {
+		return false
+	}
+	return diceSimilarity(nc, np) < sizeDivergeMax
 }
 
 // analyzeTimeDelay checks if response time is significantly slower than baseline.

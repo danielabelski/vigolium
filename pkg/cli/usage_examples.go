@@ -127,6 +127,8 @@ var scanExamples = FormatExamples(
 	"vigolium scan -S -T targets.txt --format jsonl -o unify-output",
 	"# Stateless multi-target: one output file per host (unify-output-<host>.jsonl)",
 	"vigolium scan -S -T targets.txt --format jsonl -o unify-output --split-by-host",
+	"# Stateless multi-target: scan 4 hosts at once (each keeps its own --concurrency)",
+	"vigolium scan -S -T targets.txt --format jsonl,html -o scan-out --split-by-host -P 4",
 	"",
 	"# Scope all operations to a project",
 	"vigolium scan -t https://example.com --project-name my-project",

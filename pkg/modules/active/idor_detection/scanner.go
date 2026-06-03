@@ -143,6 +143,11 @@ type baselineSummary struct {
 	StatusCode int
 	BodyLength int
 	Summary    *authzutil.ResponseSummary
+	// Request/Response are the captured original-id baseline pair, attached to
+	// the finding's AdditionalEvidence at emit time. May be empty when the
+	// baseline came from a source without a raw response.
+	Request  string
+	Response string
 }
 
 // getBaseline obtains a baseline response to compare against probes.
@@ -164,6 +169,8 @@ func (m *Module) getBaseline(
 			StatusCode: resp.StatusCode(),
 			BodyLength: len(body),
 			Summary:    summary,
+			Request:    string(ctx.Request().Raw()),
+			Response:   string(resp.Raw()),
 		}, nil
 	}
 
@@ -186,6 +193,8 @@ func (m *Module) getBaseline(
 		StatusCode: entry.StatusCode,
 		BodyLength: entry.BodyLen,
 		Summary:    summary,
+		Request:    string(ctx.Request().Raw()),
+		Response:   string(entry.Response.Raw()),
 	}, nil
 }
 
@@ -270,6 +279,12 @@ func (m *Module) probeNeighbor(
 		return nil, nil
 	}
 
+	// Collect the supporting request/response pairs for this candidate finding:
+	// the original-id baseline plus the same-id determinism refetches (added by
+	// ConfirmCrossIDDifferential via the Evidence field below).
+	ev := modkit.NewEvidenceCollector()
+	ev.Add("original-id", baseline.Request, baseline.Response)
+
 	// Determinism gate: re-issue the ORIGINAL id a couple of times to measure how
 	// much this endpoint varies its response for an UNCHANGED id. Analytics /
 	// tracking endpoints (randomized JS beacons, ad rotators) return different
@@ -284,7 +299,7 @@ func (m *Module) probeNeighbor(
 		string(baseline.Summary.Body),
 		baseline.StatusCode,
 		string(probeBody),
-		modkit.CrossIDConfig{},
+		modkit.CrossIDConfig{Evidence: ev},
 	)
 	if idVerdict.Ran && !idVerdict.Trustworthy {
 		return nil, nil
@@ -310,10 +325,11 @@ func (m *Module) probeNeighbor(
 		ModuleID:         ModuleID,
 		Host:             host,
 		URL:              urlStr,
-		Matched:          urlStr,
-		Request:          probeRequest,
-		Response:         probeResponse,
-		FuzzingParameter: ip.Name(),
+		Matched:            urlStr,
+		Request:            probeRequest,
+		Response:           probeResponse,
+		FuzzingParameter:   ip.Name(),
+		AdditionalEvidence: ev.Entries(),
 		ExtractedResults: []string{
 			fmt.Sprintf("%s=%s → %s", ip.Name(), ip.BaseValue(), neighborID),
 		},

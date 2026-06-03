@@ -51,7 +51,7 @@ type ResultEvent struct {
 	// Request/Response data
 	Request            string   `json:"request,omitempty"`
 	Response           string   `json:"response,omitempty"`
-	AdditionalEvidence []string `json:"additional-evidence,omitempty"`
+	AdditionalEvidence []string `json:"additional_evidence,omitempty"`
 
 	// Metadata
 	Metadata  map[string]interface{} `json:"meta,omitempty"`
@@ -69,6 +69,29 @@ type ResultEvent struct {
 	ModuleType    string `json:"-"`
 	FindingSource string `json:"-"`
 	ModuleShort   string `json:"-"`
+}
+
+// EvidenceSeparator delimits the request and response halves of a single
+// evidence entry. The primary Request/Response pair and every AdditionalEvidence
+// entry share this format. This is the single source of truth for the delimiter;
+// the storage layer's dedup/merge path references it (see pkg/database) so stored
+// evidence stays splittable the same way modules emit it.
+const EvidenceSeparator = "\n---------\n"
+
+// BuildEvidence renders one request/response pair into a single AdditionalEvidence
+// entry. When label is non-empty it is prefixed as a "# [label]" marker line so a
+// reviewer — and the UI's evidence tabs — can tell a baseline pair from an attack
+// pair from a confirmation round. Returns "" when both halves are empty (so an
+// empty pair is never recorded).
+func BuildEvidence(label, request, response string) string {
+	if request == "" && response == "" {
+		return ""
+	}
+	body := request + EvidenceSeparator + response
+	if label == "" {
+		return body
+	}
+	return "# [" + label + "]\n" + body
 }
 
 // sha1Pool recycles SHA-1 hashers to avoid allocating one per ResultEvent.ID() call.

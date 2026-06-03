@@ -26,6 +26,9 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/cloud_storage_listing"
 	"github.com/vigolium/vigolium/pkg/modules/active/cms_installer_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/code_exec"
+	"github.com/vigolium/vigolium/pkg/modules/active/command_injection_echo"
+	"github.com/vigolium/vigolium/pkg/modules/active/command_injection_oast"
+	"github.com/vigolium/vigolium/pkg/modules/active/command_injection_timing"
 	"github.com/vigolium/vigolium/pkg/modules/active/common_directory_listing"
 	"github.com/vigolium/vigolium/pkg/modules/active/cors_misconfiguration"
 	"github.com/vigolium/vigolium/pkg/modules/active/cpdos"
@@ -189,6 +192,9 @@ func registerActiveModules(r *Registry) {
 	r.RegisterActive(crlf_injection.New())
 	r.RegisterActive(response_header_injection.New())
 	r.RegisterActive(code_exec.New())
+	r.RegisterActive(command_injection_echo.New())
+	r.RegisterActive(command_injection_oast.New())
+	r.RegisterActive(command_injection_timing.New())
 	r.RegisterActive(input_behavior_probe.New())
 	r.RegisterActive(xxe_generic.New())
 	r.RegisterActive(insecure_deserialization.New())
