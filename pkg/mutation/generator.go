@@ -446,6 +446,10 @@ func generateDate(value string, opts *GenerateOptions) []Mutation {
 	}
 
 	if opts.hasIntent(IntentBoundary) {
+		// Impossible-but-well-formed calendar dates derived from the input.
+		// These probe lenient date parsers/validators that accept out-of-range
+		// day or month values. Listed first so they survive MaxPerIntent capping.
+		mutations = append(mutations, invalidDateMutations(value)...)
 		mutations = append(mutations,
 			Mutation{Value: "1970-01-01", Intent: IntentBoundary, Label: "epoch date"},
 			Mutation{Value: "2099-12-31", Intent: IntentBoundary, Label: "far future"},
@@ -524,6 +528,31 @@ func daysInMonth(year, month int) int {
 		return 28
 	}
 	return 30
+}
+
+// invalidDateMutations derives impossible-but-well-formed calendar dates from an
+// ISO YYYY-MM-DD value: a day one past the real end of the month (e.g. 2026-04-31,
+// 2026-02-29 in a non-leap year) and an out-of-range month (month 13). These
+// exercise lenient date parsers without randomizing daysInMonth — the output is
+// deterministic and explicitly labeled, so findings stay reproducible.
+func invalidDateMutations(value string) []Mutation {
+	if len(value) < 10 {
+		return nil
+	}
+	parts := strings.Split(value[:10], "-")
+	if len(parts) != 3 {
+		return nil
+	}
+	year, errY := strconv.Atoi(parts[0])
+	month, errM := strconv.Atoi(parts[1])
+	day, errD := strconv.Atoi(parts[2])
+	if errY != nil || errM != nil || errD != nil || month < 1 || month > 12 {
+		return nil
+	}
+	return []Mutation{
+		{Value: fmt.Sprintf("%04d-%02d-%02d", year, month, daysInMonth(year, month)+1), Intent: IntentBoundary, Label: "impossible day of month"},
+		{Value: fmt.Sprintf("%04d-13-%02d", year, day), Intent: IntentBoundary, Label: "invalid month (13)"},
+	}
 }
 
 // --- IPv4 mutations ---

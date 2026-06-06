@@ -92,6 +92,57 @@ func TestGenerate_Date(t *testing.T) {
 	assertContainsValue(t, ms.Mutations, "2026-01-14", "minus 1 day")
 	assertContainsValue(t, ms.Mutations, "2026-01-16", "plus 1 day")
 	assertContainsValue(t, ms.Mutations, "1970-01-01", "epoch date")
+	// Explicit, labeled invalid-date boundary payloads (January has 31 days).
+	assertContainsValue(t, ms.Mutations, "2026-01-32", "impossible day of month")
+	assertContainsValue(t, ms.Mutations, "2026-13-15", "invalid month (13)")
+}
+
+func TestGenerate_Date_InvalidBoundary(t *testing.T) {
+	// The "impossible day" is one past the real end of the month, so it varies
+	// correctly by month and leap year while staying deterministic.
+	cases := []struct{ in, want string }{
+		{"2026-04-10", "2026-04-31"}, // April has 30 days
+		{"2026-02-10", "2026-02-29"}, // Feb 2026, non-leap -> 28 days
+		{"2024-02-10", "2024-02-30"}, // Feb 2024, leap -> 29 days
+	}
+	for _, c := range cases {
+		ms := Generate(c.in, TypeDate, &GenerateOptions{Intents: []MutationIntent{IntentBoundary}})
+		assertContainsValue(t, ms.Mutations, c.want, "impossible day of month")
+	}
+}
+
+func TestGenerate_Date_Deterministic(t *testing.T) {
+	// Mutation output must be reproducible across runs (no randomness).
+	first := Generate("2026-04-10", TypeDate, nil)
+	for i := 0; i < 25; i++ {
+		next := Generate("2026-04-10", TypeDate, nil)
+		if len(first.Mutations) != len(next.Mutations) {
+			t.Fatalf("non-deterministic mutation count: %d vs %d", len(first.Mutations), len(next.Mutations))
+		}
+		for j := range first.Mutations {
+			if first.Mutations[j] != next.Mutations[j] {
+				t.Fatalf("non-deterministic mutation at %d: %+v vs %+v", j, first.Mutations[j], next.Mutations[j])
+			}
+		}
+	}
+}
+
+func TestDaysInMonth(t *testing.T) {
+	// daysInMonth must stay correct — it backs adjustDay's date rollover.
+	cases := []struct {
+		year, month, want int
+	}{
+		{2026, 1, 31}, {2026, 4, 30}, {2026, 6, 30}, {2026, 9, 30}, {2026, 11, 30},
+		{2026, 2, 28}, // non-leap
+		{2024, 2, 29}, // leap
+		{2000, 2, 29}, // divisible by 400
+		{1900, 2, 28}, // divisible by 100 but not 400
+	}
+	for _, c := range cases {
+		if got := daysInMonth(c.year, c.month); got != c.want {
+			t.Errorf("daysInMonth(%d, %d) = %d, want %d", c.year, c.month, got, c.want)
+		}
+	}
 }
 
 func TestGenerate_IPv4(t *testing.T) {
