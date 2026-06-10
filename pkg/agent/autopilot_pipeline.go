@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -219,6 +220,53 @@ func (r *AutopilotPipelineRunner) RunAutonomous(ctx context.Context, cfg Autopil
 		result.Warnings = append(result.Warnings, fmt.Sprintf("audit failed to start, continuing without source audit context: %v", auditErr))
 		auditStatus = "failed_to_start"
 	}
+	// Launch auth preparation and pre-flight discovery concurrently with the
+	// background audit. Neither consumes audit output, and the audit is the
+	// longest single step (often 10-60 min), so overlapping these two takes
+	// their latency off the critical path entirely. Both are joined before the
+	// frozen context bundle is assembled (it reads cfg.PreparedAuth) and well
+	// before the operator launches (it reads the probe-seeded attack surface).
+	//
+	// Race safety: prepareAutopilotAuth mutates cfg (Instruction,
+	// CredentialSets, AuthRequired, AuthHeaders, SessionConfig, PreparedAuth).
+	// The audit-wait block below only reads disjoint cfg fields (SessionDir,
+	// AuditHarness, the UUIDs, ProgressCallback), so there is no write/read
+	// overlap on any field before prepWG.Wait(). The probe goroutine reads
+	// only the CoverageProbe it was handed and never touches cfg.
+	var prepWG sync.WaitGroup
+	var preparedAuth *AutopilotPreparedAuth
+	var authWarnings []string
+	prepWG.Add(1)
+	go func() {
+		defer prepWG.Done()
+		preparedAuth, authWarnings = r.prepareAutopilotAuth(ctx, &cfg)
+	}()
+
+	// Pre-flight discovery + Swagger/OpenAPI ingestion. Populates the project
+	// DB so the agent's first turn inherits real attack surface. Skipped
+	// silently when no target is set (whitebox-only audit) or when the
+	// operator opted out. Errors here are non-fatal: a probe failure just
+	// means the agent starts blank, which is the legacy behavior.
+	runProbe := cfg.PreflightDiscovery && cfg.TargetURL != "" && r.repo != nil
+	var probeRes *CoverageProbeResult
+	var probeErr error
+	if runProbe {
+		probe := &CoverageProbe{
+			Target:          cfg.TargetURL,
+			ProjectUUID:     cfg.ProjectUUID,
+			AgenticScanUUID: cfg.ParentAgenticScanUUID,
+			Repo:            r.repo,
+		}
+		printPhaseLine(agenttypes.AutopilotPhaseAutopilot, "running pre-flight discovery + Swagger probe (concurrent with audit)")
+		emitProgress(&cfg, "preflight", "running pre-flight discovery + Swagger probe")
+		prepWG.Add(1)
+		go func() {
+			defer prepWG.Done()
+			probeRes, probeErr = probe.Run(ctx)
+		}()
+	}
+
+	// Wait for the audit (already running in the background) and freeze its findings.
 	if auditRunner != nil {
 		auditStatus = "completed"
 		auditLogFn("running audit before operator startup")
@@ -247,7 +295,8 @@ func (r *AutopilotPipelineRunner) RunAutonomous(ctx context.Context, cfg Autopil
 		}
 	}
 
-	preparedAuth, authWarnings := r.prepareAutopilotAuth(ctx, &cfg)
+	// Join the concurrent auth + discovery work before assembling context.
+	prepWG.Wait()
 	if preparedAuth != nil {
 		cfg.PreparedAuth = preparedAuth
 	}
@@ -269,24 +318,15 @@ func (r *AutopilotPipelineRunner) RunAutonomous(ctx context.Context, cfg Autopil
 	result.BrowserDecision = bundle.BrowserDecision
 	writePreparedAuthArtifacts(spec, bundle, plan, cfg.PreparedAuth, cfg.AuthHeaders, cfg.SessionConfig)
 
-	// Pre-flight discovery + Swagger/OpenAPI ingestion. Populates the project
-	// DB so the agent's first turn inherits real attack surface. Skipped
-	// silently when no target is set (whitebox-only audit) or when the
-	// operator opted out. Errors here are non-fatal: a probe failure just
-	// means the agent starts blank, which is the legacy behavior.
-	if cfg.PreflightDiscovery && cfg.TargetURL != "" && r.repo != nil {
-		probe := &CoverageProbe{
-			Target:          cfg.TargetURL,
-			ProjectUUID:     cfg.ProjectUUID,
-			AgenticScanUUID: cfg.ParentAgenticScanUUID,
-			Repo:            r.repo,
-		}
-		printPhaseLine(agenttypes.AutopilotPhaseAutopilot, "running pre-flight discovery + Swagger probe")
-		emitProgress(&cfg, "preflight", "running pre-flight discovery + Swagger probe")
-		if probeRes, perr := probe.Run(ctx); perr != nil {
+	// Report the pre-flight discovery outcome. The probe ran concurrently with
+	// the audit above; its warnings are surfaced here (after the bundle is
+	// built) to preserve the warning set the bundle captured. The seeded
+	// surface is already in the project DB for the operator's first turn.
+	if runProbe {
+		if probeErr != nil {
 			zap.L().Warn("pre-flight coverage probe failed (continuing without seeded surface)",
-				zap.Error(perr))
-			result.Warnings = append(result.Warnings, "pre-flight discovery failed: "+perr.Error())
+				zap.Error(probeErr))
+			result.Warnings = append(result.Warnings, "pre-flight discovery failed: "+probeErr.Error())
 		} else if probeRes != nil {
 			printPhaseLine(agenttypes.AutopilotPhaseAutopilot,
 				fmt.Sprintf("pre-flight: %d route(s) discovered, %d new since baseline",

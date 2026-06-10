@@ -49,6 +49,7 @@ func (s *SwarmRunner) runTriageLoop(ctx context.Context, cfg SwarmConfig, agenti
 		Verbose:                   cfg.Verbose,
 		MaxRounds:                 cfg.MaxIterations,
 		MaxFindingsPerTriageBatch: 25,
+		BatchConcurrency:          cfg.BatchConcurrency,
 		ResumeFromRound:           triageResumeRound,
 		ProgressCallback:          cfg.ProgressCallback,
 		ScanFunc:                  cfg.ScanFunc,
