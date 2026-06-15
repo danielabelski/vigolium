@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.32-beta] - 2026-06-15
+
+### Changed
+
+- **`balanced` intensity now runs the `intrusive` tier** — `balanced` resolves to the `intrusive` ceiling instead of `heavy`, so the default scan runs the full module battery (including `internal-header-probe`). The aggressiveness-tier gate now only trims modules on a `quick`/`lite` pass; `balanced` and `deep` share the same tier ceiling (`deep` still differs via its other deep-only behaviors). `internal/runner/module_tiers.go`.
+
 ## [v0.1.31-beta] - 2026-06-13
 
 A reachability-and-recon release: an alternate-port sweep that finds web services running off the standard ports, TLS-certificate recon that mines self-signed and private-CA certs for subdomains and internal names, and default-credential checks that try documented vendor defaults against confirmed third-party consoles. It also makes the native scan intensity-aware — modules now run up to an aggressiveness tier set by `--intensity`, passive analyzers skip responses of the wrong body shape, and value-only-different GET URLs collapse to a few representative samples.

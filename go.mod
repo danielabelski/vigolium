@@ -68,6 +68,7 @@ require (
 	github.com/uptrace/bun/driver/pgdriver v1.2.18
 	github.com/uptrace/bun/driver/sqliteshim v1.2.18
 	github.com/vmihailenco/msgpack/v5 v5.4.1
+	github.com/ysmood/gson v0.7.3
 	github.com/yuin/goldmark v1.8.2
 	go.uber.org/goleak v1.3.0
 	go.uber.org/zap v1.28.0
@@ -90,7 +91,6 @@ require (
 	github.com/ysmood/fetchup v0.2.3 // indirect
 	github.com/ysmood/goob v0.4.0 // indirect
 	github.com/ysmood/got v0.40.0 // indirect
-	github.com/ysmood/gson v0.7.3 // indirect
 	github.com/ysmood/leakless v0.9.0 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect

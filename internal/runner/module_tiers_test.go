@@ -8,15 +8,15 @@ import (
 
 func TestIntensityTierCeiling(t *testing.T) {
 	cases := map[string]int{
-		"":         modules.TierRankHeavy, // default
-		"balanced": modules.TierRankHeavy,
-		"standard": modules.TierRankHeavy,
+		"":         modules.TierRankIntrusive, // default (balanced)
+		"balanced": modules.TierRankIntrusive,
+		"standard": modules.TierRankIntrusive,
 		"quick":    modules.TierRankModerate,
 		"lite":     modules.TierRankModerate,
 		"deep":     modules.TierRankIntrusive,
 		"full":     modules.TierRankIntrusive,
 		"DEEP":     modules.TierRankIntrusive,
-		"unknown":  modules.TierRankHeavy, // unknown falls back to balanced
+		"unknown":  modules.TierRankIntrusive, // unknown falls back to balanced
 	}
 	for in, want := range cases {
 		if got := intensityTierCeiling(in); got != want {
@@ -61,17 +61,18 @@ func TestFilterActiveModulesByTier(t *testing.T) {
 		t.Errorf("quick ceiling = %v, want %v", got, want)
 	}
 
-	// balanced ceiling = heavy: drops only intrusive.
+	// heavy ceiling: drops only intrusive (no intensity maps here anymore, but
+	// the filter must still honor an explicit heavy ceiling correctly).
 	got = ids(r.filterActiveModulesByTier(mods, modules.TierRankHeavy))
 	want = []string{"untagged", "light", "moderate", "heavy"}
 	if !equalStrings(got, want) {
-		t.Errorf("balanced ceiling = %v, want %v", got, want)
+		t.Errorf("heavy ceiling = %v, want %v", got, want)
 	}
 
-	// deep ceiling = intrusive: keeps everything.
+	// balanced/deep ceiling = intrusive: keeps everything.
 	got = ids(r.filterActiveModulesByTier(mods, modules.TierRankIntrusive))
 	if len(got) != len(mods) {
-		t.Errorf("deep ceiling dropped modules: %v", got)
+		t.Errorf("intrusive ceiling dropped modules: %v", got)
 	}
 }
 

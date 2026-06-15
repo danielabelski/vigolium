@@ -11,23 +11,23 @@ import (
 // tier rank that runs. A module runs when its tier rank is <= the ceiling;
 // untagged modules (modules.TierAlwaysOn == 0) always run.
 //
-//	quick    -> moderate  drops the heavy blind/timing probes and the rare
+//	quick    -> moderate   drops the heavy blind/timing probes and the rare
 //	                       intrusive checks for a fast pass
-//	balanced -> heavy      keeps the full active battery, drops only intrusive
-//	                       (this is the default and mirrors legacy coverage)
+//	balanced -> intrusive  runs the full battery including the intrusive checks
+//	                       (this is the default; the tier gate only trims at quick)
 //	deep     -> intrusive  runs everything
 //
 // Profile-name aliases ("lite"/"standard"/"full") and the empty string (which
 // defaults to balanced) are accepted so the ceiling is robust to either the
-// raw --intensity value or a resolved profile name.
+// raw --intensity value or a resolved profile name. balanced and deep share the
+// intrusive ceiling — deep still differs via its other deep-only behaviors
+// (scope expansion, full dashboard sweep, ScanContext.DeepScan), not the tier gate.
 func intensityTierCeiling(intensity string) int {
 	switch strings.ToLower(strings.TrimSpace(intensity)) {
 	case "quick", "lite":
 		return modules.TierRankModerate
-	case "deep", "full":
+	default: // "", "balanced", "standard", "deep", "full"
 		return modules.TierRankIntrusive
-	default: // "", "balanced", "standard"
-		return modules.TierRankHeavy
 	}
 }
 
