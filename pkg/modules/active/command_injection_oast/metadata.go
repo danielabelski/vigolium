@@ -9,11 +9,11 @@ const (
 )
 
 var (
-	ModuleDesc = `**What it means:** The application passes attacker-controlled input into an OS shell command. This blind variant returns no output, so it is confirmed out-of-band: an injected command makes the server contact a unique OAST domain only the scanner could have planted.
+	ModuleDesc = `**What it means:** The application passes attacker-controlled input into an OS shell command. This blind variant returns no output, so it is confirmed out-of-band: an injected command makes the server contact a unique OAST domain the scanner planted.
 
-**How it's exploited:** An attacker appends shell commands like nslookup or curl to a parameter or header (User-Agent, X-Forwarded-For) fed into a shell. The callback proves execution, enabling file reads, pivoting, or host takeover. DNS is High, an HTTP fetch Critical.
+**How it's exploited:** An attacker appends shell commands (nslookup, curl) to a parameter or header fed into a shell. An HTTP-fetch callback proves execution (Critical); a DNS-only callback is downgraded on client-IP/forwarding headers (X-Forwarded-For, X-Real-IP), since edge infrastructure resolves those for geo-IP with no shell running.
 
-**Fix:** Never pass user input into shell commands; use parameterized library calls and allowlist unavoidable arguments.`
+**Fix:** Never pass user input to shell commands; use parameterized library calls and allowlist unavoidable arguments.`
 
 	ModuleConfirmation = "Confirmed when an injected command causes the target to resolve or fetch a unique, correlated OAST subdomain"
 	ModuleSeverity     = severity.Critical

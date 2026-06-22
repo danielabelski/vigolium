@@ -10,6 +10,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/active/open_redirect"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
@@ -199,7 +200,7 @@ func (m *Module) testRedirectURIManipulation(
 		location := resp.Response().Header.Get("Location")
 
 		if statusCode == 302 || statusCode == 301 || statusCode == 303 || statusCode == 307 {
-			if strings.Contains(location, "evil.example.com") {
+			if redirectsToHost(location, "evil.example.com") {
 				// Strict drop-on-fail: confirm the server redirects to an
 				// ATTACKER-CHOSEN host, not a coincidental/hardcoded string. A fresh
 				// random domain (via the same technique) must appear in Location every
@@ -388,9 +389,26 @@ func (m *Module) confirmRedirectReflection(
 		}
 		st := resp.Response().StatusCode
 		loc := resp.Response().Header.Get("Location")
-		return st >= 300 && st < 400 && strings.Contains(loc, freshHost), nil
+		return st >= 300 && st < 400 && redirectsToHost(loc, freshHost), nil
 	})
 	return err != nil || confirmed
+}
+
+// redirectsToHost reports whether a redirect target (Location value) actually
+// points AT host — i.e. host is the AUTHORITY of the redirect, covering the
+// https://, //, /\, and userinfo-prefixed forms via the shared open-redirect
+// matcher. It deliberately rejects a host that merely appears inside another
+// URL's query parameter (a redirect_uri=/continue= echo whose real destination is
+// the trusted IdP): that is the recurring OAuth-login false positive where the
+// endpoint reflects the manipulated redirect_uri back into the Location but still
+// 302s to the SSO, not to the attacker. A bare strings.Contains matched that echo
+// (and a fresh canary echoes identically, so even the confirmation passed);
+// requiring authority position is the fix.
+func redirectsToHost(location, host string) bool {
+	if location == "" || host == "" {
+		return false
+	}
+	return open_redirect.DomainRedirectRegex(host).MatchString(location)
 }
 
 // responseTypeRejectsInvalid reports whether the endpoint REJECTS an obviously

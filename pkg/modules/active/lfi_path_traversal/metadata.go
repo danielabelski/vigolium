@@ -15,7 +15,7 @@ var (
 
 **Fix:** Never pass user input into filesystem paths; use a fixed allow-list, reject traversal and absolute paths, and confirm the resolved path stays inside the base directory.`
 
-	ModuleConfirmation = "Confirmed when multiple file content markers appear in the response after injecting path traversal payloads and are absent from the baseline response"
+	ModuleConfirmation = "Confirmed when a served (non-blocked, 2xx/3xx) response carries the targeted file's real structural content — a passwd account line, a bracketed win.ini section, an anchored nginx/apache directive — that is absent from the baseline. WAF/CDN block pages, challenge interstitials, and 4xx/5xx errors are rejected before matching."
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
 	ModuleTags         = []string{"lfi", "injection", "heavy"}

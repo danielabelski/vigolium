@@ -53,6 +53,10 @@ func (m *MockOASTProvider) GenerateURL(targetURL, paramName, injectionType, modu
 	return callbackURL
 }
 
+// RecordPayload is a no-op for the mock provider (the benchmark harness asserts
+// on the probes recorded by GenerateURL, not on reconstructed payloads).
+func (m *MockOASTProvider) RecordPayload(_, _ string) {}
+
 // Enabled returns true — the mock provider is always enabled.
 func (m *MockOASTProvider) Enabled() bool {
 	return true

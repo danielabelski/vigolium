@@ -11,6 +11,7 @@ import (
 
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 // TestScanPerRequest_DetectsActuatorEnv drives the real scan method against a
@@ -38,6 +39,10 @@ func TestScanPerRequest_DetectsActuatorEnv(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "expected an actuator finding when /env returns server.port JSON")
+	// /env is a high-value endpoint: the module leaves Severity Undefined so the
+	// executor fills in the module's High default. It must NOT be downgraded.
+	assert.Equal(t, severity.Undefined, res[0].Info.Severity,
+		"/env must defer to the module's High default, not be lowered to Low")
 }
 
 // TestScanPerRequest_DetectsActuatorEnvViaPathBypass models a Spring Boot app
@@ -71,6 +76,31 @@ func TestScanPerRequest_DetectsActuatorEnvViaPathBypass(t *testing.T) {
 	assert.Contains(t, res[0].Info.Tags, "acl-bypass")
 	assert.Contains(t, strings.Join(res[0].ExtractedResults, ","), "/actuator/env",
 		"the finding must record the bypass path used")
+}
+
+// TestScanPerRequest_InfoReportedLow confirms an exposed /info actuator (build &
+// git metadata) is detected but downgraded to Low, like /health.
+func TestScanPerRequest_InfoReportedLow(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/info") {
+			w.Header().Set("Content-Type", "application/vnd.spring-boot.actuator.v3+json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"build":{"artifact":"demo","version":"1.0.0","group":"com.example"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/api/v1/users")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "an exposed /info actuator returning build metadata must be detected")
+	assert.Equal(t, severity.Low, res[0].Info.Severity,
+		"an exposed /info actuator must be downgraded to Low")
 }
 
 // TestScanPerRequest_NoFalsePositive ensures a host that 404s every actuator
@@ -169,4 +199,8 @@ func TestScanPerRequest_RealHealthAtSinglePath(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "a real /health actuator returning a status body must still be detected")
+	// /health is public-by-default and low-disclosure: it must be reported at Low,
+	// not the module's High default.
+	assert.Equal(t, severity.Low, res[0].Info.Severity,
+		"an exposed /health actuator must be downgraded to Low")
 }

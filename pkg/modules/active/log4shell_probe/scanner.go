@@ -97,6 +97,9 @@ func (m *Module) ScanPerRequest(
 			}
 
 			payload := fmt.Sprintf(tmpl, oastURL)
+			// Record the real JNDI payload so the finding reconstructs the header
+			// with "${jndi:...}" rather than a bare http://<host>.
+			oast.RecordPayload(oastURL, payload)
 
 			modifiedRaw, err := httpmsg.AddOrReplaceHeader(ctx.Request().Raw(), header, payload)
 			if err != nil {
@@ -159,6 +162,7 @@ func (m *Module) ScanPerInsertionPoint(
 		}
 
 		payload := fmt.Sprintf(tmpl, oastURL)
+		oast.RecordPayload(oastURL, payload)
 		fuzzedRaw := ip.BuildRequest([]byte(payload))
 
 		// BuildRequest produces well-formed raw, so wrap directly instead

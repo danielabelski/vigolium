@@ -2,20 +2,19 @@ package lfi_path_traversal
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/vigolium/vigolium/pkg/core/hosterrors"
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
-const minBodyDelta = 50  // minimum body length increase to consider a hit
-const minMarkerCount = 2 // minimum markers that must match
+const minBodyDelta = 50 // minimum body length increase to consider a hit
 
 // Module implements the LFI Path Traversal active scanner.
 type Module struct {
@@ -99,7 +98,10 @@ func (m *Module) ScanPerInsertionPoint(
 		}
 	}
 
-	// Tier 2: only if tier 1 caused status code change (traversal may work, different file needed)
+	// Tier 2: only if tier 1 caused a *served* (non-blocked, <400) status change,
+	// which hints traversal alters handling so a different file may be reachable.
+	// A WAF block does not set statusChanged, so we never escalate against an edge
+	// that is already blocking the payloads.
 	if statusChanged {
 		for _, p := range tier2CanaryFiles {
 			result, _, err := m.testPayload(ctx, ip, httpClient, p, baselineBody, baselineLen, baselineStatus)
@@ -141,12 +143,29 @@ func (m *Module) testPayload(
 	}
 	defer resp.Close()
 
-	body := resp.Body().String()
 	respStatus := 0
 	if resp.Response() != nil {
 		respStatus = resp.Response().StatusCode
 	}
 
+	// Reject the response before mining it for file content when it is a WAF/CDN
+	// block, an interstitial challenge, an auth gate, a rate limit, or any
+	// 4xx/5xx. A successful file include returns the file body with a 2xx/3xx
+	// status; a rejected payload's body — a Cloudflare "Blocked Content" page, a
+	// 404 shell, a stack trace — is the server (or its edge) talking, not leaked
+	// file content, even when it happens to carry file-shaped tokens. This kills
+	// the motivating false positive: a 403 Cloudflare block page whose cf-beacon
+	// JSON ("server_timing"/"location_startswith") satisfied the old bare
+	// "server"/"location" nginx.conf markers.
+	//
+	// A block also does not count as a "status change" for tier-2 escalation —
+	// the WAF catching the payload is not evidence traversal works — so we return
+	// statusChanged=false and avoid hammering an edge that is already blocking.
+	if infra.IsBlockedResponse(resp) || respStatus >= 400 {
+		return nil, false, nil
+	}
+
+	body := resp.Body().String()
 	statusChanged := respStatus != baselineStatus && baselineStatus != 0
 
 	// Body length delta check
@@ -154,15 +173,16 @@ func (m *Module) testPayload(
 		return nil, statusChanged, nil
 	}
 
-	// Marker matching with baseline subtraction
-	matchCount := countNewMarkers(body, baselineBody, p.markers)
-	if matchCount < minMarkerCount {
+	// Structural confirmation with baseline subtraction: the targeted file's real
+	// content shape must appear and must be absent from the baseline.
+	ok, score := p.confirm(body, baselineBody)
+	if !ok {
 		return nil, statusChanged, nil
 	}
 
 	urlx, _ := ctx.URL()
 	conf := severity.Firm
-	if matchCount >= 3 {
+	if score >= 3 {
 		conf = severity.Certain
 	}
 
@@ -175,21 +195,10 @@ func (m *Module) testPayload(
 		ExtractedResults: []string{p.payload},
 		Info: output.Info{
 			Name:        "LFI Path Traversal",
-			Description: fmt.Sprintf("Local file inclusion detected via parameter %q with payload: %s (%d markers matched)", ip.Name(), p.payload, matchCount),
+			Description: fmt.Sprintf("Local file inclusion detected via parameter %q with payload: %s (%d distinct file-content markers confirmed)", ip.Name(), p.payload, score),
 			Severity:    severity.High,
 			Confidence:  conf,
 			Reference:   []string{"https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.1-Testing_for_Local_File_Inclusion"},
 		},
 	}, statusChanged, nil
-}
-
-// countNewMarkers counts how many markers are present in data but absent from baseline.
-func countNewMarkers(data, baseline string, markers []string) int {
-	count := 0
-	for _, marker := range markers {
-		if strings.Contains(data, marker) && !strings.Contains(baseline, marker) {
-			count++
-		}
-	}
-	return count
 }

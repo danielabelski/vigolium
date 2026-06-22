@@ -42,6 +42,17 @@ var suspiciousHeaderNames = []string{
 	"hmac", "private", "session", "credential",
 }
 
+// lowSignalHeaderNames are redirect / auth-challenge response headers. A
+// token-shaped value here — a JWT embedded in a Location redirect URL, a
+// Cloudflare-Access challenge in Www-Authenticate — is a login-flow navigation
+// artifact emitted by the framework or edge, far more often than the
+// application deliberately leaking a secret in a custom header. We still report
+// it (it can occasionally be real), but downgraded to informational/tentative.
+var lowSignalHeaderNames = map[string]struct{}{
+	"location": {}, "content-location": {}, "refresh": {},
+	"www-authenticate": {}, "proxy-authenticate": {},
+}
+
 // safeHeaderNames are common response headers we never want to flag (they
 // often contain high-entropy looking values that aren't secrets).
 var safeHeaderNames = map[string]struct{}{
@@ -107,6 +118,10 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	}
 
 	var hits []string
+	// allLowSignal stays true only while every hit comes from a redirect /
+	// auth-challenge header — a single hit in a genuine custom header (e.g.
+	// X-Api-Key) flips it false and keeps the finding at full severity.
+	allLowSignal := true
 	for _, h := range ctx.Response().Headers() {
 		nameLower := strings.ToLower(h.Name)
 		if _, ok := safeHeaderNames[nameLower]; ok {
@@ -118,10 +133,25 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		}
 		if reason := analyseHeader(nameLower, value); reason != "" {
 			hits = append(hits, fmt.Sprintf("%s: %s -> %s", h.Name, truncate(value, 80), reason))
+			if _, low := lowSignalHeaderNames[nameLower]; !low {
+				allLowSignal = false
+			}
 		}
 	}
 	if len(hits) == 0 {
 		return nil, nil
+	}
+
+	// A 3xx redirect's headers carry login-flow navigation artifacts — a
+	// Location-embedded SSO token, a Www-Authenticate challenge — and so do
+	// redirect/auth-challenge headers on any status. In either case the value is
+	// very likely not an application secret, so downgrade to informational /
+	// tentative rather than reporting a Medium/Firm leak.
+	sev, conf := severity.Medium, severity.Firm
+	desc := fmt.Sprintf("Response from %s discloses %d sensitive value(s) in custom response headers.", urlx.String(), len(hits))
+	if isRedirectStatus(ctx.Response().StatusCode()) || allLowSignal {
+		sev, conf = severity.Info, severity.Tentative
+		desc = fmt.Sprintf("Response from %s exposes %d token-shaped value(s) in redirect/auth-challenge response headers; these are most likely login-flow navigation artifacts rather than application secrets.", urlx.String(), len(hits))
 	}
 
 	return []*output.ResultEvent{
@@ -133,14 +163,19 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 			MatcherStatus:    true,
 			Info: output.Info{
 				Name:        "Sensitive Data in Response Headers",
-				Description: fmt.Sprintf("Response from %s discloses %d sensitive value(s) in custom response headers.", urlx.String(), len(hits)),
-				Severity:    severity.Medium,
-				Confidence:  severity.Firm,
+				Description: desc,
+				Severity:    sev,
+				Confidence:  conf,
 				Tags:        []string{"info-disclosure", "secrets", "headers"},
 				Reference:   []string{"https://github.com/0xJacky/nginx-ui/security/advisories/GHSA-g9w5-qffc-6762"},
 			},
 		},
 	}, nil
+}
+
+// isRedirectStatus reports whether code is a 3xx redirect.
+func isRedirectStatus(code int) bool {
+	return code >= 300 && code < 400
 }
 
 // analyseHeader returns a non-empty reason string if the header looks

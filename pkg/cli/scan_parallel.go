@@ -268,6 +268,12 @@ func runStatelessTargetsParallel(cmd *cobra.Command, settings *config.Settings, 
 		// one immediately so a --resume after an early Ctrl-C — before any target
 		// finished this run — never reads a completed prefix from a prior batch.
 		manifest = newResumeManifest(manifestPath, scanOpts.Output, scanOpts.OutputFormats, scanOpts.TargetsFilePaths, fingerprint)
+		// Record enough of the originating command for a later bare `vigolium scan
+		// --resume` to relaunch it without the operator re-typing every flag: the
+		// -P degree and the inherited per-child flag set (the per-target -T/-o/-P/
+		// --split-by-host are rebuilt separately by buildResumeRelaunchArgs).
+		manifest.Parallel = scanOpts.Parallel
+		manifest.ScanArgs = childScanArgs(cmd)
 		if err := manifest.save(); err != nil {
 			zap.L().Warn("Failed to initialize resume manifest", zap.String("path", manifestPath), zap.Error(err))
 		}

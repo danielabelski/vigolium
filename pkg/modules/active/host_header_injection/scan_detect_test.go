@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -58,6 +59,37 @@ func TestScanPerRequest_LocationReflectionIsFirm(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "expected a finding when the injected host reflects into Location")
 	assert.Equal(t, severity.Firm, res[0].Info.Confidence, "a Location-header host reflection is Firm")
+}
+
+// TestScanPerRequest_RedirectURIEchoNoFalsePositive reproduces the CDN/OAuth-login
+// false positive: a 302 whose Location targets a fixed, trusted identity provider
+// but echoes the request host into the URL-encoded redirect_uri= query parameter.
+// The injected host appears in the Location header dump (and reflects for a fresh
+// canary), yet never as the redirect authority — the real destination is
+// identical with or without the spoofed header. The authority-position guard must
+// suppress it instead of reporting a Firm Location reflection.
+func TestScanPerRequest_RedirectURIEchoNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Header.Get("X-Forwarded-Host")
+		if host == "" {
+			host = r.Host
+		}
+		// Authority is always the trusted IdP; the request host only lands inside the
+		// URL-encoded redirect_uri= query parameter, never in authority position.
+		loc := "https://idp.trusted.example/as/authorization.oauth2?response_type=code&redirect_uri=" +
+			url.QueryEscape("https://"+host+"/oauth2/callback")
+		w.Header().Set("Location", loc)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/login")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a host echoed only into a redirect_uri= query param (redirect authority unchanged) must not be reported")
 }
 
 // TestScanPerRequest_StaticEvilStringNoFalsePositive reproduces the FP the

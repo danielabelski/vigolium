@@ -10,6 +10,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	mcpinfra "github.com/vigolium/vigolium/pkg/modules/infra/mcp"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/modules/shared/filesig"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
@@ -25,18 +26,20 @@ const (
 	cmdMaxDuration  = 30 * time.Second
 )
 
-var lfiMarkers = []string{"root:x:", ":0:0:", "/bin/", "[fonts]", "[extensions]"}
-
 // payload defines a single fuzz vector targeted at a string argument.
 type payload struct {
-	value         string
-	vulnTag       string // "rce", "lfi", "ssrf", "prompt-injection"
-	name          string // human-readable
-	severity      severity.Severity
-	expectMarkers []string // optional body markers signalling success
-	timed         bool     // if true, use the duration-based detector
-	oast          bool     // if true, value is dynamically replaced with an OAST URL
-	prompt        bool     // if true, look for a reflected sentinel
+	value    string
+	vulnTag  string // "rce", "lfi", "ssrf", "prompt-injection"
+	name     string // human-readable
+	severity severity.Severity
+	// confirm structurally validates an LFI read leaked the targeted file's real
+	// content (see filesig). It replaces the former bare-word marker list
+	// (`root:x:`, `:0:0:`, `/bin/`) that fired on a single substring match — e.g.
+	// a tool whose result merely mentions `/bin/sh` or echoes the payload.
+	confirm filesig.ConfirmFunc
+	timed   bool // if true, use the duration-based detector
+	oast    bool // if true, value is dynamically replaced with an OAST URL
+	prompt  bool // if true, look for a reflected sentinel
 }
 
 type Module struct {
@@ -156,8 +159,10 @@ func (m *Module) ScanPerHost(
 						}
 						continue
 					}
-					if matched := matchMarkers(body, baselineBody, p.expectMarkers); matched > 0 {
-						findings = append(findings, m.makeFinding(urlx.String(), tool.Name, argName, p, fmt.Sprintf("%d marker(s) matched", matched)))
+					if p.confirm != nil {
+						if ok, n := p.confirm(body, baselineBody); ok {
+							findings = append(findings, m.makeFinding(urlx.String(), tool.Name, argName, p, fmt.Sprintf("%d file-content marker(s) confirmed", n)))
+						}
 					}
 				}
 			}
@@ -265,19 +270,6 @@ func plainCall(client *mcpinfra.Client, id int, name string, args map[string]any
 	return res, raw, true
 }
 
-func matchMarkers(body, baseline string, markers []string) int {
-	if len(markers) == 0 {
-		return 0
-	}
-	count := 0
-	for _, m := range markers {
-		if strings.Contains(body, m) && !strings.Contains(baseline, m) {
-			count++
-		}
-	}
-	return count
-}
-
 func sentinelMarker(argName string) string {
 	return fmt.Sprintf("__VIG_PI_%s_%s__", utils.RandomString(6), argName)
 }
@@ -292,18 +284,18 @@ func buildPayloads(scanCtx *modkit.ScanContext, targetURL, argName string) []pay
 			timed:    true,
 		},
 		{
-			name:          "Local File Inclusion (Linux)",
-			vulnTag:       "lfi",
-			severity:      severity.High,
-			value:         "../../../../../../etc/passwd",
-			expectMarkers: lfiMarkers[:3],
+			name:     "Local File Inclusion (Linux)",
+			vulnTag:  "lfi",
+			severity: severity.High,
+			value:    "../../../../../../etc/passwd",
+			confirm:  filesig.ConfirmPasswd,
 		},
 		{
-			name:          "Local File Inclusion (file://)",
-			vulnTag:       "lfi",
-			severity:      severity.High,
-			value:         "file:///etc/passwd",
-			expectMarkers: lfiMarkers[:3],
+			name:     "Local File Inclusion (file://)",
+			vulnTag:  "lfi",
+			severity: severity.High,
+			value:    "file:///etc/passwd",
+			confirm:  filesig.ConfirmPasswd,
 		},
 	}
 

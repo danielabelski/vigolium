@@ -114,6 +114,10 @@ func (m *Module) ScanPerInsertionPoint(
 			continue
 		}
 		payloadStr := strings.ReplaceAll(p.tmpl, oastPlaceholder, oastHost)
+		// Record the smuggle payload (may carry literal CR/LF) so the finding
+		// shows the actual protocol-smuggling vector; the anchor escapes control
+		// characters for single-line display.
+		oast.RecordPayload(oastHost, payloadStr)
 
 		fuzzedRaw := ip.BuildRequest([]byte(payloadStr))
 		// BuildRequest produces well-formed raw, so wrap directly instead

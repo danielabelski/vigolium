@@ -15,6 +15,7 @@ import (
 type fakeOAST struct{ host string }
 
 func (f fakeOAST) GenerateURL(_, _, _, _, _ string) string { return f.host }
+func (f fakeOAST) RecordPayload(_, _ string)               {}
 func (f fakeOAST) Enabled() bool                           { return true }
 
 // TestOASTProbe_CollaboratorEverywhereHeaders drives the live injection path and

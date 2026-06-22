@@ -27,6 +27,17 @@ type PayloadContext struct {
 	// CallbackURL is the unique OAST URL that was planted (the payload the target
 	// called back to). Retained so the finding can show exactly what was injected.
 	CallbackURL string
+	// Payload is the literal value the planting module placed at the injection
+	// point (e.g. ";nslookup <host>" for command injection, "for=<host>" for an
+	// RFC 7239 Forwarded probe, the bare "<host>" for an IP-routing header). It is
+	// what was actually sent on the wire, so the finding can reconstruct the
+	// planting request faithfully instead of guessing an http://<host> shape.
+	// When several payload variants share one callback host (the command-injection
+	// modules fan out breakout variants under a single OAST URL), this holds a
+	// representative variant that was definitely sent. Set via RecordPayload after
+	// the host is known; empty for modules that do not record it (reconstruction
+	// then falls back to the http://<host> / bare-host shape).
+	Payload string
 }
 
 // oastTrackerCacheSize bounds the nonce → PayloadContext tracker. A plain
@@ -195,6 +206,29 @@ func (s *Service) GenerateURL(targetURL, paramName, injectionType, moduleID, req
 	return url
 }
 
+// RecordPayload attaches the literal value a module planted at its injection
+// point to the tracked context for callbackURL, so the resulting finding can
+// reconstruct the planting request faithfully (see PayloadContext.Payload).
+// callbackURL is the URL returned by GenerateURL; payload is the exact value
+// written at the injection point (header value, parameter value, …). A no-op
+// when OAST is in fixed-URL mode or the context has already been evicted.
+func (s *Service) RecordPayload(callbackURL, payload string) {
+	if s == nil || s.client == nil || callbackURL == "" || payload == "" {
+		return
+	}
+	nonce := extractNonce(callbackURL)
+	if nonce == "" {
+		return
+	}
+	cache := s.trackerCache()
+	pctx, ok := cache.Get(nonce)
+	if !ok {
+		return
+	}
+	pctx.Payload = payload
+	cache.Add(nonce, pctx)
+}
+
 // Enabled returns true if the OAST service is active.
 func (s *Service) Enabled() bool {
 	return s != nil && (s.client != nil || s.fixedURL != "")
@@ -294,7 +328,7 @@ func (s *Service) handleInteraction(interaction *server.Interaction) {
 		return
 	}
 
-	sev, desc := classifyInteraction(interaction.Protocol, pctx)
+	sev, conf, desc := classifyInteraction(interaction.Protocol, pctx)
 	result := &output.ResultEvent{
 		ModuleID: pctx.ModuleID,
 		URL:      pctx.TargetURL,
@@ -303,7 +337,7 @@ func (s *Service) handleInteraction(interaction *server.Interaction) {
 			Name:        "Out-of-Band Interaction Detected",
 			Description: desc,
 			Severity:    sev,
-			Confidence:  severity.Certain,
+			Confidence:  conf,
 		},
 		ExtractedResults: []string{
 			"protocol=" + interaction.Protocol,
@@ -438,7 +472,15 @@ func payloadRequest(raw []byte, pctx PayloadContext, proto string) string {
 	case strings.EqualFold(pctx.ParameterName, "request-line"):
 		return rewriteRequestTarget(raw, callbackScheme(proto)+"://"+host+"/")
 	case isHeaderInjection(pctx):
-		if out, err := httpmsg.AddOrReplaceHeader(raw, pctx.ParameterName, "http://"+host); err == nil {
+		// Prefer the exact value the module planted (e.g. ";nslookup <host>",
+		// "for=<host>", a bare "<host>") so the Request panel shows what really
+		// went on the wire; fall back to the http://<host> shape only when the
+		// module did not record a payload.
+		value := pctx.Payload
+		if value == "" {
+			value = "http://" + host
+		}
+		if out, err := httpmsg.AddOrReplaceHeader(raw, pctx.ParameterName, value); err == nil {
 			return string(out)
 		}
 	}
@@ -446,19 +488,44 @@ func payloadRequest(raw []byte, pctx PayloadContext, proto string) string {
 }
 
 // describeInjectedPayload renders a one-line "<payload> (<where>)" summary of the
-// planted OAST payload for the injected_payload anchor.
+// planted OAST payload for the injected_payload anchor. It states the exact value
+// the module planted when one was recorded (PayloadContext.Payload) — so a
+// command-injection finding shows ";nslookup <host>" rather than the bare host —
+// and falls back to the http://<host> / bare-host shape otherwise. The recorded
+// payload is rendered on one line (control characters escaped) so smuggling
+// payloads carrying literal CR/LF/space cannot break the anchor.
 func describeInjectedPayload(pctx PayloadContext, proto string) string {
 	host := callbackHost(pctx.CallbackURL)
+	payload := oneLinePayload(pctx.Payload)
 	switch {
 	case strings.EqualFold(pctx.ParameterName, "request-line"):
-		return callbackScheme(proto) + "://" + host + "/ (request-line)"
+		return payloadOr(payload, callbackScheme(proto)+"://"+host+"/", " (request-line)")
 	case isHeaderInjection(pctx):
-		return "http://" + host + " (header " + pctx.ParameterName + ")"
+		return payloadOr(payload, "http://"+host, " (header "+pctx.ParameterName+")")
 	case pctx.ParameterName != "":
-		return host + " (parameter " + pctx.ParameterName + ")"
+		return payloadOr(payload, host, " (parameter "+pctx.ParameterName+")")
 	default:
-		return host
+		return payloadOr(payload, host, "")
 	}
+}
+
+// payloadOr renders "<payload><suffix>" when the module recorded the exact
+// planted payload, falling back to "<fallback><suffix>" otherwise.
+func payloadOr(payload, fallback, suffix string) string {
+	if payload != "" {
+		return payload + suffix
+	}
+	return fallback + suffix
+}
+
+// oneLineReplacer escapes the control characters (CR, LF, tab) that some OAST
+// payloads carry literally — most notably the SSRF protocol-smuggling templates.
+var oneLineReplacer = strings.NewReplacer("\r", `\r`, "\n", `\n`, "\t", `\t`)
+
+// oneLinePayload renders a recorded payload as a single, readable line in the
+// injected_payload anchor so it never injects raw newlines into plain-text output.
+func oneLinePayload(s string) string {
+	return oneLineReplacer.Replace(s)
 }
 
 // isHeaderInjection reports whether the payload was planted in a named request
@@ -530,8 +597,12 @@ func (s *Service) saveFinding(result *output.ResultEvent, recordUUID string) {
 	}
 }
 
-// classifyInteraction determines severity and description based on protocol.
-func classifyInteraction(protocol string, pctx PayloadContext) (severity.Severity, string) {
+// classifyInteraction determines severity, confidence, and description based on
+// protocol. Confidence defaults to Certain for the existing SSRF/XXE branches
+// (an out-of-band callback to an unguessable subdomain is, by itself, proof the
+// interaction happened); the command-injection branch returns a calibrated
+// confidence because a DNS-only callback there is not always proof of execution.
+func classifyInteraction(protocol string, pctx PayloadContext) (severity.Severity, severity.Confidence, string) {
 	proto := strings.ToLower(protocol)
 
 	injectionDesc := pctx.InjectionType
@@ -540,11 +611,12 @@ func classifyInteraction(protocol string, pctx PayloadContext) (severity.Severit
 	}
 
 	// Command-injection OAST payloads (nslookup/ping/curl/wget of a unique,
-	// unguessable subdomain) carry a different meaning than the generic
-	// SSRF/XXE interpretation: a callback means a shell command actually ran, so
-	// even a DNS-only interaction is high-confidence command execution.
+	// unguessable subdomain) carry a different meaning than the generic SSRF/XXE
+	// interpretation: an HTTP-fetch callback means a shell command actually ran.
+	// A DNS-only callback is weaker and, on client-IP/forwarding headers, an
+	// outright false positive — see classifyCommandInjection.
 	if strings.Contains(strings.ToLower(pctx.InjectionType), "command") {
-		return classifyCommandInjection(proto, injectionDesc)
+		return classifyCommandInjection(proto, pctx, injectionDesc)
 	}
 
 	// XXE payloads (an external DTD / external entity pointing at a unique,
@@ -566,44 +638,101 @@ func classifyInteraction(protocol string, pctx PayloadContext) (severity.Severit
 	// package); the header name is matched case-insensitively.
 	hostRoutingSSRF := pctx.ModuleID == "routing-ssrf" || strings.EqualFold(pctx.ParameterName, "X-Forwarded-Host")
 	if hostRoutingSSRF && (proto == "http" || proto == "https") {
-		return severity.Info, "Blind SSRF confirmed: target made outbound HTTP request to OAST server (" + injectionDesc + ")"
+		return severity.Info, severity.Certain, "Blind SSRF confirmed: target made outbound HTTP request to OAST server (" + injectionDesc + ")"
 	}
 
 	switch proto {
 	case "http", "https":
-		return severity.High, "Blind SSRF confirmed: target made outbound HTTP request to OAST server (" + injectionDesc + ")"
+		return severity.High, severity.Certain, "Blind SSRF confirmed: target made outbound HTTP request to OAST server (" + injectionDesc + ")"
 	case "dns":
-		return severity.Info, "DNS interaction detected: target resolved OAST domain (" + injectionDesc + "). May indicate blind SSRF/XXE but DNS alone is lower confidence."
+		return severity.Info, severity.Tentative, "DNS interaction detected: target resolved OAST domain (" + injectionDesc + "). May indicate blind SSRF/XXE but DNS alone is lower confidence."
 	default:
-		return severity.Medium, "Out-of-band " + protocol + " interaction detected (" + injectionDesc + ")"
+		return severity.Medium, severity.Certain, "Out-of-band " + protocol + " interaction detected (" + injectionDesc + ")"
 	}
 }
 
 // classifyXXE rates out-of-band interactions triggered by an injected external
 // DTD/entity. The per-payload subdomain is random and unguessable, so a
 // correlated callback is proof the XML parser resolved the external reference.
-func classifyXXE(proto, injectionDesc string) (severity.Severity, string) {
+func classifyXXE(proto, injectionDesc string) (severity.Severity, severity.Confidence, string) {
 	switch proto {
 	case "http", "https":
-		return severity.High, "Blind XXE confirmed: the target's XML parser fetched the injected external entity/DTD over HTTP from the OAST server (" + injectionDesc + ")"
+		return severity.High, severity.Certain, "Blind XXE confirmed: the target's XML parser fetched the injected external entity/DTD over HTTP from the OAST server (" + injectionDesc + ")"
 	case "dns":
-		return severity.High, "Blind XXE confirmed: the target's XML parser resolved the injected external-entity OAST subdomain (DNS) (" + injectionDesc + "). The unguessable per-payload subdomain rules out coincidental resolution."
+		return severity.High, severity.Certain, "Blind XXE confirmed: the target's XML parser resolved the injected external-entity OAST subdomain (DNS) (" + injectionDesc + "). The unguessable per-payload subdomain rules out coincidental resolution."
 	default:
-		return severity.High, "Blind XXE confirmed via out-of-band " + proto + " interaction (" + injectionDesc + ")"
+		return severity.High, severity.Certain, "Blind XXE confirmed via out-of-band " + proto + " interaction (" + injectionDesc + ")"
 	}
+}
+
+// infraResolvedClientHeaders is the client-IP / forwarding / proxy header family
+// whose *values* edge infrastructure routinely resolves over DNS — for geo-IP,
+// reverse-DNS, request logging, or WAF/threat-intel enrichment. A unique OAST
+// hostname planted in any of these is therefore resolved passively, with no
+// shell involvement, so a DNS-only command-injection callback on one of them is
+// not proof of execution. (vigolium's own oast_probe module deliberately plants
+// bare hosts into these same headers expecting exactly such DNS pingbacks — see
+// pkg/modules/active/oast_probe.) Matched case-insensitively.
+var infraResolvedClientHeaders = map[string]struct{}{
+	"x-forwarded-for":     {},
+	"x-real-ip":           {},
+	"true-client-ip":      {},
+	"cf-connecting-ip":    {},
+	"x-client-ip":         {},
+	"x-proxyuser-ip":      {},
+	"forwarded":           {},
+	"x-forwarded":         {},
+	"x-originating-ip":    {},
+	"x-remote-ip":         {},
+	"x-remote-addr":       {},
+	"client-ip":           {},
+	"x-cluster-client-ip": {},
+	"fastly-client-ip":    {},
+}
+
+// isInfraResolvedClientHeader reports whether name is a client-IP / forwarding
+// header whose value edge infrastructure commonly resolves via DNS (see
+// infraResolvedClientHeaders).
+func isInfraResolvedClientHeader(name string) bool {
+	if name == "" {
+		return false
+	}
+	_, ok := infraResolvedClientHeaders[strings.ToLower(strings.TrimSpace(name))]
+	return ok
 }
 
 // classifyCommandInjection rates out-of-band interactions triggered by an
 // injected OS command. The per-payload subdomain is random and unguessable, so a
-// correlated callback is unforgeable proof that the injected command executed.
-func classifyCommandInjection(proto, injectionDesc string) (severity.Severity, string) {
+// callback proves the unique hostname was reached — but *how* it was reached
+// determines whether a shell actually ran:
+//
+//   - HTTP/HTTPS callback (the curl/wget payload leg): strong proof. A passive
+//     middlebox resolves header values via DNS but does not make an outbound HTTP
+//     request to the planted URL, so an HTTP fetch means the injected command
+//     executed → Critical / Certain.
+//   - DNS-only callback on a client-IP / forwarding header (X-Forwarded-For,
+//     X-Real-IP, True-Client-IP, CF-Connecting-IP, …): NOT proof of execution.
+//     Edge infrastructure routinely resolves these header values for geo-IP /
+//     reverse-DNS / logging, so the bare OAST hostname embedded in the payload is
+//     resolved passively with no shell involved. This is the dominant
+//     false-positive class for OAST command injection → downgraded to
+//     Low / Tentative, surfaced as an unconfirmed lead rather than a finding.
+//   - DNS-only callback on a genuine request parameter (or a non-forwarding
+//     header): a unique unguessable subdomain resolving for an injected command
+//     is a strong lead, but DNS-only (no outbound fetch) is one notch below the
+//     HTTP-fetch proof → High / Firm.
+func classifyCommandInjection(proto string, pctx PayloadContext, injectionDesc string) (severity.Severity, severity.Confidence, string) {
 	switch proto {
 	case "http", "https":
-		return severity.Critical, "Blind OS command injection confirmed: target executed an injected fetch command (curl/wget) calling the OAST server over HTTP (" + injectionDesc + ")"
+		return severity.Critical, severity.Certain, "Blind OS command injection confirmed: target executed an injected fetch command (curl/wget) calling the OAST server over HTTP (" + injectionDesc + ")"
 	case "dns":
-		return severity.High, "Blind OS command injection confirmed: target executed an injected DNS-resolving command (nslookup/host/ping) for a unique OAST subdomain (" + injectionDesc + "). The unguessable per-payload subdomain rules out coincidental resolution."
+		if isInfraResolvedClientHeader(pctx.ParameterName) {
+			return severity.Low, severity.Tentative, "Possible OS command injection, UNCONFIRMED: a unique OAST subdomain injected into the client-IP/forwarding header " + pctx.ParameterName +
+				" was resolved over DNS (" + injectionDesc + "). Edge infrastructure (geo-IP, reverse-DNS, logging, WAF) routinely resolves the value of these headers, so a DNS-only callback is NOT proof a shell ran. Confirm via an HTTP-fetch callback (curl/wget) before treating this as command injection."
+		}
+		return severity.High, severity.Firm, "Blind OS command injection likely: target resolved a unique OAST subdomain via DNS for an injected command (nslookup/host/ping) (" + injectionDesc + "). The unguessable per-payload subdomain rules out coincidental resolution; DNS-only (no outbound HTTP fetch) keeps confidence at Firm rather than Certain."
 	default:
-		return severity.High, "Blind OS command injection confirmed via out-of-band " + proto + " interaction (" + injectionDesc + ")"
+		return severity.High, severity.Firm, "Blind OS command injection confirmed via out-of-band " + proto + " interaction (" + injectionDesc + ")"
 	}
 }
 

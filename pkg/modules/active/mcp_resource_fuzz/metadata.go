@@ -15,7 +15,7 @@ var (
 
 **Fix:** Allowlist the schemes and paths resources/read may dereference, reject file:// and traversal sequences, and block internal and metadata addresses.`
 
-	ModuleConfirmation = "Confirmed when the resources/read response contains file-content markers absent from the baseline, or when the OAST provider records a callback for an injected URL"
+	ModuleConfirmation = "Confirmed when the resources/read response carries the targeted file's real structural content (a /etc/passwd account entry) absent from the baseline, or when the OAST provider records a callback for an injected URL"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
 	ModuleTags         = []string{"mcp", "lfi", "ssrf", "path-traversal", "moderate"}

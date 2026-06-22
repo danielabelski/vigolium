@@ -14,10 +14,11 @@ import (
 // fakeOAST is a stand-in OAST provider that returns a fixed host and records the
 // parameter names it was asked to generate URLs for.
 type fakeOAST struct {
-	host    string
-	enabled bool
-	mu      sync.Mutex
-	params  []string
+	host     string
+	enabled  bool
+	mu       sync.Mutex
+	params   []string
+	recorded []string
 }
 
 func (f *fakeOAST) GenerateURL(_, paramName, _, _, _ string) string {
@@ -25,6 +26,11 @@ func (f *fakeOAST) GenerateURL(_, paramName, _, _, _ string) string {
 	f.params = append(f.params, paramName)
 	f.mu.Unlock()
 	return f.host
+}
+func (f *fakeOAST) RecordPayload(_, payload string) {
+	f.mu.Lock()
+	f.recorded = append(f.recorded, payload)
+	f.mu.Unlock()
 }
 func (f *fakeOAST) Enabled() bool { return f.enabled }
 
@@ -74,6 +80,14 @@ func TestOAST_Param_InjectsHost(t *testing.T) {
 	}
 	if len(oast.params) == 0 || oast.params[0] != "cmd" {
 		t.Errorf("expected GenerateURL called for cmd, got %v", oast.params)
+	}
+	// The module must record the actual planted value (base + a shell payload
+	// embedding the OAST host) so the finding can reconstruct the real request.
+	oast.mu.Lock()
+	recorded := append([]string(nil), oast.recorded...)
+	oast.mu.Unlock()
+	if len(recorded) == 0 || !strings.Contains(recorded[0], host) || !strings.Contains(recorded[0], "nslookup") {
+		t.Errorf("expected RecordPayload called with a shell payload embedding the host, got %v", recorded)
 	}
 }
 

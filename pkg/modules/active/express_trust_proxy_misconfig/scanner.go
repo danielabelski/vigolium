@@ -402,7 +402,10 @@ func (m *Module) confirmHostReflection(ctx *httpmsg.HttpRequestResponse, httpCli
 		if !ok {
 			return false, fmt.Errorf("x-forwarded-host confirmation fetch failed")
 		}
-		return strings.Contains(full, host), nil
+		// Match the canary in URL-authority position (mirroring checkHostInjection),
+		// so a redirect_uri=/next= query-parameter echo does not "confirm" a
+		// reflection the authority-gated detection already rejects.
+		return modkit.HostReflectedAsAuthority(full, host), nil
 	})
 	if err != nil {
 		return true // fail open — never suppress on a probe failure
@@ -451,22 +454,29 @@ func doFetchFull(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, r
 	return resp.FullResponseString(), true
 }
 
-// checkHostInjection detects if X-Forwarded-Host value appears in response
-// body or Location header, indicating trusted host generation.
+// checkHostInjection detects if the X-Forwarded-Host value appears AS A URL
+// AUTHORITY (the host component of a generated URL) in the response body or
+// Location header — the trusted-host-generation sink that enables password-reset
+// link / cache poisoning. It deliberately does NOT fire on a bare substring
+// match: a recurring false positive is an OAuth login flow behind a CDN that
+// echoes the client host into a redirect_uri= query parameter of a 3xx whose
+// authority stays the trusted IdP, so the real destination never changes with or
+// without the spoofed header. Requiring authority position drops that echo while
+// still catching "https://<host>/...".
 func checkHostInjection(
 	probeBody, probeHeaders string,
 	probeLocation string,
 ) string {
-	if strings.Contains(probeBody, injectedHost) {
-		return fmt.Sprintf("Injected host %q reflected in response body", injectedHost)
+	if modkit.HostReflectedAsAuthority(probeBody, injectedHost) {
+		return fmt.Sprintf("Injected host %q reflected as a URL authority in response body", injectedHost)
 	}
 
-	if strings.Contains(probeLocation, injectedHost) {
-		return fmt.Sprintf("Injected host %q reflected in Location header: %s", injectedHost, probeLocation)
+	if modkit.HostReflectedAsAuthority(probeLocation, injectedHost) {
+		return fmt.Sprintf("Injected host %q set as the redirect authority in the Location header: %s", injectedHost, probeLocation)
 	}
 
-	if strings.Contains(probeHeaders, injectedHost) {
-		return fmt.Sprintf("Injected host %q reflected in response headers", injectedHost)
+	if modkit.HostReflectedAsAuthority(probeHeaders, injectedHost) {
+		return fmt.Sprintf("Injected host %q reflected as a URL authority in response headers", injectedHost)
 	}
 
 	return ""

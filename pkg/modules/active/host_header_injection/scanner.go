@@ -151,12 +151,19 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		// Check if the injected host is reflected in the response body or headers.
+		// Check if the injected host is reflected in the response body or headers AS
+		// A URL AUTHORITY — the host component of a generated URL (the redirect
+		// Location, an absolute link), which is the actual password-reset / cache-
+		// poisoning sink. A bare substring match flagged a recurring false positive:
+		// an OAuth login flow behind a CDN echoes the client host into a redirect_uri=
+		// query parameter of a 3xx whose authority stays the trusted IdP, so the real
+		// destination never changes with or without the spoofed header. Requiring
+		// authority position drops that echo while still catching "https://<host>/...".
 		body := resp.Body().String()
 		headers := resp.Headers().String()
 
-		reflectedInHeader := strings.Contains(headers, evilHost)
-		reflectedInBody := strings.Contains(body, evilHost)
+		reflectedInHeader := modkit.HostReflectedAsAuthority(headers, evilHost)
+		reflectedInBody := modkit.HostReflectedAsAuthority(body, evilHost)
 
 		var location string
 		if reflectedInHeader && resp.Response() != nil {
@@ -253,6 +260,9 @@ func (m *Module) confirmHostReflection(
 		if infra.IsBlockedResponse(resp) {
 			return false, nil // a WAF/challenge page is not a host reflection
 		}
-		return strings.Contains(resp.FullResponseString(), canaryHost), nil
+		// Require the canary in URL-authority position (matching the primary probe),
+		// so a redirect_uri=/next= query-parameter echo of the canary does not
+		// "confirm" a reflection that the authority-gated detection already rejects.
+		return modkit.HostReflectedAsAuthority(resp.FullResponseString(), canaryHost), nil
 	})
 }

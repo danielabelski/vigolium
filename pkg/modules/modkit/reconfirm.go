@@ -615,6 +615,64 @@ func FreshCanary() string {
 	return "vgo" + randomToken(10)
 }
 
+// HostReflectedAsAuthority reports whether host appears as the authority (host
+// component) of a URL inside s — the position that actually controls where a
+// generated redirect or link points — rather than as an incidental substring,
+// such as a value inside a query parameter (an OAuth redirect_uri=, a
+// next=/continue= target) or a URL-encoded %2F%2Fhost echo.
+//
+// Host-injection vulns (password-reset link poisoning, cache poisoning, open
+// redirect) require the client-supplied host to BECOME the authority of a
+// generated URL. A recurring false-positive class is the inverse: behind a CDN,
+// an OAuth login flow reflects X-Forwarded-Host / Host into the redirect_uri=
+// query parameter of a 3xx whose authority stays the trusted IdP — the real
+// destination never changes with or without the spoofed header, so there is
+// nothing to poison, yet a bare strings.Contains over the Location/header dump
+// flagged it. Requiring authority position drops that echo while still catching a
+// genuine "Location: https://<host>/..." or an absolute link in the body.
+//
+// A match qualifies only when host is immediately preceded by "//" (after a
+// "scheme://" or as a protocol-relative "//host") and is the whole authority
+// label — the byte after it ends the authority (a port ':', path '/', query '?',
+// fragment '#', end of string, or a quote/angle/backslash/whitespace boundary in
+// a body), not a "." that would make host merely a prefix of <host>.evil.com.
+// URL-encoded slashes (%2F%2F) deliberately do NOT qualify: an encoded host sits
+// inside another URL's query, not in authority position.
+func HostReflectedAsAuthority(s, host string) bool {
+	if s == "" || host == "" {
+		return false
+	}
+	hay := strings.ToLower(s)
+	needle := strings.ToLower(host)
+	for from := 0; from+len(needle) <= len(hay); {
+		idx := strings.Index(hay[from:], needle)
+		if idx < 0 {
+			return false
+		}
+		pos := from + idx
+		if pos >= 2 && hay[pos-1] == '/' && hay[pos-2] == '/' {
+			end := pos + len(needle)
+			if end >= len(hay) || isAuthorityTerminator(hay[end]) {
+				return true
+			}
+		}
+		from = pos + len(needle)
+	}
+	return false
+}
+
+// isAuthorityTerminator reports whether c ends a URL authority — the boundary
+// after the host (port, path, query, fragment) or a delimiter that bounds the URL
+// inside an HTML/JSON body.
+func isAuthorityTerminator(c byte) bool {
+	switch c {
+	case '/', ':', '?', '#', '"', '\'', '<', '>', '\\', ' ', '\t', '\r', '\n':
+		return true
+	default:
+		return false
+	}
+}
+
 // ConfirmNotSoft404 reports whether a marker-matched response is a genuine hit
 // rather than a soft-404 / SPA wildcard shell or a redirect to an auth page.
 // It returns true when the response looks like a real, specific resource.

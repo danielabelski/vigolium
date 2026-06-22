@@ -313,7 +313,8 @@ func (f *fakeOAST) GenerateURL(_, paramName, injectionType, _, _ string) string 
 	f.mu.Unlock()
 	return f.host
 }
-func (f *fakeOAST) Enabled() bool { return f.enabled }
+func (f *fakeOAST) RecordPayload(_, _ string) {}
+func (f *fakeOAST) Enabled() bool              { return f.enabled }
 
 // samlParamValue is a small plain-XML SAML document (no DOCTYPE, with an ID
 // attribute so the ENTITY probe applies). DecodeSAML accepts plain XML, so the

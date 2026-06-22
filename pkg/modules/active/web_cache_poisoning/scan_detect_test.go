@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -50,6 +51,34 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "a backend that ignores the unkeyed headers must not yield a finding")
+}
+
+// TestScanPerRequest_CacheableQueryEchoNoFinding is the defense-in-depth layer
+// beyond the cacheability gate: even a genuinely cacheable response must NOT be
+// flagged when the injected host is echoed only into a query-parameter value
+// (here a next= target inside an <a href>), not in URL-authority position. The
+// link's real authority is the fixed trusted host, so a shared cache replaying it
+// sends other users to the SAME destination — nothing is poisoned. The
+// host-shaped authority guard suppresses it where the old bare substring match
+// (poisonMarker appears in the encoded value) would have fired.
+func TestScanPerRequest_CacheableQueryEchoNoFinding(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Header.Get("X-Forwarded-Host")
+		// Host lands only inside the URL-encoded next= value (%2F%2F<host>), while the
+		// link authority stays the trusted host — not an authority-position reflection.
+		inner := url.QueryEscape("https://" + host + "/cb")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		_, _ = fmt.Fprintf(w, `<html><body><a href="https://idp.trusted.example/login?next=%s">login</a></body></html>`, inner)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a host echoed only into a query-parameter value (not URL authority) must not be flagged, even when cacheable")
 }
 
 // TestScanPerRequest_UncacheableReflectionNoFinding covers the false-positive

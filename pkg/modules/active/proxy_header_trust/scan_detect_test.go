@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -54,6 +55,109 @@ func TestScanPerRequest_DetectsForwardedHostReflection(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "expected the X-Forwarded-Host injection finding")
+}
+
+// TestScanPerRequest_ForwardedHostRedirectURIEchoNoFalsePositive reproduces the
+// reported CloudFront/OAuth-login false positive: a 302 whose Location targets a
+// fixed, trusted identity provider but echoes the request host into the
+// URL-encoded redirect_uri= query parameter. The injected host appears as a bare
+// substring of the Location (and reflects for every fresh canary), but never as
+// the redirect authority — the real destination is identical with or without the
+// spoofed header. The authority-position guard must suppress it.
+func TestScanPerRequest_ForwardedHostRedirectURIEchoNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Header.Get("X-Forwarded-Host")
+		if host == "" {
+			// No spoofed header (the shared baseline): serve a plain page so the
+			// requester doesn't chase a cross-host redirect to an unresolvable IdP.
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		// The redirect always targets the trusted IdP; only the redirect_uri query
+		// parameter (URL-encoded) carries the request host, so its %2F%2F-wrapped
+		// host is never in authority position.
+		loc := "https://idp.trusted.example/as/authorization.oauth2?response_type=code&redirect_uri=" +
+			url.QueryEscape("https://"+host+"/oauth2/callback")
+		w.Header().Set("Location", loc)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	for _, r := range res {
+		assert.NotEqual(t, "Proxy Header Trust: X-Forwarded-Host Injection", r.Info.Name,
+			"a host echoed only into a redirect_uri= query param (redirect authority unchanged) must not be reported as host injection")
+	}
+}
+
+// TestScanPerRequest_ForwardedHostLocationAuthorityPoisoning is the positive
+// counterpart: the app builds the 302 Location AUTHORITY straight from the
+// spoofed X-Forwarded-Host, so the injected host becomes the actual redirect
+// destination. That is genuine host poisoning and must surface High/Firm.
+func TestScanPerRequest_ForwardedHostLocationAuthorityPoisoning(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Header.Get("X-Forwarded-Host")
+		if host == "" {
+			// Baseline (no spoofed header): plain page, no cross-host redirect to chase.
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		// The spoofed host becomes the literal redirect authority — genuine poisoning.
+		w.Header().Set("Location", "https://"+host+"/dashboard")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+
+	var got *string
+	for _, r := range res {
+		if r.Info.Name == "Proxy Header Trust: X-Forwarded-Host Injection" {
+			name := r.Info.Severity.String() + "/" + r.Info.Confidence.String()
+			got = &name
+		}
+	}
+	require.NotNil(t, got, "a Location authority built from X-Forwarded-Host is genuine host poisoning")
+	assert.Equal(t, "high/firm", *got, "redirect-authority poisoning must be High/Firm")
+}
+
+// TestScanPerRequest_DetectsForwardedHostBodyAuthorityIsTentative asserts the
+// body-reflection branch (a generated absolute URL whose authority is the
+// injected host — a weaker, harder-to-attribute sink than a redirect we can see
+// the browser follow) is reported at High/Tentative rather than Firm.
+func TestScanPerRequest_DetectsForwardedHostBodyAuthorityIsTentative(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		xfh := r.Header.Get("X-Forwarded-Host")
+		_, _ = fmt.Fprintf(w, "<html><body>reset: https://%s/reset?t=1</body></html>", xfh)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+
+	var got *string
+	for _, r := range res {
+		if r.Info.Name == "Proxy Header Trust: X-Forwarded-Host Injection" {
+			name := r.Info.Severity.String() + "/" + r.Info.Confidence.String()
+			got = &name
+		}
+	}
+	require.NotNil(t, got, "a generated absolute link whose authority is the injected host must surface")
+	assert.Equal(t, "high/tentative", *got, "body-only authority reflection must be Tentative, not Firm")
 }
 
 // TestScanPerRequest_DetectsForwardedProtoChange drives the X-Forwarded-Proto

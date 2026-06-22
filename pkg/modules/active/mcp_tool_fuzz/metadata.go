@@ -15,7 +15,7 @@ var (
 
 **Fix:** Validate and allowlist every tool argument, never pass values into shell commands, file paths, URLs, or LLM prompts, and run handlers with least privilege.`
 
-	ModuleConfirmation = "Confirmed when a fuzzed tool argument triggers a measurable side-effect: response delay (cmd-i), file-content markers in the result (LFI), an OAST callback (SSRF), or echo of the sentinel marker (prompt injection)"
+	ModuleConfirmation = "Confirmed when a fuzzed tool argument triggers a measurable side-effect: response delay (cmd-i), the targeted file's real structural content in the result (LFI — a /etc/passwd account entry, not a bare substring), an OAST callback (SSRF), or echo of the sentinel marker (prompt injection)"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
 	ModuleTags         = []string{"mcp", "rce", "lfi", "ssrf", "injection", "moderate"}

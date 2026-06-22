@@ -148,6 +148,15 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 	scanOpts.Parallel = globalParallel
 	scanOpts.Resume = globalResume
 
+	// Bare `vigolium scan --resume` (no -T/-t/stdin to scan): auto-discover the
+	// progress manifest in the working directory and relaunch the saved run from
+	// it, so the operator can resume a fan-out without re-typing every flag. With
+	// targets present this is skipped and --resume continues through the normal
+	// path (which narrows the fan-out to the unscanned tail).
+	if scanOpts.Resume && len(scanOpts.TargetsFilePaths) == 0 && len(scanOpts.Targets) == 0 && !scanOpts.Stdin {
+		return resumeFromDiscoveredManifest(cmd)
+	}
+
 	// --split-by-host names each per-host output file after the target's hostname
 	// (acme-<host>.jsonl with a base, or just <host>.jsonl when no -o is given), so
 	// the host already disambiguates files and -o/--output is OPTIONAL in that mode.

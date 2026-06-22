@@ -147,6 +147,9 @@ func (m *Module) ScanPerRequest(
 
 		// Shape the OAST host for this header (URL / bare host / wap.xml / for=).
 		payload := header.kind.render(oastURL)
+		// Record the shaped value so the finding reconstructs the real header
+		// (a bare host / "for=<host>" / wap.xml URL), not a generic http://<host>.
+		oast.RecordPayload(oastURL, payload)
 
 		modifiedRaw, err := httpmsg.AddOrReplaceHeader(base, header.name, payload)
 		if err != nil {
@@ -210,6 +213,7 @@ func (m *Module) ScanPerInsertionPoint(
 	}
 
 	payload := "http://" + oastURL
+	oast.RecordPayload(oastURL, payload)
 	fuzzedRaw := ip.BuildRequest([]byte(payload))
 
 	// BuildRequest produces well-formed raw, so wrap directly instead

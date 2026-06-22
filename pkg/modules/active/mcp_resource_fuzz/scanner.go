@@ -10,6 +10,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	mcpinfra "github.com/vigolium/vigolium/pkg/modules/infra/mcp"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/modules/shared/filesig"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 )
@@ -19,15 +20,18 @@ const (
 	maxTemplates = 6
 )
 
-var lfiMarkers = []string{"root:x:", ":0:0:", "/bin/", "[fonts]", "[extensions]"}
-
 type uriPayload struct {
-	value         string
-	vulnTag       string
-	name          string
-	severity      severity.Severity
-	expectMarkers []string
-	oast          bool
+	value    string
+	vulnTag  string
+	name     string
+	severity severity.Severity
+	// confirm structurally validates that the read leaked the targeted file's
+	// real content (see filesig). It replaces the former bare-word marker list
+	// (`root:x:`, `:0:0:`, `/bin/`) that fired on a single substring match — e.g.
+	// a tool error mentioning `/bin/sh` or a reflected payload — rather than on
+	// actual file content.
+	confirm filesig.ConfirmFunc
+	oast    bool
 }
 
 type Module struct {
@@ -119,8 +123,10 @@ func (m *Module) ScanPerHost(
 			findings = append(findings, m.makeFinding(urlx.String(), "(bare uri)", p, "request issued; check OAST log"))
 			continue
 		}
-		if matched := matchMarkers(body, "", p.expectMarkers); matched > 0 {
-			findings = append(findings, m.makeFinding(urlx.String(), p.value, p, fmt.Sprintf("%d marker(s) matched", matched)))
+		if p.confirm != nil {
+			if ok, n := p.confirm(body, ""); ok {
+				findings = append(findings, m.makeFinding(urlx.String(), p.value, p, fmt.Sprintf("%d file-content marker(s) confirmed", n)))
+			}
 		}
 	}
 
@@ -147,8 +153,10 @@ func (m *Module) ScanPerHost(
 					continue
 				}
 				baseline := baselines[tpl.URITemplate]
-				if matched := matchMarkers(body, baseline, p.expectMarkers); matched > 0 {
-					findings = append(findings, m.makeFinding(urlx.String(), uri, p, fmt.Sprintf("%d marker(s) matched", matched)))
+				if p.confirm != nil {
+					if ok, n := p.confirm(body, baseline); ok {
+						findings = append(findings, m.makeFinding(urlx.String(), uri, p, fmt.Sprintf("%d file-content marker(s) confirmed", n)))
+					}
 				}
 			}
 		}
@@ -223,41 +231,28 @@ func substituteTemplate(tpl string, placeholders []string, target, payload strin
 	return out
 }
 
-func matchMarkers(body, baseline string, markers []string) int {
-	if len(markers) == 0 {
-		return 0
-	}
-	c := 0
-	for _, m := range markers {
-		if strings.Contains(body, m) && !strings.Contains(baseline, m) {
-			c++
-		}
-	}
-	return c
-}
-
 func buildPayloads(scanCtx *modkit.ScanContext, targetURL string) []uriPayload {
 	out := []uriPayload{
 		{
-			name:          "file://",
-			vulnTag:       "lfi",
-			severity:      severity.High,
-			value:         "file:///etc/passwd",
-			expectMarkers: lfiMarkers[:3],
+			name:     "file://",
+			vulnTag:  "lfi",
+			severity: severity.High,
+			value:    "file:///etc/passwd",
+			confirm:  filesig.ConfirmPasswd,
 		},
 		{
-			name:          "Path traversal",
-			vulnTag:       "lfi",
-			severity:      severity.High,
-			value:         "../../../../../../etc/passwd",
-			expectMarkers: lfiMarkers[:3],
+			name:     "Path traversal",
+			vulnTag:  "lfi",
+			severity: severity.High,
+			value:    "../../../../../../etc/passwd",
+			confirm:  filesig.ConfirmPasswd,
 		},
 		{
-			name:          "URL encoding bypass",
-			vulnTag:       "lfi",
-			severity:      severity.High,
-			value:         "%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd",
-			expectMarkers: lfiMarkers[:3],
+			name:     "URL encoding bypass",
+			vulnTag:  "lfi",
+			severity: severity.High,
+			value:    "%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd",
+			confirm:  filesig.ConfirmPasswd,
 		},
 	}
 	if oast := scanCtx.OASTProv(); oast != nil && oast.Enabled() {

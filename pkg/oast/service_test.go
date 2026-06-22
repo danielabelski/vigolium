@@ -9,6 +9,7 @@ import (
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 func TestExtractNonce(t *testing.T) {
@@ -130,7 +131,7 @@ func TestEnrichOASTResult(t *testing.T) {
 		RawResponse: []byte("HTTP/1.1 200 OK\r\n\r\nbody"),
 	}
 
-	sev, desc := classifyInteraction(interaction.Protocol, pctx)
+	sev, _, desc := classifyInteraction(interaction.Protocol, pctx)
 	result := &output.ResultEvent{
 		ModuleID: pctx.ModuleID,
 		Info:     output.Info{Description: desc, Severity: sev},
@@ -228,6 +229,61 @@ func TestPayloadRequest(t *testing.T) {
 	if param != string(raw) {
 		t.Errorf("parameter injection should return original request, got: %q", param)
 	}
+
+	// When the planting module recorded the exact value (PayloadContext.Payload),
+	// header reconstruction uses it verbatim — so a command-injection finding shows
+	// the real ";nslookup <host>" shell payload in the header, not a bare host.
+	cmdi := payloadRequest(raw, PayloadContext{
+		ParameterName: "X-Forwarded-For",
+		InjectionType: "os-command-injection (header)",
+		CallbackURL:   "abc123.oast.vigolium.com",
+		Payload:       ";nslookup abc123.oast.vigolium.com",
+	}, "dns")
+	if !strings.Contains(cmdi, "X-Forwarded-For: ;nslookup abc123.oast.vigolium.com") {
+		t.Errorf("cmdi header reconstruction must use the recorded shell payload, got: %q", cmdi)
+	}
+}
+
+// TestDescribeInjectedPayload verifies the injected_payload anchor states the
+// exact value the module planted when recorded — surfacing the shell payload for
+// command injection — and falls back to the http/bare-host shape otherwise.
+func TestDescribeInjectedPayload(t *testing.T) {
+	// Command injection: the anchor must show the real shell payload + header, not
+	// the bare callback host (the original investigation pain point).
+	cmdi := describeInjectedPayload(PayloadContext{
+		ParameterName: "X-Forwarded-For",
+		InjectionType: "os-command-injection (header)",
+		CallbackURL:   "abc123.oast.vigolium.com",
+		Payload:       ";nslookup abc123.oast.vigolium.com",
+	}, "dns")
+	if cmdi != ";nslookup abc123.oast.vigolium.com (header X-Forwarded-For)" {
+		t.Errorf("cmdi injected_payload anchor wrong: %q", cmdi)
+	}
+
+	// No recorded payload → falls back to the http://<host> header shape.
+	fallback := describeInjectedPayload(PayloadContext{
+		ParameterName: "X-Forwarded-Host",
+		InjectionType: "header",
+		CallbackURL:   "abc123.oast.vigolium.com",
+	}, "http")
+	if fallback != "http://abc123.oast.vigolium.com (header X-Forwarded-Host)" {
+		t.Errorf("fallback injected_payload anchor wrong: %q", fallback)
+	}
+
+	// A protocol-smuggling payload carrying literal CR/LF must render on one line
+	// (control characters escaped) so it can't break the anchor.
+	smuggle := describeInjectedPayload(PayloadContext{
+		ParameterName: "url",
+		InjectionType: "ssrf-smuggle:crlf",
+		CallbackURL:   "abc123.oast.vigolium.com",
+		Payload:       "gopher://abc123.oast.vigolium.com:80/_GET / HTTP/1.1\r\nHost: x\r\n",
+	}, "dns")
+	if strings.ContainsAny(smuggle, "\r\n") {
+		t.Errorf("smuggle anchor must not contain raw CR/LF: %q", smuggle)
+	}
+	if !strings.Contains(smuggle, `\r\n`) || !strings.Contains(smuggle, "(parameter url)") {
+		t.Errorf("smuggle anchor should escape CR/LF and keep the location: %q", smuggle)
+	}
 }
 
 // TestEnrichOASTResultNoOrigin verifies enrichment degrades gracefully when the
@@ -269,7 +325,7 @@ func TestClassifyInteraction(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		sev, desc := classifyInteraction(tt.protocol, pctx)
+		sev, _, desc := classifyInteraction(tt.protocol, pctx)
 		if tt.wantHighSev && sev.String() != "high" {
 			t.Errorf("classifyInteraction(%q) severity = %s, want high; desc: %s", tt.protocol, sev, desc)
 		}
@@ -290,7 +346,7 @@ func TestClassifyInteractionHostRoutingInfo(t *testing.T) {
 	// routing-ssrf (request-line) → Info on any HTTP-family callback.
 	routing := PayloadContext{TargetURL: "http://target.com", InjectionType: "request-line", ModuleID: "routing-ssrf"}
 	for _, proto := range []string{"http", "https", "HTTPS"} {
-		if sev, _ := classifyInteraction(proto, routing); sev.String() != "info" {
+		if sev, _, _ := classifyInteraction(proto, routing); sev.String() != "info" {
 			t.Errorf("routing-ssrf classifyInteraction(%q) severity = %s, want info", proto, sev)
 		}
 	}
@@ -298,7 +354,7 @@ func TestClassifyInteractionHostRoutingInfo(t *testing.T) {
 	// X-Forwarded-Host header injection → Info (case-insensitive on the name).
 	for _, name := range []string{"X-Forwarded-Host", "x-forwarded-host"} {
 		xfh := PayloadContext{TargetURL: "http://target.com", InjectionType: "header", ParameterName: name, ModuleID: "oast-probe"}
-		if sev, _ := classifyInteraction("http", xfh); sev.String() != "info" {
+		if sev, _, _ := classifyInteraction("http", xfh); sev.String() != "info" {
 			t.Errorf("X-Forwarded-Host (%q) classifyInteraction severity = %s, want info", name, sev)
 		}
 	}
@@ -306,14 +362,65 @@ func TestClassifyInteractionHostRoutingInfo(t *testing.T) {
 	// Other forwarding headers from the same module must remain high.
 	for _, name := range []string{"X-Forwarded-For", "Referer", "Origin"} {
 		other := PayloadContext{TargetURL: "http://target.com", InjectionType: "header", ParameterName: name, ModuleID: "oast-probe"}
-		if sev, _ := classifyInteraction("http", other); sev.String() != "high" {
+		if sev, _, _ := classifyInteraction("http", other); sev.String() != "high" {
 			t.Errorf("header %q classifyInteraction severity = %s, want high", name, sev)
 		}
 	}
 
 	// A different module's parameter-based HTTP callback must remain high.
 	generic := PayloadContext{TargetURL: "http://target.com", InjectionType: "parameter", ParameterName: "url", ModuleID: "ssrf-detection"}
-	if sev, _ := classifyInteraction("http", generic); sev.String() != "high" {
+	if sev, _, _ := classifyInteraction("http", generic); sev.String() != "high" {
 		t.Errorf("generic SSRF classifyInteraction severity = %s, want high", sev)
+	}
+}
+
+// TestClassifyCommandInjectionForwardingHeaderFP locks in the false-positive
+// defense for OAST command injection: a DNS-only callback for a payload injected
+// into a client-IP / forwarding header is NOT confirmed command injection (edge
+// infrastructure resolves those header values for geo-IP/logging), so it is
+// downgraded to Low / Tentative — while the HTTP-fetch leg stays Critical and a
+// genuine request parameter stays High on DNS.
+func TestClassifyCommandInjectionForwardingHeaderFP(t *testing.T) {
+	// The exact false-positive class observed in the wild: nslookup/ping payloads
+	// in X-Forwarded-For / X-Real-IP / True-Client-IP resolved over DNS by a
+	// Google-fronted geo-IP edge. Must be downgraded, never High.
+	for _, name := range []string{"X-Forwarded-For", "x-real-ip", "True-Client-IP", "CF-Connecting-IP", "X-Client-IP"} {
+		pctx := PayloadContext{
+			TargetURL:     "http://target.com",
+			ParameterName: name,
+			InjectionType: "os-command-injection (parameter)",
+			ModuleID:      "command-injection-oast",
+		}
+		sev, conf, desc := classifyInteraction("dns", pctx)
+		if sev.String() != "low" {
+			t.Errorf("cmdi DNS on %q severity = %s, want low; desc: %s", name, sev, desc)
+		}
+		if conf != severity.Tentative {
+			t.Errorf("cmdi DNS on %q confidence = %s, want tentative", name, conf)
+		}
+	}
+
+	// HTTP/HTTPS callback (the curl/wget leg) on the same forwarding header is
+	// strong proof a shell ran → stays Critical / Certain.
+	httpPctx := PayloadContext{
+		TargetURL:     "http://target.com",
+		ParameterName: "X-Forwarded-For",
+		InjectionType: "os-command-injection (header)",
+		ModuleID:      "command-injection-oast",
+	}
+	if sev, conf, _ := classifyInteraction("http", httpPctx); sev.String() != "critical" || conf != severity.Certain {
+		t.Errorf("cmdi HTTP on X-Forwarded-For = %s/%s, want critical/certain", sev, conf)
+	}
+
+	// DNS-only callback for a genuine request parameter (not a forwarding header)
+	// is a strong lead → stays High, but Firm rather than Certain (no HTTP fetch).
+	paramPctx := PayloadContext{
+		TargetURL:     "http://target.com",
+		ParameterName: "host",
+		InjectionType: "os-command-injection (parameter)",
+		ModuleID:      "command-injection-oast",
+	}
+	if sev, conf, _ := classifyInteraction("dns", paramPctx); sev.String() != "high" || conf != severity.Firm {
+		t.Errorf("cmdi DNS on genuine param = %s/%s, want high/firm", sev, conf)
 	}
 }

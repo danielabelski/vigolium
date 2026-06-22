@@ -101,6 +101,43 @@ func TestFreshCanaryShape(t *testing.T) {
 	}
 }
 
+func TestHostReflectedAsAuthority(t *testing.T) {
+	const h = "vigolium-probe.example"
+	cases := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		// Genuine authority-position reflections (the real poisoning sinks).
+		{"location authority", "https://" + h + "/dashboard", true},
+		{"location authority with port", "https://" + h + ":8443/x", true},
+		{"location authority no path", "https://" + h, true},
+		{"protocol-relative authority", "//" + h + "/x", true},
+		{"body absolute link", `<a href="https://` + h + `/reset?t=1">`, true},
+		{"uppercase scheme", "HTTPS://" + h + "/x", true},
+
+		// The reported false positive: host echoed only inside another URL's query.
+		{"oauth redirect_uri encoded", "https://idp.trusted.example/as?redirect_uri=https%3A%2F%2F" + h + "%2Foauth2%2Fcallback", false},
+		{"next param plain", "https://idp.trusted.example/login?next=https://" + h + "/x", true}, // plain // still authority-shaped
+		{"query value not url", "https://trusted.example/?host=" + h, false},
+
+		// Non-authority substrings.
+		{"bare mention", "contact " + h + " for support", false},
+		{"prefix of longer host", "https://" + h + ".evil.com/x", false},
+		{"empty inputs", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HostReflectedAsAuthority(tc.s, h); got != tc.want {
+				t.Errorf("HostReflectedAsAuthority(%q) = %v, want %v", tc.s, got, tc.want)
+			}
+		})
+	}
+	if HostReflectedAsAuthority("https://x/", "") {
+		t.Error("empty host must not match")
+	}
+}
+
 func TestReconfirmConfigDefaults(t *testing.T) {
 	c := ReconfirmConfig{}.withDefaults()
 	if c.PayloadRounds != 2 {

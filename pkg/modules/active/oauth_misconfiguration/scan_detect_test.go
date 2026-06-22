@@ -3,6 +3,7 @@ package oauth_misconfiguration
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -48,6 +49,36 @@ func TestScanPerRequest_DetectsRedirectURIManipulation(t *testing.T) {
 		}
 	}
 	assert.True(t, sawRedirectFinding, "expected a redirect_uri manipulation finding among results")
+}
+
+// TestScanPerRequest_RedirectURIEchoedToIdPNoFalsePositive reproduces the
+// CDN/OAuth-login false positive: the authorize endpoint reflects the manipulated
+// redirect_uri back into the Location's query string but still 302s to the trusted
+// SSO/IdP — the attacker host is never the redirect authority, so the auth code
+// flows to the SSO (which validates redirect_uri), not the attacker. A bare
+// substring match flagged it (and a fresh canary echoes identically); the
+// authority-position guard must suppress it.
+func TestScanPerRequest_RedirectURIEchoedToIdPNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ru := r.URL.Query().Get("redirect_uri")
+		// Forward the (attacker-manipulated) redirect_uri to the IdP as a query
+		// parameter, but the redirect authority stays the trusted SSO host.
+		loc := "https://sso.trusted.example/authorize?redirect_uri=" + url.QueryEscape(ru)
+		w.Header().Set("Location", loc)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/oauth/authorize?client_id=app1&response_type=code&state=xyz&redirect_uri=https://app.example.com/callback")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	for _, r := range res {
+		assert.NotContains(t, r.Info.Name, "Open Redirect",
+			"a redirect_uri echoed into the IdP Location query (authority unchanged) must not be reported as an open redirect")
+	}
 }
 
 // TestScanPerRequest_NoFalsePositive ensures a hardened OAuth endpoint yields no

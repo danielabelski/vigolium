@@ -258,6 +258,12 @@ func TestCheckHostInjection(t *testing.T) {
 	assert.NotEmpty(t, checkHostInjection("<a href=https://"+injectedHost+"/x>", "", ""))
 	assert.NotEmpty(t, checkHostInjection("", "", "https://"+injectedHost+"/cb"))
 	assert.Empty(t, checkHostInjection("clean body", "clean headers", "/local"))
+	// A host echoed only inside another URL's query (an OAuth redirect_uri=) is NOT
+	// in authority position — the redirect's real authority is the trusted IdP — so
+	// it must not be reported (the CDN/OAuth-login false positive).
+	assert.Empty(t, checkHostInjection("", "", "https://idp.trusted.example/as?redirect_uri=https%3A%2F%2F"+injectedHost+"%2Fcb"))
+	// The same echo seen in the full header block must likewise be ignored.
+	assert.Empty(t, checkHostInjection("", "Location: https://idp.trusted.example/as?redirect_uri=https%3A%2F%2F"+injectedHost+"%2Fcb\r\n", ""))
 }
 
 // TestCheckPortInjection exercises the pure port-reflection helper directly.

@@ -167,6 +167,72 @@ func TestShellQuoteArg(t *testing.T) {
 	assert.Equal(t, `'it'\''s'`, shellQuoteArg("it's"))
 }
 
+// Bare-resume discovery: an explicit -o pins the manifest exactly, while no -o
+// scans the working directory for a single *.progress.json, reporting zero or
+// several matches as errors so the operator disambiguates.
+func TestDiscoverResumeManifestPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	// Empty directory: nothing to resume.
+	_, err := discoverResumeManifestPath("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no progress file")
+
+	// Exactly one manifest: auto-picked.
+	require.NoError(t, os.WriteFile("roch.progress.json", []byte("{}"), 0644))
+	got, err := discoverResumeManifestPath("")
+	require.NoError(t, err)
+	assert.Equal(t, "roch.progress.json", got)
+
+	// A second manifest makes the bare form ambiguous.
+	require.NoError(t, os.WriteFile("acme.progress.json", []byte("{}"), 0644))
+	_, err = discoverResumeManifestPath("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multiple progress files")
+
+	// An explicit -o prefix pins one regardless of how many exist.
+	got, err = discoverResumeManifestPath("roch")
+	require.NoError(t, err)
+	assert.Equal(t, "roch.progress.json", got)
+
+	// An -o prefix whose manifest does not exist is an error.
+	_, err = discoverResumeManifestPath("missing")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no resume manifest")
+}
+
+// The relaunch args reproduce the saved run: ScanArgs carries the inherited
+// per-child flags and the per-target -T/-o/-P/--split-by-host are rebuilt from
+// the dedicated fields, with --resume appended. An older manifest without
+// ScanArgs degrades to the stateless essentials.
+func TestBuildResumeRelaunchArgs(t *testing.T) {
+	m := &resumeManifest{
+		OutputPrefix: "roch",
+		Formats:      []string{"sqlite", "html"},
+		TargetFiles:  []string{"subs.txt"},
+		Parallel:     2,
+		ScanArgs:     []string{"--stateless", "--format", "sqlite,html", "--fuzz-wordlist", "/w/fast.txt", "--skip", "known-issue-scan"},
+	}
+	assert.Equal(t, []string{
+		"--stateless", "--format", "sqlite,html", "--fuzz-wordlist", "/w/fast.txt", "--skip", "known-issue-scan",
+		"-T", "subs.txt", "-o", "roch", "-P", "2", "--split-by-host", "--resume",
+	}, buildResumeRelaunchArgs(m))
+
+	// Multiple target files each re-emit a -T; a zero/absent parallel clamps to 1.
+	multi := &resumeManifest{TargetFiles: []string{"a.txt", "b.txt"}, ScanArgs: []string{"--stateless"}}
+	assert.Equal(t, []string{
+		"--stateless", "-T", "a.txt", "-T", "b.txt", "-P", "1", "--split-by-host", "--resume",
+	}, buildResumeRelaunchArgs(multi))
+
+	// Pre-ScanArgs manifest: synthesize --stateless + --format from the saved
+	// formats so the basic per-host run still resumes.
+	old := &resumeManifest{OutputPrefix: "roch", Formats: []string{"jsonl"}, TargetFiles: []string{"subs.txt"}, Parallel: 3}
+	assert.Equal(t, []string{
+		"--stateless", "--format", "jsonl", "-T", "subs.txt", "-o", "roch", "-P", "3", "--split-by-host", "--resume",
+	}, buildResumeRelaunchArgs(old))
+}
+
 // The fingerprint is stable across calls, changes when an inherited flag
 // changes, and ignores the per-target/output flags the parent rewrites.
 func TestScanSettingsFingerprint(t *testing.T) {

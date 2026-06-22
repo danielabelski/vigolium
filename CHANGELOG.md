@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.38-beta] - 2026-06-22
+
+A false-positive-hardening release for the host-injection, blind-OAST, file-read, and header-leak detectors, plus a scan-resume convenience. Detectors that fired on a substring match now require structural proof, and a DNS-only command-injection callback on a forwarding header is no longer reported as a confirmed shell.
+
+### Added
+
+- **Bare `vigolium scan --resume`** — run with no other flags to auto-discover the `*.progress.json` manifest in the working directory, rebuild the original `-S -T --split-by-host -P` command from it, and relaunch — no need to re-type the full flag set. Pass `-o <prefix>` to disambiguate when several manifests exist.
+
+### Fixed
+
+- **Host-injection detectors require authority position, not a substring** — a new shared `modkit.HostReflectedAsAuthority` gate confirms the client-supplied host actually becomes the *authority* of a generated URL, rather than appearing as an incidental substring. This closes a CDN/OAuth false positive where `X-Forwarded-Host`/`Host` is reflected into a `redirect_uri=`/`continue=` query parameter of a 3xx whose authority stays the trusted IdP (nothing to poison), which a bare `strings.Contains` flagged High/Firm. Wired into **`proxy-header-trust`**, **`host-header-injection`**, **`express-trust-proxy-misconfig`**, **`web-cache-poisoning`**, and **`oauth-misconfiguration`**.
+- **`command-injection-oast` grades confidence by callback proof** — a DNS-only callback proves a value was *resolved*, not that a shell ran. An HTTP-fetch callback (curl/wget) stays **Critical/Certain**; a DNS-only callback on a genuine parameter is **High/Firm**; a DNS-only callback on a client-IP / forwarding header (`X-Forwarded-For`, `X-Real-IP`, `True-Client-IP`) is downgraded to **Low/Tentative**, since edge infrastructure resolves those header values for geo-IP/logging with no shell running. Findings also reconstruct the real planting request (the actual `;nslookup <host>` payload) via a new OAST `RecordPayload` hook.
+- **LFI / file-read modules confirm by file shape, not bare words** — a new shared `pkg/modules/shared/filesig` package requires the leaked file's real structural shape (a genuine `passwd` line, a bracketed `win.ini` section, an anchored nginx directive) with baseline subtraction, replacing bare-word markers (`server`, `location`, `root:`) that also appear in English, CSP directives, and JSON. Closes a Cloudflare 403 block-page reported as LFI. Wired into **`lfi-path-traversal`** (with a block/status gate), **`mcp-resource-fuzz`**, and **`mcp-tool-fuzz`**.
+- **`sensitive-header-leak` downgrades redirect / auth-challenge artifacts** — a token-shaped value in a `Location`/`Www-Authenticate`/`Refresh`/`Proxy-Authenticate` header, or any sensitive value on a 3xx response, is now **Info/Tentative** rather than Medium/Firm — these are login-flow navigation artifacts, not deliberate secret leaks. A hit in a genuine custom header (e.g. `X-Api-Key`) keeps full severity.
+
 ## [v0.1.37-beta] - 2026-06-19
 
 Adds resumable parallel scans: a stateless `-S -T --split-by-host -P` fan-out stopped with Ctrl-C can now be picked up where it left off.

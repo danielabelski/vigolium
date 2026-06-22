@@ -112,6 +112,7 @@ func (m *Module) ScanPerRequest(
 				continue
 			}
 			newPath := sub + fmt.Sprintf(oob, oastURL)
+			oast.RecordPayload(oastURL, newPath)
 			if err := m.sendProbe(ctx, httpClient, newPath); err != nil {
 				return nil, nil
 			}
@@ -125,6 +126,7 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 		newPath := fmt.Sprintf("/%s/http://%s", pp, oastURL)
+		oast.RecordPayload(oastURL, newPath)
 		if err := m.sendProbe(ctx, httpClient, newPath); err != nil {
 			return nil, nil
 		}
@@ -137,6 +139,7 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 		newPath := fmt.Sprintf("/%s/%s", pp, oastURL)
+		oast.RecordPayload(oastURL, newPath)
 		if err := m.sendProbe(ctx, httpClient, newPath); err != nil {
 			return nil, nil
 		}
@@ -149,6 +152,7 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 		newPath := fmt.Sprintf(tp, oastURL)
+		oast.RecordPayload(oastURL, newPath)
 		if err := m.sendProbe(ctx, httpClient, newPath); err != nil {
 			return nil, nil
 		}
@@ -161,6 +165,7 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 		value := fmt.Sprintf(pp.valueFormat, oastURL)
+		oast.RecordPayload(oastURL, value)
 		if err := m.sendParamProbe(ctx, httpClient, pp.name, value); err != nil {
 			return nil, nil
 		}
@@ -169,6 +174,7 @@ func (m *Module) ScanPerRequest(
 	// Category 6: Proxy-Authorization header with OAST URL
 	oastURL := oast.GenerateURL(urlx.String(), "Proxy-Authorization", "header", ModuleID, requestHash)
 	if oastURL != "" {
+		oast.RecordPayload(oastURL, "Basic "+oastURL)
 		if err := m.sendHeaderProbe(ctx, httpClient, "Proxy-Authorization", "Basic "+oastURL); err != nil {
 			return nil, nil
 		}

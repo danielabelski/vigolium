@@ -2,7 +2,6 @@ package proxy_header_trust
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
@@ -157,7 +156,12 @@ func (m *Module) testForwardedHost(
 	// of re-parsing on this hot path.
 	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
-	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
+	// NoRedirects: host-injection lives in the Location header the app GENERATES.
+	// Following the redirect would replace it with the destination's response
+	// (losing the evidence) and, worse, chase an attacker-influenced host — a
+	// self-inflicted SSRF. Inspect the immediate hop instead, deterministically and
+	// regardless of the requester's follow-redirect configuration.
+	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {
 		return nil
 	}
@@ -173,22 +177,41 @@ func (m *Module) testForwardedHost(
 		probeLocation = resp.Response().Header.Get("Location")
 	}
 
-	var finding string
+	// Host poisoning requires the injected host to become the AUTHORITY of a
+	// generated URL — the host a redirect actually sends the victim to, or the
+	// host of a generated link (a password-reset URL) — not merely to appear as a
+	// substring somewhere inside another URL. The reported false positive is the
+	// latter: behind CloudFront an OAuth login flow reflects X-Forwarded-Host into
+	// the URL-encoded redirect_uri= query parameter of a 302 whose authority stays
+	// the trusted IdP (wam.roche.com), so the real destination is identical with or
+	// without the spoofed header — there is nothing to poison. Match authority
+	// position only; an echo inside a query value (or any %2F%2Fhost reflection)
+	// does not qualify.
+	locAuthority := modkit.HostReflectedAsAuthority(probeLocation, injectedHost)
+	bodyAuthority := !locAuthority && modkit.HostReflectedAsAuthority(probeBody, injectedHost)
 
-	if strings.Contains(probeLocation, injectedHost) {
-		finding = fmt.Sprintf("Injected host %q reflected in Location header: %s", injectedHost, probeLocation)
-	} else if strings.Contains(probeBody, injectedHost) {
-		finding = fmt.Sprintf("Injected host %q reflected in response body", injectedHost)
+	var finding string
+	confidence := severity.Firm
+	switch {
+	case locAuthority:
+		finding = fmt.Sprintf("Injected host %q set as the redirect authority in the Location header: %s", injectedHost, probeLocation)
+	case bodyAuthority:
+		// A generated absolute URL in the body (e.g. a password-reset link) is a
+		// weaker, harder-to-attribute sink than a redirect whose destination we can
+		// see — report it for review rather than as a confirmed redirect poisoning.
+		finding = fmt.Sprintf("Injected host %q reflected as a URL authority in the response body", injectedHost)
+		confidence = severity.Tentative
 	}
 
 	if finding == "" {
 		return nil
 	}
 
-	// Strict drop-on-fail: confirm the X-Forwarded-Host value genuinely flows
-	// into the output (a real input→output reflection), not a one-shot echo or a
-	// coincidental static string. A fresh random host must reflect every round.
-	// Fails OPEN only on an inconclusive probe error.
+	// Strict drop-on-fail: confirm the X-Forwarded-Host value genuinely flows into
+	// the output in authority position (a real input→output reflection), not a
+	// one-shot echo, a coincidental static string, or a query-parameter echo. A
+	// fresh random host must reflect as a URL authority every round. Fails OPEN
+	// only on an inconclusive probe error.
 	if confirmed, err := m.confirmForwardedHostReflection(ctx, httpClient); err == nil && !confirmed {
 		return nil
 	}
@@ -206,7 +229,7 @@ func (m *Module) testForwardedHost(
 			Name:        "Proxy Header Trust: X-Forwarded-Host Injection",
 			Description: "X-Forwarded-Host header is trusted for URL generation, allowing host-based attacks such as password reset poisoning and cache poisoning",
 			Severity:    severity.High,
-			Confidence:  ModuleConfidence,
+			Confidence:  confidence,
 			Tags:        []string{"proxy", "forwarded-headers", "ip-spoofing", "host-injection"},
 			Reference:   []string{"https://owasp.org/www-project-web-security-testing-guide/"},
 		},
@@ -408,11 +431,14 @@ func (m *Module) testForwardedFor(
 }
 
 // confirmForwardedHostReflection confirms the X-Forwarded-Host value genuinely
-// flows into the response (Location header or body) by sending a fresh random
-// host each round and requiring it to reflect every time. A page that merely
-// contains a fixed string, or echoes the header only once, will not track the
-// changing canary. Returns ConfirmReflection's (confirmed, err); callers treat a
-// non-nil err as inconclusive and keep the finding.
+// flows into the response AS A URL AUTHORITY (the host component of the Location
+// redirect or a generated link), by sending a fresh random host each round and
+// requiring it to reflect in authority position every time. A page that merely
+// contains a fixed string, echoes the header only once, or echoes it inside
+// another URL's query parameter (the OAuth redirect_uri= case) will not satisfy
+// the authority check across the changing canary. Returns ConfirmReflection's
+// (confirmed, err); callers treat a non-nil err as inconclusive and keep the
+// finding.
 func (m *Module) confirmForwardedHostReflection(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester) (bool, error) {
 	return modkit.ConfirmReflection(2, func(canary string) (bool, error) {
 		host := "vgo" + canary + ".example"
@@ -431,7 +457,10 @@ func (m *Module) confirmForwardedHostReflection(ctx *httpmsg.HttpRequestResponse
 		// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
 		// of re-parsing on this hot path.
 		req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
-		resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
+		// NoRedirects mirrors the primary probe: confirm the canary reflects into the
+		// immediate Location/body, not a followed destination. NoClustering keeps each
+		// fresh-canary round on the wire.
+		resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true, NoRedirects: true})
 		if err != nil {
 			return false, err
 		}
@@ -440,7 +469,7 @@ func (m *Module) confirmForwardedHostReflection(ctx *httpmsg.HttpRequestResponse
 			return false, nil
 		}
 		loc := resp.Response().Header.Get("Location")
-		return strings.Contains(loc, host) || strings.Contains(resp.Body().String(), host), nil
+		return modkit.HostReflectedAsAuthority(loc, host) || modkit.HostReflectedAsAuthority(resp.Body().String(), host), nil
 	})
 }
 

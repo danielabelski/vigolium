@@ -10,7 +10,30 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
+
+// lowSignalEndpoints are the actuator endpoints Spring Boot exposes publicly by
+// default (the shipped `management.endpoints.web.exposure.include` is health,info)
+// and that leak little on their own: /health reveals only an UP/DOWN status enum
+// and /info only build/git metadata. Their exposure is reported at Low. The
+// high-value endpoints (/env, /beans, /metrics, /loggers, /mappings) that dump
+// credentials, live config and internal routes keep the module's High default.
+var lowSignalEndpoints = map[string]bool{
+	"health": true,
+	"info":   true,
+}
+
+// endpointSeverity returns the per-finding severity for an actuator hit on the
+// endpoint named name: Low for the publicly-exposed-by-default health/info
+// endpoints, otherwise Undefined so the executor's assignModuleInfo falls back to
+// the module's High default.
+func endpointSeverity(name string) severity.Severity {
+	if lowSignalEndpoints[name] {
+		return severity.Low
+	}
+	return severity.Undefined
+}
 
 // testCase pairs a set of actuator paths to probe with a confirm predicate that
 // must recognize the *structure* of that endpoint's actuator response — not a
@@ -127,6 +150,10 @@ func (m *Module) ScanPerRequest(
 					Request:          rawReq,
 					Response:         body,
 					FuzzingParameter: path,
+					// /health and /info are public-by-default and low-disclosure, so
+					// they report Low; every other actuator endpoint leaves Severity
+					// Undefined and inherits the module's High default.
+					Info: output.Info{Severity: endpointSeverity(testCase.Name)},
 				})
 			}
 
@@ -156,8 +183,9 @@ func (m *Module) ScanPerRequest(
 						Response:         body,
 						FuzzingParameter: bypassPath,
 						Info: output.Info{
-							Name: m.Name(),
-							Tags: append([]string(nil), m.Tags()...),
+							Name:     m.Name(),
+							Tags:     append([]string(nil), m.Tags()...),
+							Severity: endpointSeverity(tc.Name),
 						},
 					}
 				}); res != nil {

@@ -105,6 +105,7 @@ func (m *Module) ScanPerInsertionPoint(
 		}
 
 		payload := fmt.Sprintf(p.tmpl, oastURL)
+		oast.RecordPayload(oastURL, payload)
 		fuzzedRaw := ip.BuildRequest([]byte(payload))
 
 		// BuildRequest produces well-formed raw, so wrap directly instead

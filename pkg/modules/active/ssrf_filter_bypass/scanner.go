@@ -107,6 +107,7 @@ func (m *Module) ScanPerInsertionPoint(
 			continue
 		}
 		payloadStr := strings.ReplaceAll(p.Value, oastPlaceholder, oastHost)
+		oast.RecordPayload(oastHost, payloadStr)
 
 		fuzzedRaw := ip.BuildRequest([]byte(payloadStr))
 		// BuildRequest produces well-formed raw, so wrap directly instead

@@ -30,11 +30,14 @@ Vigolium provides two complementary scanning modes:
 curl -fsSL https://vigolium.com/install.sh | bash
 ```
 
-### npm
+### [npm](https://www.npmjs.com/package/@vigolium/vigolium)
 
 ```bash
 npm install -g @vigolium/vigolium
 ```
+
+<details>
+<summary>Other method like Docker or Build from source</summary>
 
 ### Docker
 
@@ -52,6 +55,8 @@ make build         # build and install to $GOPATH/bin
 ```
 
 Requires **Go 1.26+** and **bun 1.3.11+**. See [HACKING.md](HACKING.md#build-and-run) for prerequisites and build details.
+
+</details>
 
 
 | UI Dashboard | Traffic Dashboard |

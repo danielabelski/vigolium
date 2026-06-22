@@ -130,6 +130,54 @@ func TestScanPerHost_SafeServerNoFinding(t *testing.T) {
 	assert.Empty(t, res, "a server rejecting traversal reads must not be flagged")
 }
 
+// noisyResourceHandler honours the traversal read but returns content that
+// merely CONTAINS the old bare markers (`/bin/`, `:0:0:`) without any real
+// passwd entry — exactly what the former substring matcher flagged as LFI.
+func noisyResourceHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		switch rpcMethod(raw) {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "sess-1")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","serverInfo":{"name":"demo","version":"1"}}}`)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "resources/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":3,"result":{"resources":[{"uri":"file:///app/readme.txt","name":"readme"}]}}`)
+		case "resources/templates/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":4,"result":{"resourceTemplates":[]}}`)
+		case "resources/read":
+			uri := readURI(raw)
+			out := map[string]any{
+				"jsonrpc": "2.0", "id": 1,
+				"result": map[string]any{
+					"contents": []map[string]any{{"uri": uri, "text": "loader error: /bin/ld returned :0:0: while linking"}},
+				},
+			}
+			b, _ := json.Marshal(out)
+			_, _ = w.Write(b)
+		default:
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`)
+		}
+	}
+}
+
+// TestScanPerHost_NoFalsePositiveOnNoise is the regression for the bare-marker
+// false positive: a resources/read response that merely contains `/bin/` and
+// `:0:0:` substrings — not a real passwd entry — must not be flagged.
+func TestScanPerHost_NoFalsePositiveOnNoise(t *testing.T) {
+	srv := httptest.NewServer(noisyResourceHandler())
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/mcp")
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "scattered /bin/ and :0:0: substrings without a real passwd entry must not be flagged")
+}
+
 // TestSubstituteTemplate covers the placeholder-substitution helper.
 func TestSubstituteTemplate(t *testing.T) {
 	phs := []string{"id", "fmt"}

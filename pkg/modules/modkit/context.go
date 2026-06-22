@@ -88,6 +88,11 @@ type RequestUUIDResolver interface {
 // OASTProvider generates out-of-band callback URLs for blind vulnerability detection.
 type OASTProvider interface {
 	GenerateURL(targetURL, paramName, injectionType, moduleID, requestHash string) string
+	// RecordPayload attaches the literal value planted at the injection point to
+	// the callback URL's tracked context, so a resulting finding reconstructs the
+	// planting request faithfully (the real header/parameter value, not a guessed
+	// http://<host> shape). callbackURL is the value returned by GenerateURL.
+	RecordPayload(callbackURL, payload string)
 	Enabled() bool
 }
 

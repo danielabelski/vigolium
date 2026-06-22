@@ -87,7 +87,14 @@ func (m *Module) ScanPerRequest(
 		if host == "" {
 			continue
 		}
-		for _, payload := range infra.CmdiOASTHeaderPayloads(host, "http://"+host) {
+		payloads := infra.CmdiOASTHeaderPayloads(host, "http://"+host)
+		// Record a representative variant (the first is always sent) so the finding
+		// reconstructs the planting request with the real shell payload in the
+		// header — not a bare host — even though several variants share this host.
+		if len(payloads) > 0 {
+			oast.RecordPayload(host, payloads[0])
+		}
+		for _, payload := range payloads {
 			modifiedRaw, err := httpmsg.AddOrReplaceHeader(ctx.Request().Raw(), header, payload)
 			if err != nil {
 				continue
@@ -129,14 +136,29 @@ func (m *Module) ScanPerInsertionPoint(
 	}
 
 	requestHash := ctx.Request().ID()
-	host := oast.GenerateURL(urlx.String(), ip.Name(), injectionTypeParam, ModuleID, requestHash)
+	// Label the injection by its actual insertion-point kind: a header insertion
+	// point (e.g. X-Forwarded-For enumerated as an insertion point) must carry the
+	// "header" injection type so the finding reconstructs it as a header — not a
+	// generic parameter — and applies the real payload there.
+	injType := injectionTypeParam
+	if ip.Type() == httpmsg.INS_HEADER {
+		injType = injectionTypeHeader
+	}
+	host := oast.GenerateURL(urlx.String(), ip.Name(), injType, ModuleID, requestHash)
 	if host == "" {
 		return nil, nil
 	}
 	httpURL := "http://" + host
 
 	base := ip.BaseValue()
-	for _, payload := range infra.CmdiOASTPayloads(host, httpURL) {
+	payloads := infra.CmdiOASTPayloads(host, httpURL)
+	// Record the complete value planted at the insertion point (base + a
+	// representative variant that is always sent) so the finding shows what really
+	// went on the wire rather than the bare callback host.
+	if len(payloads) > 0 {
+		oast.RecordPayload(host, base+payloads[0])
+	}
+	for _, payload := range payloads {
 		raw := ip.BuildRequest([]byte(base + payload))
 		if abort := m.fire(ctx, httpClient, raw); abort {
 			return nil, nil

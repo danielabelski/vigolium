@@ -21,6 +21,13 @@ type cacheProbe struct {
 	headerName string
 	value      string
 	desc       string
+	// hostShaped marks a probe whose value is a hostname: its reflection only
+	// matters when it lands in URL-authority position (the host of a cached link /
+	// redirect that other users then load), not as an incidental substring inside a
+	// query parameter (a continue=/redirect_uri= echo whose real authority is
+	// unchanged). Non-host probes (scheme, path override, port, language) keep plain
+	// substring matching.
+	hostShaped bool
 }
 
 var probes = []cacheProbe{
@@ -28,6 +35,7 @@ var probes = []cacheProbe{
 		headerName: "X-Forwarded-Host",
 		value:      poisonMarker,
 		desc:       "X-Forwarded-Host reflection in cached response",
+		hostShaped: true,
 	},
 	{
 		headerName: "X-Forwarded-Scheme",
@@ -133,8 +141,19 @@ func (m *Module) ScanPerRequest(
 		}
 
 		body := resp.Body().String()
-		reflectedInBody := strings.Contains(body, probe.value)
-		reflectedInLocation := strings.Contains(respObj.Header.Get("Location"), probe.value)
+		location := respObj.Header.Get("Location")
+		var reflectedInBody, reflectedInLocation bool
+		if probe.hostShaped {
+			// A host poisons a shared cache only when it becomes the AUTHORITY of a
+			// cached URL (a link/script src/redirect other users load), not when it is
+			// echoed into a query value whose real destination is unchanged — the same
+			// continue=/redirect_uri= false positive the host-trust modules guard.
+			reflectedInBody = modkit.HostReflectedAsAuthority(body, probe.value)
+			reflectedInLocation = modkit.HostReflectedAsAuthority(location, probe.value)
+		} else {
+			reflectedInBody = strings.Contains(body, probe.value)
+			reflectedInLocation = strings.Contains(location, probe.value)
+		}
 
 		if !reflectedInBody && !reflectedInLocation {
 			resp.Close()

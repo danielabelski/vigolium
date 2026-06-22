@@ -54,57 +54,7 @@ func TestLooksLikeFilePath(t *testing.T) {
 	}
 }
 
-func TestCountNewMarkers(t *testing.T) {
-	tests := []struct {
-		name     string
-		data     string
-		baseline string
-		markers  []string
-		expected int
-	}{
-		{
-			name:     "all markers new",
-			data:     "root:x:0:0:root:/root:/bin/bash",
-			baseline: "nothing here",
-			markers:  []string{"root:", ":0:0:", "/bin/"},
-			expected: 3,
-		},
-		{
-			name:     "markers already in baseline",
-			data:     "root:x:0:0:root:/root:/bin/bash",
-			baseline: "root:x:0:0:root:/root:/bin/bash",
-			markers:  []string{"root:", ":0:0:", "/bin/"},
-			expected: 0,
-		},
-		{
-			name:     "partial new markers",
-			data:     "root:x:0:0:root:/root:/bin/bash",
-			baseline: "root: is a user",
-			markers:  []string{"root:", ":0:0:", "/bin/"},
-			expected: 2,
-		},
-		{
-			name:     "empty baseline",
-			data:     "root:x:0:0:root:/root:/bin/bash",
-			baseline: "",
-			markers:  []string{"root:", ":0:0:", "/bin/"},
-			expected: 3,
-		},
-		{
-			name:     "no markers match",
-			data:     "nothing relevant",
-			baseline: "",
-			markers:  []string{"root:", ":0:0:", "/bin/"},
-			expected: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := countNewMarkers(tt.data, tt.baseline, tt.markers)
-			if got != tt.expected {
-				t.Errorf("countNewMarkers() = %v, want %v", got, tt.expected)
-			}
-		})
-	}
-}
+// The structural confirmers themselves (passwd/win.ini/nginx, incl. the
+// Cloudflare cf-beacon block-page rejection) are unit-tested in their shared
+// home: pkg/modules/shared/filesig. Here we cover only this module's wiring and
+// the full-scan WAF-block regression (see scan_detect_test.go).

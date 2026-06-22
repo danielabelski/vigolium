@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,6 +62,18 @@ func (rc *oastResultCollector) snapshot() []*output.ResultEvent {
 	out := make([]*output.ResultEvent, len(rc.results))
 	copy(out, rc.results)
 	return out
+}
+
+// oastResultProtocol extracts the interaction protocol (dns/http/https/…) from a
+// result's ExtractedResults, where handleInteraction records it as the leading
+// "protocol=<proto>" entry. Returns "" when no protocol marker is present.
+func oastResultProtocol(r *output.ResultEvent) string {
+	for _, er := range r.ExtractedResults {
+		if proto, ok := strings.CutPrefix(er, "protocol="); ok {
+			return proto
+		}
+	}
+	return ""
 }
 
 func waitForOASTResults(t *testing.T, rc *oastResultCollector, minCount int, timeout time.Duration) {
@@ -162,8 +175,12 @@ func TestOASTPayloadAndCallback(t *testing.T) {
 		t.Logf("result[%d]: module=%s protocol=%v", i, r.ModuleID, r.ExtractedResults)
 	}
 
-	// The HTTP GET triggers DNS resolution first, so we may get both dns and http interactions.
-	// Verify at least one result is correlated to our module with a recognized protocol.
+	// The HTTP GET triggers DNS resolution first, so the OAST server records both
+	// dns and http interactions for the same callback host. Confidence is now
+	// calibrated per protocol (see pkg/oast.classifyInteraction): a generic blind-SSRF
+	// DNS-only callback is Info/Tentative (resolution alone is a weaker signal),
+	// while the actual outbound HTTP fetch is High/Certain proof. Assert each
+	// correlated result against its own protocol rather than a blanket Certain.
 	var foundCorrelated bool
 	for _, r := range results {
 		if r.ModuleID != "mod-ssrf-e2e" {
@@ -174,7 +191,14 @@ func TestOASTPayloadAndCallback(t *testing.T) {
 		assert.Equal(t, "redirect", r.FuzzingParameter)
 		assert.True(t, r.MatcherStatus)
 		assert.Equal(t, "Out-of-Band Interaction Detected", r.Info.Name)
-		assert.Equal(t, severity.Certain, r.Info.Confidence)
+		switch oastResultProtocol(r) {
+		case "http", "https":
+			assert.Equal(t, severity.High, r.Info.Severity, "an outbound HTTP fetch is High-severity blind SSRF")
+			assert.Equal(t, severity.Certain, r.Info.Confidence, "an outbound HTTP fetch to an unguessable OAST host is unforgeable SSRF proof")
+		case "dns":
+			assert.Equal(t, severity.Info, r.Info.Severity, "a DNS-only SSRF callback is Info severity")
+			assert.Equal(t, severity.Tentative, r.Info.Confidence, "DNS resolution alone is a lower-confidence SSRF signal")
+		}
 	}
 	assert.True(t, foundCorrelated, "should have at least one correlated result for mod-ssrf-e2e")
 }

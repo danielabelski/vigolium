@@ -4,14 +4,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/vigolium/vigolium/pkg/terminal"
 	"github.com/vigolium/vigolium/pkg/types"
 )
 
@@ -54,6 +58,15 @@ type resumeManifest struct {
 	Findings int            `json:"findings"`
 	Severity map[string]int `json:"severity,omitempty"`
 
+	// Parallel and ScanArgs capture enough of the originating command to relaunch
+	// it from a bare `vigolium scan --resume` (no other flags): Parallel is the
+	// -P degree and ScanArgs is the inherited per-child flag set (childScanArgs —
+	// --stateless/--format/--skip/--fuzz-wordlist/…, but NOT the per-target -T/-o/-P/
+	// --split-by-host that are reconstructed from the dedicated fields). See
+	// resumeFromDiscoveredManifest.
+	Parallel int      `json:"parallel,omitempty"`
+	ScanArgs []string `json:"scan_args,omitempty"`
+
 	path    string             // on-disk location; not serialized
 	pending map[int]resumeDone // in-memory: out-of-order completions awaiting contiguous advance
 }
@@ -87,6 +100,119 @@ func resumeManifestPath(output string, targetFiles []string) string {
 		}
 	}
 	return "vigolium-scan.progress.json"
+}
+
+// resumeFromDiscoveredManifest powers the bare `vigolium scan --resume` form:
+// with no -T/-t/stdin to scan, it locates the progress manifest in the working
+// directory, rebuilds the originating command from it, and relaunches that scan
+// with --resume so the operator never has to re-type the full flag set. The
+// relaunch runs as a child process (inheriting stdio) rather than re-parsing
+// flags in-process, so the resumed scan gets a pristine flag/config state — the
+// same faithful round-trip the -P fan-out already relies on for its children.
+func resumeFromDiscoveredManifest(cmd *cobra.Command) error {
+	manifestPath, err := discoverResumeManifestPath(scanOpts.Output)
+	if err != nil {
+		return err
+	}
+	m, ok := loadResumeManifest(manifestPath)
+	if !ok {
+		return fmt.Errorf("found %s but it is not a readable resume manifest", manifestPath)
+	}
+	if len(m.TargetFiles) == 0 {
+		return fmt.Errorf("resume manifest %s records no target file; cannot auto-resume — re-run with the original flags plus --resume", manifestPath)
+	}
+
+	relaunch := buildResumeRelaunchArgs(m)
+
+	if !scanOpts.Silent {
+		fmt.Fprintf(os.Stderr, "%s %s picked up %s (%s target(s) already complete) — relaunching the saved scan\n",
+			terminal.Aqua("↻"),
+			terminal.BoldAqua("Auto-resume:"),
+			terminal.Cyan(manifestPath),
+			terminal.HiCyan(strconv.Itoa(m.completedCount())))
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot locate the vigolium binary to resume: %w", err)
+	}
+
+	child := exec.Command(exe, append([]string{"scan"}, relaunch...)...) //nolint:gosec // exe is our own binary, args derived from a local manifest
+	child.Stdin = os.Stdin
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	runErr := child.Run()
+	if runErr == nil {
+		return nil
+	}
+	// The relaunched scan already reported its own progress/errors to the shared
+	// stderr, so surface its failure as our exit code without printing a second,
+	// redundant error line on top of it.
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		cmd.SilenceErrors = true
+		cmd.SilenceUsage = true
+		return exitErr
+	}
+	return fmt.Errorf("failed to relaunch scan for --resume: %w", runErr)
+}
+
+// discoverResumeManifestPath finds the progress manifest a bare --resume should
+// pick up. An explicit -o prefix pins it exactly (roch → roch.progress.json);
+// otherwise the working directory is scanned for a single *.progress.json. Zero
+// or several matches are reported as errors so the operator can disambiguate
+// rather than the wrong run being resumed silently.
+func discoverResumeManifestPath(output string) (string, error) {
+	if output != "" {
+		path := resumeManifestPath(output, nil)
+		if _, err := os.Stat(path); err != nil {
+			return "", fmt.Errorf("no resume manifest at %s (derived from -o %s)", path, output)
+		}
+		return path, nil
+	}
+
+	matches, err := filepath.Glob("*.progress.json")
+	if err != nil {
+		return "", fmt.Errorf("scan current directory for a progress file: %w", err)
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no progress file (*.progress.json) found in the current directory — run --resume from the directory that holds it, or pass -o <output-prefix>")
+	case 1:
+		return matches[0], nil
+	default:
+		sort.Strings(matches)
+		return "", fmt.Errorf("multiple progress files in the current directory (%s) — pass -o <output-prefix> to choose which run to resume", strings.Join(matches, ", "))
+	}
+}
+
+// buildResumeRelaunchArgs reconstructs the scan flag list (after the "scan"
+// subcommand) that reproduces the manifest's originating run, with --resume
+// appended. ScanArgs carries the inherited per-child flags; the per-target
+// -T/-o/-P/--split-by-host are rebuilt from the dedicated fields. An older
+// manifest without ScanArgs degrades to the minimum needed for a stateless
+// per-host run.
+func buildResumeRelaunchArgs(m *resumeManifest) []string {
+	var args []string
+	if len(m.ScanArgs) > 0 {
+		args = append(args, m.ScanArgs...)
+	} else {
+		// Pre-ScanArgs manifest: synthesize the essentials so the basic run still
+		// resumes (inherited per-module flags like --fuzz-wordlist are lost).
+		args = append(args, "--stateless")
+		if len(m.Formats) > 0 {
+			args = append(args, "--format", strings.Join(m.Formats, ","))
+		}
+	}
+	for _, tf := range m.TargetFiles {
+		args = append(args, "-T", tf)
+	}
+	if m.OutputPrefix != "" {
+		args = append(args, "-o", m.OutputPrefix)
+	}
+	// max(..,1) keeps a pre-Parallel manifest (field absent ⇒ 0) on the parallel path.
+	args = append(args, "-P", strconv.Itoa(max(m.Parallel, 1)), "--split-by-host", "--resume")
+	return args
 }
 
 // newResumeManifest builds an empty manifest stamped with the run's identity.
@@ -178,13 +304,20 @@ func (m *resumeManifest) markDone(absIdx int, target string, stats childStats) b
 	return advanced
 }
 
+// completedCount is the number of targets in the cleanly-finished contiguous
+// prefix: one past the cursor, floored at 0 (CompletedThrough is -1 when nothing
+// is done). nil-safe so callers can use it on a freshly-loaded-or-absent manifest.
+func (m *resumeManifest) completedCount() int {
+	if m == nil || m.CompletedThrough < 0 {
+		return 0
+	}
+	return m.CompletedThrough + 1
+}
+
 // startOffset is the index of the first target still needing a scan: one past
 // the completed cursor, clamped to the current batch size.
 func (m *resumeManifest) startOffset(total int) int {
-	off := m.CompletedThrough + 1
-	if off < 0 {
-		off = 0
-	}
+	off := m.completedCount()
 	if off > total {
 		off = total
 	}
@@ -198,10 +331,7 @@ func (m *resumeManifest) carryover() carryoverStats {
 	if m == nil {
 		return carryoverStats{}
 	}
-	count := m.CompletedThrough + 1
-	if count < 0 {
-		count = 0
-	}
+	count := m.completedCount()
 	sev := make(map[string]int, len(m.Severity))
 	for k, v := range m.Severity {
 		sev[k] = v
