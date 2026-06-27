@@ -189,6 +189,16 @@ func bypassPath(urlx *urlutil.URL, ctx *httpmsg.HttpRequestResponse, httpClient 
 				resp.Close()
 				return results, nil
 			}
+			// Clean-canonical control: re-verify the ORIGINAL clean path is STILL
+			// access-controlled. The 401/403 baseline was captured at crawl time;
+			// if it was transient (rate-limit / WAF / deploy) and the bare path is
+			// now publicly 2xx, a 200 on a path-mutated payload is not a bypass —
+			// the resource simply became reachable. No path payload can be a bypass
+			// of a now-public resource, so drop the whole phase.
+			if !stillForbiddenWithoutHeaders(httpClient, ctx.Service(), ctx.Request().Raw()) {
+				resp.Close()
+				return results, nil
+			}
 			respDump := resp.FullResponseString()
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.Scheme + "://" + urlx.Host + payload,
@@ -600,6 +610,14 @@ func bypassMethod(
 				resp.Close()
 				return results, nil
 			}
+			// Clean-canonical control: re-verify the ORIGINAL method+path is STILL
+			// access-controlled. If the crawl-time 401/403 was transient and the
+			// bare request is now 2xx (resource became public), a 2xx for an
+			// alternate method is not a bypass — drop the phase.
+			if !stillForbiddenWithoutHeaders(httpClient, ctx.Service(), ctx.Request().Raw()) {
+				resp.Close()
+				return results, nil
+			}
 			respDump := resp.FullResponseString()
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.String(),
@@ -649,7 +667,11 @@ func bypassMethod(
 				// Empty/blank-body catch-all guard (see bypassPath): the override
 				// must yield content distinct from the host's response to an
 				// unrelated random path, or it's just the catch-all shell.
-				confirmDistinctFromCatchAll(httpClient, ctx.Service(), modifiedRaw, 200, respBody) {
+				confirmDistinctFromCatchAll(httpClient, ctx.Service(), modifiedRaw, 200, respBody) &&
+				// Clean-canonical control: the original method+path must still be
+				// access-controlled — a now-public resource is not a method-override
+				// bypass.
+				stillForbiddenWithoutHeaders(httpClient, ctx.Service(), ctx.Request().Raw()) {
 				results = append(results, &output.ResultEvent{
 					URL:              urlx.String(),
 					Request:          string(modifiedRaw),

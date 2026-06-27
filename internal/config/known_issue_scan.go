@@ -55,6 +55,15 @@ type FindingGroupingConfig struct {
 	// with a High "full source exposed") is the guardrail; the Tags gate does not
 	// apply to these modules. See perAssetGroupModules for the shipped default.
 	ByModule []string `yaml:"by_module"`
+	// ByRule lists module IDs whose findings collapse per (module, rule_name,
+	// severity[, host]) — like ByModule but with the rule (module_name) kept in the
+	// key, so a module whose one ID fronts many rules folds repeats of a single
+	// rule while keeping different rules apart. The shipped default is
+	// secret-detect: one Kingfisher rule (e.g. "Looker Client ID") matching every
+	// content hash in a minified bundle's chunk-hash map collapses to one finding
+	// (all values unioned on), while a genuinely different secret keeps its row.
+	// See perRuleGroupModules for the shipped default.
+	ByRule []string `yaml:"by_rule"`
 	// MaxURLs caps how many distinct matched URLs are retained on the survivor
 	// finding (0 = unlimited), bounding MatchedAt on very noisy sites.
 	MaxURLs int `yaml:"max_urls"`
@@ -89,6 +98,11 @@ type FindingGroupingConfig struct {
 // error-message-detect, info-disclosure-detect, directory-listing-detect) — those
 // stay value-grouped so two different leaks remain two findings. (HSTS preload
 // audit already fires once per host via ScanPerHost, so it needs no entry.)
+//
+// secret-detect is NOT here either, but it is not plain value-grouped: it lands
+// in perRuleGroupModules (by-rule grouping), which folds repeats of one Kingfisher
+// rule on a host while keeping different rules apart — the right middle ground for
+// a module whose single id fronts many rules.
 var perAssetGroupModules = []string{
 	// Asset enumeration: a distinct .map filename per JS/CSS bundle.
 	"sourcemap-detect",
@@ -208,6 +222,19 @@ var perAssetGroupModules = []string{
 	"smart-behavior-detection",
 }
 
+// perRuleGroupModules are the modules grouped per (module, rule_name, severity,
+// host) — see FindingGroupingConfig.ByRule. The lone member is secret-detect:
+// its single module_id fronts every Kingfisher rule, so plain per-module grouping
+// would wrongly merge unrelated secrets (an AWS key, a Slack token, a Looker
+// client id) into one finding, while plain per-value grouping leaves a single
+// noisy rule — e.g. "Looker Client ID" matching every content hash in a minified
+// bundle's chunk-hash map — as dozens of near-identical findings. By-rule keying
+// folds the latter to one finding (all matched values unioned on) while keeping
+// the former apart.
+var perRuleGroupModules = []string{
+	"secret-detect",
+}
+
 // defaultFindingGrouping is the effective grouping config when none is set in
 // YAML. Grouping is on by default with per-host scoping so a leaked secret seen
 // across a site collapses to one finding without merging across hostnames, and
@@ -217,9 +244,10 @@ func defaultFindingGrouping() FindingGroupingConfig {
 	return FindingGroupingConfig{
 		Enabled: true,
 		PerHost: true,
-		// Copy rather than share the package var: this config is subject to YAML
-		// profile overlays, and a slice-appending merge must not mutate the global.
+		// Copy rather than share the package vars: this config is subject to YAML
+		// profile overlays, and a slice-appending merge must not mutate the globals.
 		ByModule: append([]string(nil), perAssetGroupModules...),
+		ByRule:   append([]string(nil), perRuleGroupModules...),
 		MaxURLs:  50,
 	}
 }

@@ -209,6 +209,18 @@ func (m *Module) fingerprint404(
 	}
 }
 
+// baseScriptPath returns the base PHP script of a PATH_INFO test path — the
+// substring up to and including the first ".php" — e.g. "/index.php" for
+// "/index.php/vigolium-pathinfo-test" or "/index.php%2Fvigolium-pathinfo-test".
+// Returns "" when the path carries no ".php".
+func baseScriptPath(p string) string {
+	idx := strings.Index(strings.ToLower(p), ".php")
+	if idx < 0 {
+		return ""
+	}
+	return p[:idx+len(".php")]
+}
+
 // runTest sends a PATH_INFO test request and validates the response.
 func (m *Module) runTest(
 	ctx *httpmsg.HttpRequestResponse,
@@ -282,6 +294,22 @@ func (m *Module) runTest(
 	// volatile content (timestamps, tokens) does not mask the match.
 	if catchAll != nil && catchAll.is200 && modkit.BodiesSimilar(catchAll.body, body) {
 		return nil
+	}
+
+	// Clean-canonical (base-script) control: the PATH_INFO test path is the base
+	// PHP script with a trailing PATH_INFO segment. Fetch that base script plain
+	// (no PATH_INFO); if it returns 200 with a body similar to the candidate, the
+	// trailing path produced no observable routing change — the script is served
+	// regardless of the suffix and is already publicly reachable, so no
+	// cgi.fix_pathinfo routing boundary was demonstrably crossed (a front
+	// controller / Apache AcceptPathInfo serving the home page for /index.php and
+	// /index.php/anything alike). This is a no-op for the non-existent-script
+	// test, whose bare base script 404s, and for a genuine misconfig where the
+	// PATH_INFO response diverges from the base script.
+	if base := baseScriptPath(test.path); base != "" && base != test.path {
+		if bStatus, bBody, ok := modkit.FetchPath(ctx, httpClient, base); ok && bStatus == 200 && modkit.BodiesSimilar(bBody, body) {
+			return nil
+		}
 	}
 
 	urlx, _ := ctx.URL()

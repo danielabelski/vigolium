@@ -178,6 +178,20 @@ func (m *Module) ScanPerRequest(
 			if _, isList2 := storagesig.StrongListing(rb.body); !isList2 {
 				continue
 			}
+			// Clean-canonical control: the token collapses objPath to an ancestor
+			// directory. If that ancestor is ALREADY publicly listable via a
+			// plain, un-obfuscated request (no traversal token), the bucket simply
+			// has anonymous ListObjects enabled on that prefix — the trailing
+			// segment escaped no access-control boundary and this is not a
+			// traversal finding (it would be cloud-storage-listing's domain).
+			if cleanPath := collapsedParentPath(objPath, tk.tok); cleanPath != "" {
+				cp := m.fetch(httpClient, service, rawGET, cleanPath, true, &budget)
+				if cp.ok {
+					if _, isList := storagesig.StrongListing(cp.body); isList {
+						return nil, nil
+					}
+				}
+			}
 			return []*output.ResultEvent{m.buildFinding(urlx, rawGET, probePath, pb.body, prov, tk.tok, leaf)}, nil
 		}
 		if pass == 1 && !promising {
@@ -290,6 +304,35 @@ func (m *Module) buildFinding(
 			Reference:   []string{"https://hackerone.com/reports/3523931"},
 		},
 	}
+}
+
+// collapseDepth counts the parent-collapse units in a traversal token — each
+// ".." (literal, %2e%2e, or double-encoded %252e%252e) pops one path segment.
+// The three forms are textually disjoint (no encoded form is a substring of
+// another), so they can be counted independently. Defaults to 1 so a malformed
+// token still tests the immediate parent.
+func collapseDepth(tok string) int {
+	d := strings.Count(tok, "..") +
+		strings.Count(tok, "%2e%2e") +
+		strings.Count(tok, "%252e%252e")
+	if d < 1 {
+		return 1
+	}
+	return d
+}
+
+// collapsedParentPath returns the clean ancestor directory a parent-collapse
+// token resolves objPath to — stripping one trailing segment per ".." unit and
+// re-appending a trailing slash. This is the path a plain, un-obfuscated request
+// would address (the clean-canonical control). Returns "" when the token would
+// climb past the path root (no clean ancestor to test).
+func collapsedParentPath(objPath, tok string) string {
+	depth := collapseDepth(tok)
+	segs := strings.Split(strings.Trim(objPath, "/"), "/")
+	if depth >= len(segs) {
+		return ""
+	}
+	return "/" + strings.Join(segs[:len(segs)-depth], "/") + "/"
 }
 
 func matchesWildcard(wildcard *modkit.WildcardEntry, status int, body string) bool {

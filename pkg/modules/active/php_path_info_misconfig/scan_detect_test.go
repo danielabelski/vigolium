@@ -13,16 +13,26 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
 )
 
-// TestScanPerRequest_DetectsPathInfo simulates a cgi.fix_pathinfo=1 server that
-// happily serves PATH_INFO requests with 200 and app content, while returning a
-// distinct 404 for the random fingerprint path.
+// TestScanPerRequest_DetectsPathInfo simulates a cgi.fix_pathinfo=1 server where
+// the injected PATH_INFO genuinely changes the output: a script WITH a trailing
+// PATH_INFO segment is processed and reflects the injected path, while the bare
+// base script (no PATH_INFO) and the random fingerprint path return a distinct
+// 404. Because the PATH_INFO response diverges from the bare base script, the
+// clean-canonical base-script control keeps the finding.
 func TestScanPerRequest_DetectsPathInfo(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// PATH_INFO test paths are rooted at index.php or a non-existent script.
-		if strings.Contains(r.URL.Path, "index.php") || strings.Contains(r.URL.Path, "script.php") {
+		low := strings.ToLower(r.URL.Path)
+		idx := strings.Index(low, ".php")
+		// PATH_INFO present == there is a segment after ".php".
+		hasPathInfo := idx >= 0 && idx+len(".php") < len(low)
+		isKnownScript := strings.Contains(low, "index.php") || strings.Contains(low, "script.php")
+		if isKnownScript && hasPathInfo {
+			// The injected path is processed and reflected — distinct from the
+			// bare base script below.
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("<html><body>Welcome to the application home page rendered via PATH_INFO routing</body></html>"))
+			_, _ = w.Write([]byte("<html><body>cgi.fix_pathinfo routed request, PATH_INFO=" +
+				r.URL.Path + " processed by the PHP interpreter as a distinct application response</body></html>"))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -35,7 +45,38 @@ func TestScanPerRequest_DetectsPathInfo(t *testing.T) {
 
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
-	require.NotEmpty(t, res, "expected a finding when PATH_INFO requests return 200 app content")
+	require.NotEmpty(t, res, "expected a finding when PATH_INFO requests return 200 app content distinct from the bare base script")
+}
+
+// TestScanPerRequest_NoFalsePositive_FrontControllerIgnoresPathInfo reproduces
+// the static-root-traversal FP class for this module: a front controller (or
+// Apache AcceptPathInfo) serves the SAME home page for /index.php and for
+// /index.php/<anything>, so the trailing PATH_INFO has no observable effect. The
+// random 404 fingerprint differs and the catch-all probe 404s, so only the
+// clean-canonical base-script control (plain /index.php returns the same body)
+// catches that nothing was actually routed.
+func TestScanPerRequest_NoFalsePositive_FrontControllerIgnoresPathInfo(t *testing.T) {
+	t.Parallel()
+	const home = "<html><body>Welcome — single-page front controller home, served for /index.php and any trailing path alike</body></html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /index.php and /index.php/<anything> both serve the identical home page;
+		// non-existent scripts and unknown paths 404.
+		if strings.Contains(strings.ToLower(r.URL.Path), "index.php") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(home))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("short 404"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a front controller serving the same page for /index.php and /index.php/<path> must not be flagged")
 }
 
 // TestScanPerRequest_NoFalsePositive ensures a server that rejects PATH_INFO

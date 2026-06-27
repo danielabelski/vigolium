@@ -144,6 +144,54 @@ func TestFindingGrouper_ByModuleCollapsesDistinctValues(t *testing.T) {
 	}
 }
 
+func ruleSecretEvent(host, url, rule, value string, sev severity.Severity) *output.ResultEvent {
+	return &output.ResultEvent{
+		ModuleID: "secret-detect",
+		Info: output.Info{
+			Name:     rule, // the Kingfisher rule name — the per-rule key component
+			Severity: sev,
+			Tags:     []string{"secret"},
+		},
+		Host:             host,
+		Matched:          url,
+		URL:              url,
+		ExtractedResults: []string{value},
+	}
+}
+
+func TestFindingGrouper_ByRuleCollapsesSameRuleKeepsDistinctRules(t *testing.T) {
+	g := newFindingGrouper(config.FindingGroupingConfig{
+		Enabled: true,
+		PerHost: true,
+		ByRule:  []string{"secret-detect"},
+	})
+
+	// Same rule, distinct chunk-hash values → only the first shows, rest collapse.
+	if !g.observe(ruleSecretEvent("lk.x.net", "https://lk.x.net/login", "Looker Client ID", "8b2d330eb01e5f1c4263", severity.High)) {
+		t.Error("first Looker finding should show")
+	}
+	if g.observe(ruleSecretEvent("lk.x.net", "https://lk.x.net/login", "Looker Client ID", "c01fa0008d77f1d4f78c", severity.High)) {
+		t.Error("same-rule distinct-value repeat should be suppressed to file-only")
+	}
+	if g.observe(ruleSecretEvent("lk.x.net", "https://lk.x.net/login", "Looker Client ID", "d03140ea6d9f22ca4538", severity.High)) {
+		t.Error("same-rule distinct-value repeat should be suppressed to file-only")
+	}
+
+	// A DIFFERENT rule on the same host is its own group and shows.
+	if !g.observe(ruleSecretEvent("lk.x.net", "https://lk.x.net/app.js", "AWS Access Key", "AKIAIOSFODNN7EXAMPLE", severity.High)) {
+		t.Error("a different secret rule should show as its own group")
+	}
+	// Same rule on a different host stays separate under PerHost.
+	if !g.observe(ruleSecretEvent("other.x.net", "https://other.x.net/login", "Looker Client ID", "aa11bb22cc33dd44ee55", severity.High)) {
+		t.Error("same rule on a different host should show under PerHost")
+	}
+
+	// 3 groups: Looker@lk, AWS@lk, Looker@other.
+	if c := g.summaryCounts()[severity.High]; c != 3 {
+		t.Errorf("expected 3 high groups, got %d", c)
+	}
+}
+
 func TestFindingGrouper_EmptyValueAlwaysShows(t *testing.T) {
 	g := newFindingGrouper(config.FindingGroupingConfig{Enabled: true, PerHost: true})
 	// No extracted value → ungroupable → every occurrence shows.

@@ -109,6 +109,55 @@ func TestScanPerRequest_CatchAllListingRejected(t *testing.T) {
 	assert.Empty(t, res, "catch-all listing (control suffix lists too) must be rejected")
 }
 
+// TestScanPerRequest_PublicPrefixListingRejected is the clean-canonical
+// regression guard (mirrors the static-root-traversal public-file FP): a bucket
+// with anonymous ListObjects enabled lists ANY real directory prefix. The object
+// GET is a non-listing image and the non-collapsing control suffixes 404 (so the
+// catch-all guard passes), but the ..; token merely collapses to the object's
+// parent directory which is ALREADY publicly listable via a plain request to
+// /obj/bucket/folder/. No access-control boundary was escaped, so the
+// clean-canonical control must drop it.
+func TestScanPerRequest_PublicPrefixListingRejected(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-goog-generation", "1700000000")
+		// A traversal token collapses to a directory prefix -> lists.
+		if isTraversal(r.RequestURI) {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, listingFor("my-object"))
+			return
+		}
+		// The object itself is a plain non-listing image.
+		if r.URL.Path == "/obj/bucket/folder/my-object" {
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, objectBody)
+			return
+		}
+		// Real, already-public directory prefixes list on a plain request
+		// (anonymous ListObjects enabled) — this is what the ..; token resolves to.
+		if r.URL.Path == "/obj/bucket/folder/" || r.URL.Path == "/obj/bucket/" {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, listingFor("my-object"))
+			return
+		}
+		// Non-collapsing control suffixes (object keys that don't exist) 404.
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, errDoc)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/obj/bucket/folder/my-object")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a parent prefix already publicly listable via a plain request must not be reported as a traversal bypass")
+}
+
 // TestScanPerRequest_BaselineAlreadyListing rejects a path whose own GET already
 // returns a listing — that is cloud-storage-listing's finding, not traversal.
 func TestScanPerRequest_BaselineAlreadyListing(t *testing.T) {

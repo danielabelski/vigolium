@@ -540,6 +540,16 @@ type GroupFindingOptions struct {
 	// per JS bundle). These bypass the value-identity requirement and the Tags
 	// gate; module + severity is the guardrail.
 	ByModule []string
+	// ByRule lists module IDs whose findings collapse per (module, rule_name,
+	// severity[, host]) regardless of value — like ByModule, but the rule
+	// (module_name) stays part of the key, so DISTINCT rules remain distinct
+	// findings while repeats of the SAME rule fold together. This is for
+	// secret-detect, whose one module_id carries many rule_names (Kingfisher
+	// rules): a "Looker Client ID" rule matching every chunk hash in a minified
+	// bundle's content-hash map yields dozens of identical findings differing only
+	// by value, which collapse to one finding (all values unioned on), while a
+	// genuinely different secret — an AWS key, a Slack token — keeps its own row.
+	ByRule []string
 	// MaxURLs caps the merged matched-URL list on the survivor (0 = unlimited).
 	MaxURLs int
 	// Hostnames, when non-empty, scopes the pass to findings on those hosts. The
@@ -563,6 +573,12 @@ type GroupFindingOptions struct {
 // where the per-URL value is noise (e.g. sourcemap-detect, a distinct .map
 // filename per JS bundle).
 //
+// Modules listed in opts.ByRule collapse on (module_id, rule_name, severity[,
+// hostname]) — the same as ByModule but with the rule (module_name) kept in the
+// key, so a module whose single id fronts many rules (secret-detect) folds
+// repeats of one rule while keeping different rules apart. Their distinct values
+// are unioned onto the survivor just like ByModule.
+//
 // Returns the count of deleted findings and the number of groups that were
 // collapsed.
 func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID string, opts GroupFindingOptions) (deleted int64, grouped int64, err error) {
@@ -574,6 +590,7 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 		ID                 int64    `bun:"id"`
 		Hostname           string   `bun:"hostname"`
 		ModuleID           string   `bun:"module_id"`
+		ModuleName         string   `bun:"module_name"`
 		Severity           string   `bun:"severity"`
 		Description        string   `bun:"description"`
 		MatchedAt          []string `bun:"matched_at,type:jsonb"`
@@ -583,10 +600,11 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 	}
 
 	// Only findings with a non-empty extracted value can be value-grouped — except
-	// by-module modules, which group regardless of value (so they are pulled in
-	// even with an empty extracted_results). Order by created_at so the earliest
-	// finding in each group becomes the survivor.
+	// by-module and by-rule modules, which group regardless of value (so they are
+	// pulled in even with an empty extracted_results). Order by created_at so the
+	// earliest finding in each group becomes the survivor.
 	byModule := output.NormalizeStringSet(opts.ByModule)
+	byRule := output.NormalizeStringSet(opts.ByRule)
 	const valueCond = "(extracted_results IS NOT NULL AND extracted_results != '[]' AND extracted_results != '')"
 	where := valueCond
 	queryArgs := []any{projectUUID}
@@ -594,16 +612,22 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 	// optional module_id IN (?) below — keep the arg order matching the SQL text.
 	hostFilter, hostArgs := findingHostnameFilter(opts.Hostnames)
 	queryArgs = append(queryArgs, hostArgs...)
-	if len(byModule) > 0 {
-		moduleList := make([]string, 0, len(byModule))
-		for id := range byModule {
-			moduleList = append(moduleList, id)
-		}
+	// By-module and by-rule modules both bypass the value condition (their value is
+	// noise or merely a sub-key), so pull them in even with an empty value. A
+	// module listed under both lands in the IN clause twice, which is harmless.
+	moduleList := make([]string, 0, len(byModule)+len(byRule))
+	for id := range byModule {
+		moduleList = append(moduleList, id)
+	}
+	for id := range byRule {
+		moduleList = append(moduleList, id)
+	}
+	if len(moduleList) > 0 {
 		where = "(" + valueCond + " OR module_id IN (?))"
 		queryArgs = append(queryArgs, bun.List(moduleList))
 	}
 	loadQuery := `
-		SELECT id, hostname, module_id, severity, description, matched_at, extracted_results, tags,
+		SELECT id, hostname, module_id, module_name, severity, description, matched_at, extracted_results, tags,
 		       additional_evidence
 		FROM findings
 		WHERE project_uuid = ?` + hostFilter + ` AND ` + where + `
@@ -632,30 +656,27 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 		extraMatched        []string
 		extraExtracted      []string
 		dups                []dupRow
-		// byModule marks a group collapsed by (module, severity[, host]) regardless
-		// of value. Only these merge the differing per-URL extracted values onto the
-		// survivor — value groups share an identical value, so there is nothing to
-		// merge.
-		byModule bool
+		// mergeValues marks a group collapsed regardless of value — a by-module
+		// group (keyed on module+severity) or a by-rule group (keyed on
+		// module+rule+severity). Only these merge the differing per-URL extracted
+		// values onto the survivor; plain value groups share an identical value, so
+		// there is nothing to merge.
+		mergeValues bool
 	}
 	groups := make(map[string]*groupData)
 	var order []string
 
 	for i := range rows {
 		row := &rows[i]
-		valueKey := output.NormalizedValueKey(row.ExtractedResults)
-		_, isByModule := byModule[row.ModuleID]
-		if isByModule {
-			valueKey = "" // collapse every value from this module into one finding
-		} else {
-			if valueKey == "" {
-				continue // no stable extracted value to group on
-			}
-			if len(tagFilter) > 0 && !output.TagsIntersect(row.Tags, tagFilter) {
-				continue
-			}
+		moduleKey, valueKey, groupable := output.GroupingBranch(
+			row.ModuleID, row.ModuleName, output.NormalizedValueKey(row.ExtractedResults), row.Tags, byModule, byRule, tagFilter)
+		if !groupable {
+			continue
 		}
-		key := output.GroupingKey(row.ModuleID, row.Severity, valueKey, row.Hostname, opts.PerHost)
+		// An emptied value key marks a by-module/by-rule group — every value folds
+		// into one finding, so the distinct values are unioned onto the survivor.
+		mergeValues := valueKey == ""
+		key := output.GroupingKey(moduleKey, row.Severity, valueKey, row.Hostname, opts.PerHost)
 		g, ok := groups[key]
 		if !ok {
 			groups[key] = &groupData{
@@ -664,7 +685,7 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 				survivorMatched:     row.MatchedAt,
 				survivorExtracted:   row.ExtractedResults,
 				existingEvidence:    row.AdditionalEvidence,
-				byModule:            isByModule,
+				mergeValues:         mergeValues,
 			}
 			order = append(order, key)
 			continue
@@ -673,10 +694,10 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 		// evidence is built in pass 2).
 		g.dups = append(g.dups, dupRow{id: row.ID, evidence: row.AdditionalEvidence})
 		g.extraMatched = append(g.extraMatched, row.MatchedAt...)
-		// For by-module groups the differing values are signal the operator wants to
-		// keep — union them onto the survivor so the collapsed finding lists every
-		// matched value, not just the first occurrence's.
-		if g.byModule {
+		// For by-module/by-rule groups the differing values are signal the operator
+		// wants to keep — union them onto the survivor so the collapsed finding lists
+		// every matched value, not just the first occurrence's.
+		if g.mergeValues {
 			g.extraExtracted = append(g.extraExtracted, row.ExtractedResults...)
 		}
 	}
@@ -745,10 +766,10 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 			if len(mergedEvidence) > 0 {
 				upd = upd.Set("additional_evidence = ?", mergedEvidence)
 			}
-			// By-module groups: merge the distinct extracted values onto the survivor
-			// (bounded by MaxURLs) and note the rollup in the description so the
-			// collapsed finding reflects every occurrence, not just the first.
-			if g.byModule {
+			// By-module/by-rule groups: merge the distinct extracted values onto the
+			// survivor (bounded by MaxURLs) and note the rollup in the description so
+			// the collapsed finding reflects every occurrence, not just the first.
+			if g.mergeValues {
 				mergedExtracted := filterEmpty(mergeUniqueStrings(g.survivorExtracted, g.extraExtracted))
 				if opts.MaxURLs > 0 && len(mergedExtracted) > opts.MaxURLs {
 					mergedExtracted = mergedExtracted[:opts.MaxURLs]

@@ -220,8 +220,15 @@ func (m *Module) scanStaticRootTraversal(
 
 	budget := staticProbeBudget
 
+	// cleanReachable memoizes the clean-canonical control's verdict per target
+	// path ("/" + tgt.path is invariant across every shell/token/depth/suffix), so
+	// the same clean path is fetched at most once per scan instead of once per
+	// marker-confirmed candidate (which, on a host that serves the file at the web
+	// root, is every candidate).
+	cleanReachable := map[string]bool{}
+
 	// Tier 1: canonical shape only.
-	res, promising, fatal := m.sweepStatic(1, httpClient, service, urlx, rawHTTP, mount, segment, bl, wildcard, &budget)
+	res, promising, fatal := m.sweepStatic(1, httpClient, service, urlx, rawHTTP, mount, segment, bl, wildcard, &budget, cleanReachable)
 	if fatal {
 		return res, true
 	}
@@ -234,7 +241,7 @@ func (m *Module) scanStaticRootTraversal(
 
 	// Tier 2: unfurl encodings, control breakers, suffixes and extra targets —
 	// only because Tier 1 already showed the shell reaches something distinct.
-	res, _, fatal = m.sweepStatic(2, httpClient, service, urlx, rawHTTP, mount, segment, bl, wildcard, &budget)
+	res, _, fatal = m.sweepStatic(2, httpClient, service, urlx, rawHTTP, mount, segment, bl, wildcard, &budget, cleanReachable)
 	return res, fatal
 }
 
@@ -259,6 +266,7 @@ func (m *Module) sweepStatic(
 	bl baselineRefs,
 	wildcard *modkit.WildcardEntry,
 	budget *int,
+	cleanReachable map[string]bool,
 ) ([]*output.ResultEvent, bool, bool) {
 	var promising bool
 
@@ -302,7 +310,7 @@ func (m *Module) sweepStatic(
 						if tgt.class == classFileContent {
 							decoyPath = sh.build(mount, tk.tok, depth, staticDecoyFile)
 						}
-						if !m.confirmStatic(httpClient, service, rawHTTP, path, decoyPath, tgt, bl, wildcard, budget) {
+						if !m.confirmStatic(httpClient, service, rawHTTP, path, decoyPath, tgt, bl, wildcard, budget, cleanReachable) {
 							promising = true
 							continue
 						}
@@ -334,10 +342,16 @@ func targetSuffixes(tgt travTarget) []encSuffix {
 }
 
 // confirmStatic re-fetches the exact candidate path (NoClustering, defeating the
-// 500ms response cache) and, when decoyPath is set, sends the same shell around a
-// non-existent decoy filename. A genuine read reproduces; a catch-all that
-// returns the same markers for a bogus file is rejected. An empty decoyPath skips
-// the decoy step (listing probes have no filename).
+// 500ms response cache) and runs two negative controls. A genuine read
+// reproduces; otherwise it is rejected:
+//   - clean-canonical control (file reads): the traversal shell collapses to
+//     "/"+target at the web root. If a plain, un-shelled request to that path
+//     already serves the file, the file is simply public and no static-root
+//     boundary was escaped — the shell merely normalized to a reachable path.
+//   - decoy control: the same shell around a non-existent filename must NOT
+//     surface the markers (a catch-all that returns the file for any name).
+//
+// An empty decoyPath skips the decoy step (listing probes have no filename).
 func (m *Module) confirmStatic(
 	httpClient *http.Requester,
 	service *httpmsg.Service,
@@ -347,6 +361,7 @@ func (m *Module) confirmStatic(
 	bl baselineRefs,
 	wildcard *modkit.WildcardEntry,
 	budget *int,
+	cleanReachable map[string]bool,
 ) bool {
 	// Reproduce the read.
 	status, body, ok, _ := fetchStatic(httpClient, service, rawHTTP, path, true, budget)
@@ -358,6 +373,26 @@ func (m *Module) confirmStatic(
 	}
 	if countNewMarkers(body, bl.body, bl.lower, tgt.markers, tgt.ci) < tgt.minMarkers {
 		return false
+	}
+
+	// Clean-canonical negative for file reads: every shell climbs at least one
+	// level and clamps at the web root, so it resolves to "/"+target. If that
+	// plain path serves the same file with no traversal trickery, the file is
+	// publicly readable at the web root — the shell escaped nothing. The verdict
+	// depends only on tgt.path, so it is memoized across every candidate that
+	// resolves to the same target.
+	if tgt.class == classFileContent && tgt.path != "" {
+		reachable, seen := cleanReachable[tgt.path]
+		if !seen {
+			cleanPath := "/" + tgt.path
+			cStatus, cBody, cOK, _ := fetchStatic(httpClient, service, rawHTTP, cleanPath, true, budget)
+			reachable = cOK && !matchesWildcard(wildcard, cStatus, cBody) &&
+				countNewMarkers(cBody, bl.body, bl.lower, tgt.markers, tgt.ci) >= tgt.minMarkers
+			cleanReachable[tgt.path] = reachable
+		}
+		if reachable {
+			return false
+		}
 	}
 
 	// Decoy negative for file reads: the same shell around a bogus filename must

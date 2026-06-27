@@ -237,18 +237,10 @@ func (m *Module) FlushFindings(_ *modkit.ScanContext) ([]*output.ResultEvent, er
 			bodyByFile[basename] = body
 		}
 
-		// A match buried inside a long base64 run is a chunk of encoded binary
-		// (an inline data: URI image / asset blob), not a real secret — drop it
-		// before it becomes a finding. This kills the common "32-char token rule
-		// hits inside an inline image on an error page" false positive.
-		if IsBinaryBlobMatch(body, f.Snippet()) {
-			continue
-		}
-
-		// A match clipped out of a JS unicode escape (e.g. Angular's "ɵ" exports,
-		// emitted as ɵ... in minified bundles) is source code, not a
-		// credential — drop it.
-		if IsJSEscapeArtifactMatch(body, f.Snippet()) {
+		// Drop matches that are structural false positives — an encoded-binary
+		// blob, a JS unicode-escape source artifact, or a build-tool content-hash
+		// manifest entry — rather than real credentials (see IsNonSecretMatch).
+		if IsNonSecretMatch(body, f.Snippet()) {
 			continue
 		}
 

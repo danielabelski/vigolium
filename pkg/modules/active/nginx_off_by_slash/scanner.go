@@ -180,6 +180,18 @@ func (m *Module) ScanPerRequest(
 				continue
 			}
 
+			// Clean-canonical control: the off-by-slash payload resolves to
+			// /{suffix} at the alias parent / web root. If that plain,
+			// un-escaped path already serves the same body, the resource is
+			// publicly reachable WITHOUT the traversal and nothing was escaped —
+			// the front-end simply normalized /{segment}{injection}/{suffix} down
+			// to /{suffix}. Drop this suffix (a sibling suffix may still be a real
+			// escape, so keep probing rather than return).
+			cleanCanonical := "/" + suffix
+			if bodySimilarToControl(httpClient, ctx.Service(), rawHttp, cleanCanonical, body) {
+				continue
+			}
+
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.Scheme + "://" + urlx.Host + newPath,
 				Request:          string(modifiedRaw),

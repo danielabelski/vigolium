@@ -69,6 +69,16 @@ type ResultEvent struct {
 	ModuleType    string `json:"-"`
 	FindingSource string `json:"-"`
 	ModuleShort   string `json:"-"`
+
+	// DedupKey, when non-empty, lets a module choose an explicit deduplication
+	// identity instead of the default content hash (module/description/severity/
+	// matched): ID() derives the finding's identity from this key alone. Use it when
+	// findings should group by something other than their content — e.g. the OAST
+	// collector sets the per-payload callback nonce so each distinct callback host is
+	// its own finding (callbacks for the same payload coalesce; different payloads
+	// stay separate) regardless of the protocol-derived description/severity an
+	// upgrade changes. Empty for the default content-based identity.
+	DedupKey string `json:"-"`
 }
 
 // EvidenceSeparator delimits the request and response halves of a single
@@ -99,18 +109,26 @@ var sha1Pool = sync.Pool{
 	New: func() interface{} { return sha1.New() },
 }
 
-// ID returns a unique identifier for deduplication purposes.
+// ID returns a unique identifier for deduplication purposes. When DedupKey is set
+// the identity is derived from it alone (an explicit dedup grouping chosen by the
+// producer, e.g. the OAST per-payload nonce); otherwise it is the content hash of
+// the module, description, severity, and matched location.
 func (r *ResultEvent) ID() string {
 	h := sha1Pool.Get().(hash.Hash)
 	h.Reset()
 
-	_, _ = io.WriteString(h, r.ModuleID)
-	_, _ = io.WriteString(h, "|")
-	_, _ = io.WriteString(h, r.Info.Description)
-	_, _ = io.WriteString(h, "|")
-	_, _ = io.WriteString(h, r.Info.Severity.String())
-	_, _ = io.WriteString(h, "|")
-	_, _ = io.WriteString(h, r.Matched)
+	if r.DedupKey != "" {
+		_, _ = io.WriteString(h, "dedup|")
+		_, _ = io.WriteString(h, r.DedupKey)
+	} else {
+		_, _ = io.WriteString(h, r.ModuleID)
+		_, _ = io.WriteString(h, "|")
+		_, _ = io.WriteString(h, r.Info.Description)
+		_, _ = io.WriteString(h, "|")
+		_, _ = io.WriteString(h, r.Info.Severity.String())
+		_, _ = io.WriteString(h, "|")
+		_, _ = io.WriteString(h, r.Matched)
+	}
 
 	var buf [sha1.Size]byte
 	id := hex.EncodeToString(h.Sum(buf[:0]))

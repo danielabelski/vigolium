@@ -898,17 +898,11 @@ func (r *Runner) runKingfisherBatch(ctx context.Context, infra *phaseInfra, onRe
 			for i := range result.Findings {
 				f := &result.Findings[i]
 
-				// A match buried inside a long base64 run is a chunk of encoded
-				// binary (an inline data: URI image / asset blob), not a real
-				// secret — drop it before it becomes a finding.
-				if secret_detect.IsBinaryBlobMatch(body, f.Snippet()) {
-					continue
-				}
-
-				// A match clipped out of a JS unicode escape (e.g. Angular's
-				// "ɵ" exports, emitted as ɵ... in minified bundles) is
-				// source code, not a credential — drop it.
-				if secret_detect.IsJSEscapeArtifactMatch(body, f.Snippet()) {
+				// Drop matches that are structural false positives — an
+				// encoded-binary blob, a JS unicode-escape source artifact, or a
+				// build-tool content-hash manifest entry — rather than real
+				// credentials (see secret_detect.IsNonSecretMatch).
+				if secret_detect.IsNonSecretMatch(body, f.Snippet()) {
 					continue
 				}
 

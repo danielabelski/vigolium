@@ -1,6 +1,8 @@
 package oast
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -306,6 +308,158 @@ func TestEnrichOASTResultNoOrigin(t *testing.T) {
 	}
 }
 
+// TestOASTProtocolRank locks in the ordering that drives finding upgrades: an
+// HTTP(S) fetch (proof a command/SSRF actually reached out) outranks a bare DNS
+// resolution, with any other protocol sitting between the two.
+func TestOASTProtocolRank(t *testing.T) {
+	if oastProtocolRank("https") != oastProtocolRank("http") {
+		t.Error("http and https should rank equally")
+	}
+	if oastProtocolRank("http") <= oastProtocolRank("dns") {
+		t.Error("http should outrank dns")
+	}
+	if r := oastProtocolRank("smtp"); r <= oastProtocolRank("dns") || r >= oastProtocolRank("http") {
+		t.Errorf("an unknown protocol should rank between dns and http, got %d", r)
+	}
+}
+
+// TestClaimEmission verifies the per-nonce coalescing decision: the first callback
+// for a payload emits, duplicate/weaker callbacks are suppressed, a strictly
+// stronger callback upgrades once, and different payloads are independent.
+func TestClaimEmission(t *testing.T) {
+	s := &Service{}
+
+	if emit, up := s.claimEmission("n1", "dns"); !emit || up {
+		t.Fatalf("first DNS callback: got emit=%v upgrade=%v, want true/false", emit, up)
+	}
+	// The DNS A/AAAA/resolver flood for the same payload is suppressed.
+	for i := 0; i < 3; i++ {
+		if emit, _ := s.claimEmission("n1", "dns"); emit {
+			t.Fatalf("duplicate DNS callback %d emitted, want suppressed", i)
+		}
+	}
+	// The HTTP fetch leg confirms execution → emit once as an upgrade.
+	if emit, up := s.claimEmission("n1", "http"); !emit || !up {
+		t.Fatalf("HTTP upgrade: got emit=%v upgrade=%v, want true/true", emit, up)
+	}
+	// Anything weaker-or-equal after the upgrade is suppressed.
+	if emit, _ := s.claimEmission("n1", "dns"); emit {
+		t.Fatal("DNS after HTTP upgrade emitted, want suppressed")
+	}
+	if emit, _ := s.claimEmission("n1", "https"); emit {
+		t.Fatal("repeat HTTP after upgrade emitted, want suppressed")
+	}
+	// A different payload (nonce) is tracked independently.
+	if emit, up := s.claimEmission("n2", "dns"); !emit || up {
+		t.Fatalf("first callback for a new nonce: got emit=%v upgrade=%v, want true/false", emit, up)
+	}
+}
+
+func newOASTTestRepo(t *testing.T) *database.Repository {
+	t.Helper()
+	cfg := &config.DatabaseConfig{
+		Enabled: true,
+		Driver:  "sqlite",
+		SQLite: config.SQLiteConfig{
+			Path:        filepath.Join(t.TempDir(), "oast-test.sqlite"),
+			BusyTimeout: 5000,
+			JournalMode: "WAL",
+			Synchronous: "NORMAL",
+			CacheSize:   1000,
+		},
+	}
+	db, err := database.NewDB(cfg)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	if err := db.CreateSchema(context.Background()); err != nil {
+		t.Fatalf("CreateSchema: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return database.NewRepository(db)
+}
+
+// TestHandleInteractionCoalescesPerNonce is the end-to-end coalescing test: many
+// callbacks for one planted payload (the DNS A/AAAA/resolver flood, then the HTTP
+// fetch leg) must yield exactly ONE finding — the strongest seen — not a pile of
+// findings sharing one OAST host. This is the behaviour the investigation flagged.
+func TestHandleInteractionCoalescesPerNonce(t *testing.T) {
+	repo := newOASTTestRepo(t)
+	ctx := context.Background()
+	const project = "proj-1"
+
+	var emits int
+	svc := &Service{
+		repo:        repo,
+		emitResult:  func(*output.ResultEvent) { emits++ },
+		scanUUID:    "scan-1",
+		projectUUID: project,
+	}
+
+	const nonce = "corrid00000000000000nonce1234"
+	host := nonce + ".oast.vigolium.com"
+	svc.trackerCache().Add(nonce, PayloadContext{
+		TargetURL:     "http://victim.example/run?cmd=1",
+		ParameterName: "cmd", // a genuine request parameter → DNS classifies High/Firm
+		InjectionType: "os-command-injection (parameter)",
+		ModuleID:      "command-injection-oast",
+		CallbackURL:   host,
+		// A fetch command (curl) on a genuine parameter: its DNS resolve leg
+		// classifies High/Firm and its HTTP-fetch leg legitimately upgrades to
+		// Critical. (A DNS-only nslookup payload yielding an HTTP callback would be a
+		// protocol mismatch and stay Low — see TestClassifyCommandInjectionProtocolMismatch.)
+		Payload: "1;curl http://" + host,
+	})
+
+	dns := func() *server.Interaction {
+		return &server.Interaction{Protocol: "dns", UniqueID: nonce, RemoteAddress: "8.8.8.8", Timestamp: time.Unix(1, 0).UTC()}
+	}
+
+	// A flood of DNS callbacks (A + AAAA + several recursive resolvers) for one payload.
+	for i := 0; i < 5; i++ {
+		svc.handleInteraction(dns())
+	}
+	if emits != 1 {
+		t.Fatalf("DNS flood emitted %d findings, want 1 (coalesced per nonce)", emits)
+	}
+	highs, err := repo.GetFindingsBySeverity(ctx, project, "high", 10)
+	if err != nil {
+		t.Fatalf("GetFindingsBySeverity(high): %v", err)
+	}
+	if len(highs) != 1 {
+		t.Fatalf("after DNS flood: %d high findings, want 1", len(highs))
+	}
+
+	// The HTTP-fetch leg confirms execution → upgrade in place to Critical. Still one
+	// finding total: the High DNS lead is replaced, not left as a sibling.
+	svc.handleInteraction(&server.Interaction{Protocol: "http", UniqueID: nonce, RemoteAddress: "203.0.113.9", Timestamp: time.Unix(2, 0).UTC()})
+	if emits != 2 {
+		t.Fatalf("expected exactly one upgrade emit (total 2), got %d", emits)
+	}
+	highs, _ = repo.GetFindingsBySeverity(ctx, project, "high", 10)
+	crits, err := repo.GetFindingsBySeverity(ctx, project, "critical", 10)
+	if err != nil {
+		t.Fatalf("GetFindingsBySeverity(critical): %v", err)
+	}
+	if len(highs) != 0 {
+		t.Fatalf("after HTTP upgrade: %d high findings remain, want 0 (replaced)", len(highs))
+	}
+	if len(crits) != 1 {
+		t.Fatalf("after HTTP upgrade: %d critical findings, want 1", len(crits))
+	}
+
+	// Further weaker-or-equal callbacks are fully suppressed — no new findings.
+	svc.handleInteraction(dns())
+	svc.handleInteraction(&server.Interaction{Protocol: "https", UniqueID: nonce})
+	if emits != 2 {
+		t.Fatalf("post-upgrade callbacks emitted extra findings: emits=%d, want 2", emits)
+	}
+	crits, _ = repo.GetFindingsBySeverity(ctx, project, "critical", 10)
+	if len(crits) != 1 {
+		t.Fatalf("post-upgrade: %d critical findings, want 1", len(crits))
+	}
+}
+
 func TestClassifyInteraction(t *testing.T) {
 	pctx := PayloadContext{
 		TargetURL:     "http://target.com",
@@ -351,15 +505,19 @@ func TestClassifyInteractionHostRoutingInfo(t *testing.T) {
 		}
 	}
 
-	// X-Forwarded-Host header injection → Info (case-insensitive on the name).
-	for _, name := range []string{"X-Forwarded-Host", "x-forwarded-host"} {
+	// The proxy-reflected host-header family → Info (case-insensitive on the name).
+	// A reverse proxy reflects these into a redirect Location / upstream URL that the
+	// proxy (or the scanner following the redirect) fetches, so the HTTP callback is
+	// not proof of a server-side SSRF — the same FP class as the command branch.
+	for _, name := range []string{"X-Forwarded-Host", "x-forwarded-host", "X-Forwarded-Server", "X-Host", "X-Original-Host", "X-Original-URL", "X-Rewrite-URL"} {
 		xfh := PayloadContext{TargetURL: "http://target.com", InjectionType: "header", ParameterName: name, ModuleID: "oast-probe"}
 		if sev, _, _ := classifyInteraction("http", xfh); sev.String() != "info" {
-			t.Errorf("X-Forwarded-Host (%q) classifyInteraction severity = %s, want info", name, sev)
+			t.Errorf("host-reflection header (%q) classifyInteraction severity = %s, want info", name, sev)
 		}
 	}
 
-	// Other forwarding headers from the same module must remain high.
+	// Client-IP / non-reflected forwarding headers must remain high (genuine SSRF
+	// signal — they are not reflected into outbound redirect/upstream URLs).
 	for _, name := range []string{"X-Forwarded-For", "Referer", "Origin"} {
 		other := PayloadContext{TargetURL: "http://target.com", InjectionType: "header", ParameterName: name, ModuleID: "oast-probe"}
 		if sev, _, _ := classifyInteraction("http", other); sev.String() != "high" {
@@ -422,5 +580,121 @@ func TestClassifyCommandInjectionForwardingHeaderFP(t *testing.T) {
 	}
 	if sev, conf, _ := classifyInteraction("dns", paramPctx); sev.String() != "high" || conf != severity.Firm {
 		t.Errorf("cmdi DNS on genuine param = %s/%s, want high/firm", sev, conf)
+	}
+}
+
+// TestClassifyCommandInjectionProtocolMismatch reproduces the exact wild false
+// positive: a ";nslookup <oast>" payload injected into X-Forwarded-Host yields an
+// HTTPS callback (the proxy reflected the header into a redirect Location and a
+// client followed it to <oast>/login). A DNS-only command cannot make an HTTP
+// request by executing, so this must NOT be reported as confirmed command
+// injection — it is downgraded to Low / Tentative, UNCONFIRMED.
+func TestClassifyCommandInjectionProtocolMismatch(t *testing.T) {
+	const host = "d8vktfraf7em8h1864k0bigm5o33zt98m.oast.vigolium.com"
+	// The wild payload, verbatim: base host + ";nslookup <oast>" in X-Forwarded-Host.
+	xfh := PayloadContext{
+		TargetURL:     "https://lk-customerops-dr.sc-corp.net/",
+		ParameterName: "X-Forwarded-Host",
+		InjectionType: "os-command-injection (header)",
+		ModuleID:      "command-injection-oast",
+		CallbackURL:   host,
+		Payload:       "lk-customerops-dr.sc-corp.net;nslookup " + host,
+	}
+	for _, proto := range []string{"http", "https", "HTTPS"} {
+		sev, conf, desc := classifyInteraction(proto, xfh)
+		if sev.String() != "low" || conf != severity.Tentative {
+			t.Errorf("nslookup payload + %s callback = %s/%s, want low/tentative; desc: %s", proto, sev, conf, desc)
+		}
+		if !strings.Contains(desc, "UNCONFIRMED") {
+			t.Errorf("downgraded finding must be labelled UNCONFIRMED; desc: %s", desc)
+		}
+	}
+
+	// Protocol mismatch is parameter-agnostic: a DNS-only command yielding an HTTP
+	// callback is a false positive even on a genuine request parameter (the host was
+	// reached as a URL substring, not by the shell).
+	param := PayloadContext{
+		TargetURL:     "http://target.com/run",
+		ParameterName: "cmd",
+		InjectionType: "os-command-injection (parameter)",
+		ModuleID:      "command-injection-oast",
+		CallbackURL:   host,
+		Payload:       "1;nslookup " + host,
+	}
+	if sev, conf, _ := classifyInteraction("http", param); sev.String() != "low" || conf != severity.Tentative {
+		t.Errorf("nslookup payload + HTTP on genuine param = %s/%s, want low/tentative", sev, conf)
+	}
+
+	// A genuine fetch command (curl) producing an HTTP callback on a genuine
+	// parameter is real command execution → stays Critical / Certain. The
+	// protocol-mismatch guard must not touch it.
+	curl := PayloadContext{
+		TargetURL:     "http://target.com/run",
+		ParameterName: "cmd",
+		InjectionType: "os-command-injection (parameter)",
+		ModuleID:      "command-injection-oast",
+		CallbackURL:   host,
+		Payload:       "1;curl http://" + host,
+	}
+	if sev, conf, _ := classifyInteraction("http", curl); sev.String() != "critical" || conf != severity.Certain {
+		t.Errorf("curl payload + HTTP on genuine param = %s/%s, want critical/certain", sev, conf)
+	}
+}
+
+// TestClassifyCommandInjectionReflectedHostHeader locks in the second guard: even a
+// fetch command (curl) injected into a proxy-reflected host header is not confirmed
+// command injection, because the proxy fetches the host embedded in the header
+// regardless of any shell metacharacter (a bare-host control calls back the same).
+// Both the HTTP and DNS callbacks on these headers are downgraded.
+func TestClassifyCommandInjectionReflectedHostHeader(t *testing.T) {
+	const host = "abc123.oast.vigolium.com"
+	base := PayloadContext{
+		TargetURL:     "http://target.com/",
+		InjectionType: "os-command-injection (header)",
+		ModuleID:      "command-injection-oast",
+		CallbackURL:   host,
+	}
+	for _, name := range []string{"X-Forwarded-Host", "x-forwarded-server", "X-Host", "X-Original-Host", "X-Original-URL", "X-Rewrite-URL"} {
+		// HTTP callback for a curl payload (protocol matches the command, so guard 1
+		// does not fire) — guard 2 must still downgrade it on a reflected host header.
+		curl := base
+		curl.ParameterName = name
+		curl.Payload = "target.com;curl http://" + host
+		if sev, conf, desc := classifyInteraction("http", curl); sev.String() != "low" || conf != severity.Tentative {
+			t.Errorf("curl payload + HTTP on %q = %s/%s, want low/tentative; desc: %s", name, sev, conf, desc)
+		}
+		// DNS callback on a reflected host header is likewise the proxy resolving the
+		// host for routing → downgraded.
+		nsl := curl
+		nsl.Payload = "target.com;nslookup " + host
+		if sev, conf, _ := classifyInteraction("dns", nsl); sev.String() != "low" || conf != severity.Tentative {
+			t.Errorf("nslookup payload + DNS on %q = %s/%s, want low/tentative", name, sev, conf)
+		}
+	}
+}
+
+// TestCmdiPayloadExpectsHTTP verifies the command→protocol mapping that drives the
+// protocol-mismatch guard, including that a hostname embedding a tool name as a
+// substring (no trailing space) is never mistaken for the command.
+func TestCmdiPayloadExpectsHTTP(t *testing.T) {
+	tests := []struct {
+		payload         string
+		wantKnown       bool
+		wantExpectsHTTP bool
+	}{
+		{";nslookup abc.oast.pro", true, false},
+		{"1.2.3.4 & ping -n 1 abc.oast.pro", true, false},
+		{";curl http://abc.oast.pro", true, true},
+		{";wget -q -O- http://abc.oast.pro", true, true},
+		{"", false, false},                              // no payload recorded
+		{"plainvalue", false, false},                    // no recognised command
+		{"curling.example.com", false, false},           // substring without a command space
+		{"sleeping-pingpong.example.com", false, false}, // "ping" embedded in a host, no space
+	}
+	for _, tt := range tests {
+		known, expectsHTTP := cmdiPayloadExpectsHTTP(tt.payload)
+		if known != tt.wantKnown || expectsHTTP != tt.wantExpectsHTTP {
+			t.Errorf("cmdiPayloadExpectsHTTP(%q) = (%v,%v), want (%v,%v)", tt.payload, known, expectsHTTP, tt.wantKnown, tt.wantExpectsHTTP)
+		}
 	}
 }

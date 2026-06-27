@@ -409,6 +409,34 @@ func (r *Repository) UpdateFindingTriage(ctx context.Context, id int64, severity
 	return nil
 }
 
+// DeleteFindingByHash deletes the finding(s) with the given content hash within a
+// project, including their finding_records junction rows. Used by the OAST
+// collector to replace a weaker finding (e.g. a DNS-resolution lead) with a
+// stronger one (the HTTP-fetch confirmation) for the same callback payload, so each
+// payload yields exactly one finding reflecting the strongest evidence. No-op when
+// findingHash is empty or no such finding exists.
+func (r *Repository) DeleteFindingByHash(ctx context.Context, projectUUID, findingHash string) error {
+	if findingHash == "" {
+		return nil
+	}
+	projectUUID = defaultProjectUUID(projectUUID)
+	return r.db.RunInTx(ctx, &sql.TxOptions{}, func(ctx context.Context, tx bun.Tx) error {
+		// Clear the junction rows via a subquery on the same predicate, then drop the
+		// finding(s) — both are no-ops when nothing matches, so no pre-SELECT is needed.
+		if _, err := tx.NewRaw(
+			"DELETE FROM finding_records WHERE finding_id IN (SELECT id FROM findings WHERE project_uuid = ? AND finding_hash = ?)",
+			projectUUID, findingHash,
+		).Exec(ctx); err != nil {
+			return fmt.Errorf("failed to delete finding_records: %w", err)
+		}
+		if _, err := tx.NewDelete().Model((*Finding)(nil)).
+			Where("project_uuid = ? AND finding_hash = ?", projectUUID, findingHash).Exec(ctx); err != nil {
+			return fmt.Errorf("failed to delete finding: %w", err)
+		}
+		return nil
+	})
+}
+
 // DeleteFinding deletes a finding by its numeric ID, including any finding_records junction rows.
 func (r *Repository) DeleteFinding(ctx context.Context, id int64) error {
 	return r.db.RunInTx(ctx, &sql.TxOptions{}, func(ctx context.Context, tx bun.Tx) error {

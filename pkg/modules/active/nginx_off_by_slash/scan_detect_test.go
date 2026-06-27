@@ -123,6 +123,35 @@ func TestScanPerRequest_NoFalsePositive_SuffixInvariantCatchAll(t *testing.T) {
 	assert.Empty(t, res, "a suffix-invariant catch-all under the escaped prefix must not be reported")
 }
 
+// TestScanPerRequest_NoFalsePositive_PublicAtWebRoot reproduces the
+// static-root-traversal FP class for this module: the front-end normalizes
+// /images../api down to /api, which the host already serves publicly at the web
+// root. The escape is suffix-specific (only /api resolves, a random suffix 404s)
+// and the in-alias /images/api 404s — so the stability, in-alias-differential,
+// and random-suffix controls all pass. Only the clean-canonical control (does
+// plain /api serve the same body?) catches that nothing was actually escaped.
+func TestScanPerRequest_NoFalsePositive_PublicAtWebRoot(t *testing.T) {
+	t.Parallel()
+	const publicAPI = `{"service":"orders","status":"ok","endpoints":["/list","/create","/cancel"],"version":"3.1.0"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Both the escaped path and the clean canonical /api serve the same
+		// public resource; a random suffix and the in-alias path 404.
+		if r.URL.Path == "/images../api" || r.URL.Path == "/api" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(publicAPI))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("Not Found"))
+	}))
+	defer srv.Close()
+
+	res, err := New().ScanPerRequest(modtest.Request(t, srv.URL+"/images/render"), modtest.Requester(t), &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an escape that resolves to a path already served publicly at the web root must not be reported")
+}
+
 // TestScanPerRequest_NoFalsePositive_TransientOffBySlash reproduces a one-shot
 // 200: only the very first alias-traversal request succeeds, then 404s. The
 // multi-round stability gate must drop it.

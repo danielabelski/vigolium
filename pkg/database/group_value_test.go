@@ -41,6 +41,112 @@ func insertValueFinding(t *testing.T, db *DB, ctx context.Context, projectUUID, 
 	return insertGroupFinding(t, db, ctx, projectUUID, module, sev, "firm", host, matchedURL, extracted, tagsJSON, "")
 }
 
+// insertRuleFinding inserts a finding whose module_name (the rule) is set
+// independently of module_id — the shape secret-detect produces, where one
+// module_id ("secret-detect") fronts many Kingfisher rule names. Used by the
+// ByRule grouping tests.
+func insertRuleFinding(t *testing.T, db *DB, ctx context.Context, projectUUID, moduleID, ruleName, sev, host, matchedURL, extracted string) int64 {
+	t.Helper()
+	matchedAt := "[]"
+	if matchedURL != "" {
+		matchedAt = `["` + matchedURL + `"]`
+	}
+	if extracted == "" {
+		extracted = "[]"
+	}
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO findings (project_uuid, scan_uuid, module_id, module_name,
+			finding_hash, severity, confidence, http_record_uuids, hostname, matched_at,
+			extracted_results, tags, description)
+		VALUES (?, 'scan1', ?, ?, ?, ?, 'firm', '[]', ?, ?, ?, '["secret"]', ?)`,
+		projectUUID, moduleID, ruleName, uuid.NewString(), sev, host, matchedAt, extracted, ruleName)
+	if err != nil {
+		t.Fatalf("insert rule finding: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	return id
+}
+
+// TestGroupFindingsByValue_ByRule verifies that a ByRule module (secret-detect)
+// collapses repeats of the SAME rule on a host — even with distinct per-match
+// values — while keeping DISTINCT rules, and the same rule on another host, as
+// separate findings. This is the webpack chunk-hash-manifest case: a "Looker
+// Client ID" rule matching every content hash in a bundle's chunk map.
+func TestGroupFindingsByValue_ByRule(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+	projectUUID := DefaultProjectUUID
+
+	const mod = "secret-detect"
+	// Same rule, same host/URL, three DISTINCT chunk-hash values → collapse to one.
+	survivor := insertRuleFinding(t, db, ctx, projectUUID, mod, "Looker Client ID", "high", "lk.x.net",
+		"https://lk.x.net/login", `["8b2d330eb01e5f1c4263"]`)
+	_ = insertRuleFinding(t, db, ctx, projectUUID, mod, "Looker Client ID", "high", "lk.x.net",
+		"https://lk.x.net/login", `["c01fa0008d77f1d4f78c"]`)
+	_ = insertRuleFinding(t, db, ctx, projectUUID, mod, "Looker Client ID", "high", "lk.x.net",
+		"https://lk.x.net/login", `["d03140ea6d9f22ca4538"]`)
+
+	// A genuinely DIFFERENT rule on the same host must stay its own finding.
+	awsKey := insertRuleFinding(t, db, ctx, projectUUID, mod, "AWS Access Key", "high", "lk.x.net",
+		"https://lk.x.net/app.js", `["AKIAIOSFODNN7EXAMPLE"]`)
+
+	// The same rule on a DIFFERENT host stays separate under PerHost.
+	otherHost := insertRuleFinding(t, db, ctx, projectUUID, mod, "Looker Client ID", "high", "other.x.net",
+		"https://other.x.net/login", `["aa11bb22cc33dd44ee55"]`)
+
+	deleted, grouped, err := repo.GroupFindingsByValue(ctx, projectUUID, GroupFindingOptions{
+		PerHost: true,
+		ByRule:  []string{mod},
+		MaxURLs: 50,
+	})
+	if err != nil {
+		t.Fatalf("GroupFindingsByValue: %v", err)
+	}
+	if deleted != 2 || grouped != 1 {
+		t.Fatalf("expected 2 deleted / 1 grouped, got %d / %d", deleted, grouped)
+	}
+
+	var remaining []*Finding
+	if err := db.NewSelect().Model(&remaining).Scan(ctx); err != nil {
+		t.Fatalf("select remaining: %v", err)
+	}
+	survivors := map[int64]bool{survivor: true, awsKey: true, otherHost: true}
+	if len(remaining) != len(survivors) {
+		t.Errorf("expected %d remaining findings, got %d", len(survivors), len(remaining))
+	}
+	for _, f := range remaining {
+		if !survivors[f.ID] {
+			t.Errorf("unexpected survivor: id=%d module=%s rule=%s host=%s", f.ID, f.ModuleID, f.ModuleName, f.Hostname)
+		}
+	}
+
+	// The collapsed Looker survivor must carry all three distinct chunk-hash values.
+	s := &Finding{}
+	if err := db.NewSelect().Model(s).Where("id = ?", survivor).Scan(ctx); err != nil {
+		t.Fatalf("select survivor: %v", err)
+	}
+	if len(s.ExtractedResults) != 3 {
+		t.Fatalf("expected survivor to carry 3 distinct values, got %d: %v", len(s.ExtractedResults), s.ExtractedResults)
+	}
+	wantVals := map[string]bool{
+		"8b2d330eb01e5f1c4263": false,
+		"c01fa0008d77f1d4f78c": false,
+		"d03140ea6d9f22ca4538": false,
+	}
+	for _, v := range s.ExtractedResults {
+		if _, ok := wantVals[v]; !ok {
+			t.Errorf("unexpected value on survivor: %q", v)
+		}
+		wantVals[v] = true
+	}
+	for v, seen := range wantVals {
+		if !seen {
+			t.Errorf("survivor missing value: %q", v)
+		}
+	}
+}
+
 func TestGroupFindingsByValue(t *testing.T) {
 	db := newTestDB(t)
 	repo := NewRepository(db)

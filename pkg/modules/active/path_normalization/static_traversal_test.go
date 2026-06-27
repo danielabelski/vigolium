@@ -174,6 +174,47 @@ func TestStaticTraversal_NoFalsePositiveOnNormalStatic(t *testing.T) {
 	assert.Empty(t, res, "a host that blocks traversal must not be flagged")
 }
 
+// TestStaticTraversal_NoFalsePositivePublicFileAtWebRoot is the regression guard
+// for the reported false positive (arcadiacreativestudio.com /
+// @snapchat/mw-web-production): the matrix/encoded-slash path
+// `/mwp;/..%2fpackage.json` normalizes server-side to `/package.json`, which the
+// host already serves publicly at the web root. The clean canonical path returns
+// the identical file and a bogus filename simply 404s, so the decoy control alone
+// (which only catches a catch-all that serves the file for ANY name) passed and
+// the finding fired. No static-root boundary was escaped — the file is public —
+// so the clean-canonical control must suppress it.
+func TestStaticTraversal_NoFalsePositivePublicFileAtWebRoot(t *testing.T) {
+	t.Parallel()
+	const pkgJSON = `{"name":"@snapchat/mw-web-production","version":"1.0.1","dependencies":{"react":"^18.2.0","express":"^4.18.2"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The front-end normalizes any `..%2f`/`;` traversal down to its clean
+		// resolution before routing, so the shell and the clean path behave
+		// identically: package.json is public at the web root either way (whether
+		// requested as `/package.json` or `/mwp;/..%2fpackage.json`); any other
+		// path — the decoy, /etc/passwd, a random wildcard probe — 404s.
+		if strings.Contains(strings.ToLower(r.URL.RequestURI()), "package.json") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(pkgJSON))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("Cannot GET the requested path"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	// Mirror the field capture: the crawler's static-asset view under /mwp.
+	rr := modtest.Response(
+		modtest.Request(t, srv.URL+"/mwp/main-6WQ4CMUM.mjs"),
+		"application/javascript",
+		"console.log('mw-web app bundle');",
+	)
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a file already served publicly at the web root must not be reported as a static-root traversal escape")
+}
+
 // TestStaticTraversal_NoFalsePositiveOnCatchAllDecoy is the decoy-negative
 // regression guard: a pathological host that returns passwd-looking content for
 // ANY matrix-bypass path (including a bogus filename) must be suppressed,

@@ -27,15 +27,49 @@ func seed403(t *testing.T, rawURL string) *httpmsg.HttpRequestResponse {
 }
 
 // TestScanPerRequest_DetectsPathBypass drives the real scan method against a
-// server that 403s nothing of its own (the 403 baseline is seeded) but serves
-// the protected resource for any path mutation, while answering an unrelated
-// random path with 404. The mutated 200 is distinguishable from the host's
-// wildcard response, so it is reported as a genuine bypass.
+// server that genuinely forbids the CLEAN protected path (/admin → 403) while a
+// path mutation (/admin/, /./admin, …) reaches the resource with 200, and an
+// unrelated random path 404s. The clean path stays forbidden, the mutated 200 is
+// distinguishable from the host's wildcard response, so it is reported as a
+// genuine bypass.
 func TestScanPerRequest_DetectsPathBypass(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Any path that still references the protected resource serves it; an
-		// unrelated path (the wildcard probe) is a genuine 404.
+		// The exact clean path stays forbidden; a mutated path that still
+		// references the resource serves it; an unrelated path (the wildcard
+		// probe) is a genuine 404.
+		switch {
+		case r.URL.Path == "/admin":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("Forbidden"))
+		case strings.Contains(r.URL.Path, "admin"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html><body>SECRET ADMIN PANEL</body></html>"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := seed403(t, srv.URL+"/admin")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected a path-bypass finding when a mutation reaches the protected resource")
+}
+
+// TestScanPerRequest_NoFalsePositive_TransientBaselineNowPublic reproduces the
+// transient-baseline FP class: the crawl captured a 403 for /admin (a rate-limit
+// / WAF / deploy blip), but at scan time the resource is genuinely public — the
+// clean /admin and every path mutation return the same 200. A random path 404s,
+// so the wildcard and catch-all guards pass. Only the clean-canonical control
+// (the bare /admin is now 200) catches that no access-control boundary exists.
+func TestScanPerRequest_NoFalsePositive_TransientBaselineNowPublic(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The resource (and any mutation of it) is now publicly 200; unrelated
+		// paths 404.
 		if strings.Contains(r.URL.Path, "admin") {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("<html><body>SECRET ADMIN PANEL</body></html>"))
@@ -50,7 +84,7 @@ func TestScanPerRequest_DetectsPathBypass(t *testing.T) {
 
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
-	require.NotEmpty(t, res, "expected a path-bypass finding when a mutation reaches the protected resource")
+	assert.Empty(t, res, "a resource that is publicly 200 on its clean path must not be reported as a 403 bypass")
 }
 
 // TestScanPerRequest_NoFalsePositive_Catchall reproduces the catch-all false

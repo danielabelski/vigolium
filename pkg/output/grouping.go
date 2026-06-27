@@ -30,6 +30,47 @@ func GroupingKey(moduleID, severity, value, host string, perHost bool) string {
 	return key
 }
 
+// RuleGroupKey folds a module's per-finding rule identity (e.g. secret-detect's
+// Kingfisher rule name, carried in Info.Name / module_name) into the module
+// component of a grouping key. ByRule grouping then collapses repeats of the
+// SAME rule on a host while keeping DISTINCT rules — a "Looker Client ID" vs an
+// "AWS Access Key", both emitted by secret-detect — as separate findings. Uses
+// groupKeySeparator so the composite slots cleanly into GroupingKey's module
+// position (every component there is control-char delimited, so the extra slot
+// is unambiguous).
+func RuleGroupKey(moduleID, rule string) string {
+	return moduleID + groupKeySeparator + rule
+}
+
+// GroupingBranch decides how one finding folds into a group, shared by the DB
+// grouping pass and the live console grouper so the by-module / by-rule / value
+// branches can't drift between the two. value is the finding's already-normalized
+// extracted-value key (see NormalizedValueKey); tags is its tag list; byModule,
+// byRule and tagSet are the resolved option sets.
+//
+// It returns the module component of the grouping key (moduleID, or the
+// rule-folded key for a by-rule module), the value component (emptied for
+// by-module and by-rule so every value collapses into one group), and ok=false
+// when the finding is ungroupable — no stable extracted value, or the tag gate
+// rejects it. A returned empty valueKey with ok=true therefore marks a
+// collapse-all (by-module/by-rule) group, where distinct values get unioned onto
+// the survivor.
+func GroupingBranch(moduleID, rule, value string, tags []string, byModule, byRule, tagSet map[string]struct{}) (moduleKey, valueKey string, ok bool) {
+	if _, isByModule := byModule[moduleID]; isByModule {
+		return moduleID, "", true
+	}
+	if _, isByRule := byRule[moduleID]; isByRule {
+		return RuleGroupKey(moduleID, rule), "", true
+	}
+	if value == "" {
+		return "", "", false // no stable extracted value to group on
+	}
+	if len(tagSet) > 0 && !TagsIntersect(tags, tagSet) {
+		return "", "", false
+	}
+	return moduleID, value, true
+}
+
 // NormalizedValueKey builds a stable grouping key from a finding's extracted
 // results: each entry trimmed, empties dropped, the remainder sorted (so order
 // doesn't matter), joined with a separator that can't appear inside a single

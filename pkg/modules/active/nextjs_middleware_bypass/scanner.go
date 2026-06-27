@@ -88,7 +88,7 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		result, err := m.executeAndCheck(modifiedRaw, ctx, httpClient, statusCode, hp.desc, hp.name+": "+hp.value)
+		result, err := m.executeAndCheck(modifiedRaw, ctx, httpClient, statusCode, hp.desc, hp.name+": "+hp.value, false)
 		if err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 				return results, nil
@@ -109,7 +109,12 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		result, err := m.executeAndCheck(modifiedRaw, ctx, httpClient, statusCode, pp.desc, modifiedPath)
+		// checkCatchAll=true: a path rewrite can land on a generic 200 app shell
+		// (home / marketing / a [...slug] catch-all) that is not the protected
+		// resource. The header phase keeps the same path, so its still-denied
+		// recheck already rules that out; the path phase needs an explicit
+		// catch-all control.
+		result, err := m.executeAndCheck(modifiedRaw, ctx, httpClient, statusCode, pp.desc, modifiedPath, true)
 		if err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 				return results, nil
@@ -132,6 +137,7 @@ func (m *Module) executeAndCheck(
 	origStatus int,
 	desc string,
 	payload string,
+	checkCatchAll bool,
 ) (*output.ResultEvent, error) {
 	// modifiedRaw is internally built (well-formed), so wrap directly instead
 	// of re-parsing on this hot path.
@@ -175,6 +181,15 @@ func (m *Module) executeAndCheck(
 	// rate-limit/WAF block (or the endpoint may simply return 200 for everything
 	// now). Re-verify with the bypass payload as the only variable.
 	if !m.confirmBypass(ctx, httpClient, modifiedRaw, ev) {
+		return nil, nil
+	}
+
+	// Catch-all control (path phase only): a rewritten path may resolve to a
+	// generic 200 app shell served for any unmatched route. If the bypass body is
+	// indistinguishable from the host's response to a random nonexistent path, the
+	// rewrite reached the catch-all shell, not the protected resource — not a
+	// middleware bypass.
+	if checkCatchAll && !m.bypassDistinctFromCatchAll(ctx, httpClient, body) {
 		return nil, nil
 	}
 
@@ -231,6 +246,30 @@ func (m *Module) confirmBypass(
 		ev.Add(fmt.Sprintf("confirm round %d (bypass allowed)", round), string(modifiedRaw), fullResp)
 	}
 	return true
+}
+
+// bypassDistinctFromCatchAll fetches a random, definitely-nonexistent path via
+// the clean original request template and reports whether the bypass body is
+// distinct from it. A Next.js app that serves a generic 200 shell (home /
+// marketing / a [...slug] catch-all) for unmatched routes would answer a
+// rewritten path with that shell rather than the protected resource, so a bypass
+// body similar to the catch-all shell is not a real middleware bypass. Fails OPEN
+// (returns true = distinct) on a probe error or a non-200 control, so a genuine
+// bypass — where the random path is a real 404 — is never suppressed.
+func (m *Module) bypassDistinctFromCatchAll(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	bypassBody string,
+) bool {
+	raw, err := httpmsg.SetPath(ctx.Request().Raw(), "/"+modkit.FreshCanary()+"-vgo404")
+	if err != nil {
+		return true
+	}
+	status, body, _, ok := m.freshProbe(ctx, httpClient, raw)
+	if !ok || status != 200 {
+		return true // control didn't 200 → not a catch-all → keep
+	}
+	return !modkit.BodiesSimilar(bypassBody, body)
 }
 
 // freshProbe issues raw with redirects disabled and the response cache bypassed,

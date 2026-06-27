@@ -55,6 +55,7 @@ func (r *Runner) groupFindingsByValue(ctx context.Context, phase string, hostnam
 		PerHost:   gc.PerHost,
 		Tags:      gc.Tags,
 		ByModule:  gc.ByModule,
+		ByRule:    gc.ByRule,
 		MaxURLs:   gc.MaxURLs,
 		Hostnames: hostnames,
 	})

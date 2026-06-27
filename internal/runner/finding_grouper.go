@@ -31,6 +31,7 @@ type findingGrouper struct {
 	cfg       config.FindingGroupingConfig
 	tagSet    map[string]struct{}
 	moduleSet map[string]struct{} // module IDs grouped by (module, severity[, host]) regardless of value
+	ruleSet   map[string]struct{} // module IDs grouped by (module, rule_name, severity[, host])
 	groups    map[string]*liveFindingGroup
 	order     []string
 	grouped   map[severity.Severity]int // unique groups + each ungroupable finding
@@ -45,6 +46,7 @@ func newFindingGrouper(cfg config.FindingGroupingConfig) *findingGrouper {
 		cfg:       cfg,
 		tagSet:    output.NormalizeTagSet(cfg.Tags),
 		moduleSet: output.NormalizeStringSet(cfg.ByModule),
+		ruleSet:   output.NormalizeStringSet(cfg.ByRule),
 		groups:    make(map[string]*liveFindingGroup),
 		grouped:   make(map[severity.Severity]int),
 		raw:       make(map[severity.Severity]int),
@@ -90,18 +92,12 @@ func (g *findingGrouper) groupKey(result *output.ResultEvent) (key, value string
 		return "", "", false
 	}
 	value = output.NormalizedValueKey(result.ExtractedResults)
-	keyValue := value
-	if _, byModule := g.moduleSet[result.ModuleID]; byModule {
-		keyValue = "" // collapse every value from this module into one group
-	} else {
-		if value == "" {
-			return "", "", false
-		}
-		if len(g.tagSet) > 0 && !output.TagsIntersect(result.Info.Tags, g.tagSet) {
-			return "", "", false
-		}
+	moduleKey, keyValue, groupable := output.GroupingBranch(
+		result.ModuleID, result.Info.Name, value, result.Info.Tags, g.moduleSet, g.ruleSet, g.tagSet)
+	if !groupable {
+		return "", "", false
 	}
-	key = output.GroupingKey(result.ModuleID, result.Info.Severity.String(), keyValue, result.Host, g.cfg.PerHost)
+	key = output.GroupingKey(moduleKey, result.Info.Severity.String(), keyValue, result.Host, g.cfg.PerHost)
 	return key, value, true
 }
 

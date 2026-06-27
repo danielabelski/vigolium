@@ -82,19 +82,20 @@ func (m *Module) ScanPerRequest(
 	}
 
 	requestHash := ctx.Request().ID()
+	shapes := infra.CmdiOASTHeaderShapes()
 	for _, header := range cmdiOASTHeaders {
-		host := oast.GenerateURL(urlx.String(), header, injectionTypeHeader, ModuleID, requestHash)
-		if host == "" {
-			continue
-		}
-		payloads := infra.CmdiOASTHeaderPayloads(host, "http://"+host)
-		// Record a representative variant (the first is always sent) so the finding
-		// reconstructs the planting request with the real shell payload in the
-		// header — not a bare host — even though several variants share this host.
-		if len(payloads) > 0 {
-			oast.RecordPayload(host, payloads[0])
-		}
-		for _, payload := range payloads {
+		// Mint a unique OAST host per breakout variant (not one shared host per
+		// header) so a callback pinpoints the exact shell payload that fired, and the
+		// per-nonce finding coalescing reports each as its own investigable finding.
+		for _, shape := range shapes {
+			host := oast.GenerateURL(urlx.String(), header, injectionTypeHeader, ModuleID, requestHash)
+			if host == "" {
+				continue
+			}
+			payload := shape(host, "http://"+host)
+			// Record the exact value planted in this header so the finding reconstructs
+			// the planting request with the real shell payload — not a bare host.
+			oast.RecordPayload(host, payload)
 			modifiedRaw, err := httpmsg.AddOrReplaceHeader(ctx.Request().Raw(), header, payload)
 			if err != nil {
 				continue
@@ -144,22 +145,20 @@ func (m *Module) ScanPerInsertionPoint(
 	if ip.Type() == httpmsg.INS_HEADER {
 		injType = injectionTypeHeader
 	}
-	host := oast.GenerateURL(urlx.String(), ip.Name(), injType, ModuleID, requestHash)
-	if host == "" {
-		return nil, nil
-	}
-	httpURL := "http://" + host
-
 	base := ip.BaseValue()
-	payloads := infra.CmdiOASTPayloads(host, httpURL)
-	// Record the complete value planted at the insertion point (base + a
-	// representative variant that is always sent) so the finding shows what really
-	// went on the wire rather than the bare callback host.
-	if len(payloads) > 0 {
-		oast.RecordPayload(host, base+payloads[0])
-	}
-	for _, payload := range payloads {
-		raw := ip.BuildRequest([]byte(base + payload))
+	// Mint a unique OAST host per breakout variant (not one shared host for the whole
+	// insertion point) so a callback pinpoints the exact shell payload that fired, and
+	// the per-nonce finding coalescing reports each as its own investigable finding.
+	for _, shape := range infra.CmdiOASTShapes() {
+		host := oast.GenerateURL(urlx.String(), ip.Name(), injType, ModuleID, requestHash)
+		if host == "" {
+			return nil, nil
+		}
+		payload := base + shape(host, "http://"+host)
+		// Record the complete value planted at the insertion point so the finding shows
+		// what really went on the wire rather than the bare callback host.
+		oast.RecordPayload(host, payload)
+		raw := ip.BuildRequest([]byte(payload))
 		if abort := m.fire(ctx, httpClient, raw); abort {
 			return nil, nil
 		}
