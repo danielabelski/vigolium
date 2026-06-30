@@ -317,6 +317,38 @@ func TestCountFindingsBySeverity(t *testing.T) {
 	if len(empty) != 0 {
 		t.Errorf("foreign project should have 0 severities, got %v", empty)
 	}
+
+	// Hostname filter restricts the count to findings on the in-scope hosts, so the
+	// scan-completion summary excludes findings from prior scans of other hosts.
+	saveFindingWithHost(t, repo, "mod-x", SeverityHigh, "in-scope.example.com")
+	saveFindingWithHost(t, repo, "mod-y", SeverityHigh, "other.example.com")
+	scoped, err := CountFindingsBySeverity(ctx, db, DefaultProjectUUID, "in-scope.example.com")
+	if err != nil {
+		t.Fatalf("CountFindingsBySeverity (hostnames): %v", err)
+	}
+	if scoped[SeverityHigh] != 1 {
+		t.Errorf("scoped high = %d, want 1 (only in-scope.example.com)", scoped[SeverityHigh])
+	}
+	if scoped[SeverityLow] != 0 {
+		t.Errorf("scoped low = %d, want 0", scoped[SeverityLow])
+	}
+}
+
+func saveFindingWithHost(t *testing.T, repo *Repository, moduleID, sev, host string) {
+	t.Helper()
+	f := &Finding{
+		ProjectUUID: DefaultProjectUUID,
+		ModuleID:    moduleID,
+		ModuleName:  moduleID,
+		Severity:    sev,
+		Confidence:  "firm",
+		Hostname:    host,
+		FindingHash: uuid.New().String(),
+		Status:      StatusTriaged,
+	}
+	if err := repo.SaveFindingDirect(context.Background(), f); err != nil {
+		t.Fatalf("SaveFindingDirect: %v", err)
+	}
 }
 
 func TestCountFindingsByModule(t *testing.T) {

@@ -726,7 +726,8 @@ func reportNativeScanSuccess(db *database.DB, settings *config.Settings, repo *d
 	uploadNativeScanResults(settings, scanOpts, repo)
 	if !scanOpts.Silent {
 		fmt.Fprintf(os.Stderr, "\n%s %s\n", terminal.Aqua(terminal.SymbolSparkle), terminal.BoldAqua("Native scan completed"))
-		printScanCompletionSummary(repo, time.Since(scanStart))
+		hosts := summaryScopeHosts(context.Background(), repo, settings, scanOpts.Targets, scanOpts.ProjectUUID, scanOpts.ScanUUID)
+		printScanCompletionSummary(repo, scanOpts.ProjectUUID, hosts, time.Since(scanStart))
 	}
 	evaluateFailOnGate(repo, scanOpts.ProjectUUID, scanOpts.ScanUUID, scanOpts.Silent)
 }
@@ -1894,42 +1895,47 @@ func countExtensionFiles(cfg *config.ExtensionsConfig) int {
 	return count
 }
 
+// summaryScopeHosts returns the in-scope (scheme, hostname, port) origins present in the
+// project's DB for the given CLI targets, delegating to Repository.InScopeHosts (the same
+// scoping the runner phases use). With no targets (or no settings/repo) it returns nil —
+// meaning "no filter", a project-wide pass. The scan-completion summary uses this so its
+// counts cover only the origins actually scanned, not leftovers from prior scans of other
+// origins in the project.
+func summaryScopeHosts(ctx context.Context, repo *database.Repository, settings *config.Settings, targets []string, projectUUID, scanUUID string) []database.HostTarget {
+	if repo == nil || settings == nil {
+		return nil
+	}
+	return repo.InScopeHosts(ctx, settings.Scope, targets, projectUUID, scanUUID)
+}
+
 // printScanCompletionSummary prints a compact summary of ingested records,
-// findings, and total wall-clock duration after scan completion.
-func printScanCompletionSummary(repo *database.Repository, elapsed time.Duration) {
+// findings, and total wall-clock duration after scan completion. The record count is
+// scoped to the in-scope origins (scheme/host/port); the finding count is scoped to the
+// same project + in-scope hostnames (findings carry no port column), so the summary
+// reflects the current scan's targets rather than the whole project.
+func printScanCompletionSummary(repo *database.Repository, projectUUID string, hosts []database.HostTarget, elapsed time.Duration) {
 	if repo == nil {
 		return
 	}
 
 	ctx := context.Background()
-	db := repo.DB()
 
-	// Count HTTP records
-	var recordCount int
-	err := db.NewSelect().Model((*database.HTTPRecord)(nil)).ColumnExpr("COUNT(*)").Scan(ctx, &recordCount)
+	// Count HTTP records on the in-scope origins. CountRecordsAfterCursor with a zero
+	// cursor counts every matching record; empty hosts means project-wide.
+	recordCount, err := repo.CountRecordsAfterCursor(ctx, time.Time{}, "", hosts...)
 	if err != nil {
 		return
 	}
 
-	// Count findings by severity
-	type sevCount struct {
-		Severity string `bun:"severity"`
-		Count    int64  `bun:"count"`
-	}
-	var sevCounts []sevCount
-	err = db.NewSelect().Model((*database.Finding)(nil)).
-		ColumnExpr("severity, COUNT(*) AS count").
-		GroupExpr("severity").
-		Scan(ctx, &sevCounts)
+	// Count findings by severity, scoped to the same project + in-scope hostnames.
+	counts, err := database.CountFindingsBySeverity(ctx, repo.DB(), projectUUID, database.HostnamesOf(hosts)...)
 	if err != nil {
 		return
 	}
 
 	var totalFindings int64
-	counts := make(map[string]int64)
-	for _, sc := range sevCounts {
-		counts[sc.Severity] = sc.Count
-		totalFindings += sc.Count
+	for _, c := range counts {
+		totalFindings += c
 	}
 
 	fmt.Fprintf(os.Stderr, "  %s Records: %s http records ingested\n",

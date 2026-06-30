@@ -45,8 +45,8 @@ type DBInputSource struct {
 	pollInterval   time.Duration
 	oneShot        bool // when true, return io.EOF instead of polling when no records remain
 	closed         atomic.Bool
-	hostnames      []string // when non-empty, only records matching these hostnames are returned
-	includeSources []string // when non-empty, only records with source IN this list are returned
+	hostScopes     []HostTarget // when non-empty, only records matching these in-scope origins (scheme/host/port) are returned
+	includeSources []string     // when non-empty, only records with source IN this list are returned
 	pageSize       int
 	idleTimeout    time.Duration // when > 0, Next returns io.EOF after this long without any new rows
 
@@ -112,11 +112,12 @@ func (s *DBInputSource) WithPageSize(pageSize int) *DBInputSource {
 	return s
 }
 
-// WithHostnames sets a hostname filter so only records matching these hostnames are returned.
-// This ensures that HTTP records from unrelated hosts (e.g. leftover from previous scans)
-// are not included when the CLI targets a specific host.
-func (s *DBInputSource) WithHostnames(hostnames []string) *DBInputSource {
-	s.hostnames = hostnames
+// WithHostScopes sets an in-scope origin filter so only records matching these
+// (scheme, hostname, port) origins are returned. This keeps HTTP records from unrelated
+// origins — including the same host on a different port left over from a previous scan
+// (e.g. localhost:8080 when targeting localhost:3000) — out of the scan.
+func (s *DBInputSource) WithHostScopes(hosts []HostTarget) *DBInputSource {
+	s.hostScopes = hosts
 	return s
 }
 
@@ -275,14 +276,12 @@ func (s *DBInputSource) fetchNextBatch(ctx context.Context) ([]*HTTPRecord, erro
 		Column(scanRecordColumns...)
 
 	if !s.readCursorAt.IsZero() {
-		cursorAt := s.readCursorAt.UTC().Format("2006-01-02 15:04:05")
+		cursorAt := dbTimestampString(s.readCursorAt)
 		q = q.Where("(created_at > ? OR (created_at = ? AND uuid > ?))",
 			cursorAt, cursorAt, s.readCursorUUID)
 	}
 
-	if len(s.hostnames) > 0 {
-		q = q.Where("hostname IN (?)", bun.List(s.hostnames))
-	}
+	q = applyHostScopeFilter(q, s.hostScopes)
 
 	if len(s.includeSources) > 0 {
 		q = q.Where("source IN (?)", bun.List(s.includeSources))
@@ -446,8 +445,8 @@ type RiskPrioritizedDBInputSource struct {
 	db                   *DB
 	repo                 *Repository
 	scanUUID             string
-	hostnames            []string // when non-empty, only records matching these hostnames are returned
-	maxParamShapeSamples int      // when > 0, coalesce same-shape GET records to this many value-distinct samples
+	hostScopes           []HostTarget // when non-empty, only records matching these in-scope origins (scheme/host/port) are returned
+	maxParamShapeSamples int          // when > 0, coalesce same-shape GET records to this many value-distinct samples
 	closed               atomic.Bool
 	mu                   sync.Mutex
 	loaded               bool
@@ -473,9 +472,10 @@ func NewRiskPrioritizedDBInputSource(db *DB, repo *Repository, scanUUID string) 
 	}
 }
 
-// WithHostnames sets a hostname filter so only records matching these hostnames are returned.
-func (s *RiskPrioritizedDBInputSource) WithHostnames(hostnames []string) *RiskPrioritizedDBInputSource {
-	s.hostnames = hostnames
+// WithHostScopes sets an in-scope origin filter so only records matching these
+// (scheme, hostname, port) origins are returned.
+func (s *RiskPrioritizedDBInputSource) WithHostScopes(hosts []HostTarget) *RiskPrioritizedDBInputSource {
+	s.hostScopes = hosts
 	return s
 }
 
@@ -625,14 +625,12 @@ func (s *RiskPrioritizedDBInputSource) loadSnapshotLocked(ctx context.Context) e
 	orderedQ := s.db.NewSelect().Model((*HTTPRecord)(nil)).Column(cols...)
 
 	if !scan.CursorAt.IsZero() {
-		cursorAt := scan.CursorAt.UTC().Format("2006-01-02 15:04:05")
+		cursorAt := dbTimestampString(scan.CursorAt)
 		orderedQ = orderedQ.Where("(created_at > ? OR (created_at = ? AND uuid > ?))",
 			cursorAt, cursorAt, scan.CursorUUID)
 	}
 
-	if len(s.hostnames) > 0 {
-		orderedQ = orderedQ.Where("hostname IN (?)", bun.List(s.hostnames))
-	}
+	orderedQ = applyHostScopeFilter(orderedQ, s.hostScopes)
 
 	if err := orderedQ.OrderExpr("created_at ASC, uuid ASC").Scan(ctx, &ordered); err != nil {
 		return err
@@ -647,14 +645,12 @@ func (s *RiskPrioritizedDBInputSource) loadSnapshotLocked(ctx context.Context) e
 		OrderExpr("risk_score DESC")
 
 	if !scan.CursorAt.IsZero() {
-		cursorAt := scan.CursorAt.UTC().Format("2006-01-02 15:04:05")
+		cursorAt := dbTimestampString(scan.CursorAt)
 		riskQ = riskQ.Where("(created_at > ? OR (created_at = ? AND uuid > ?))",
 			cursorAt, cursorAt, scan.CursorUUID)
 	}
 
-	if len(s.hostnames) > 0 {
-		riskQ = riskQ.Where("hostname IN (?)", bun.List(s.hostnames))
-	}
+	riskQ = applyHostScopeFilter(riskQ, s.hostScopes)
 
 	if err := riskQ.Scan(ctx, &highRisk); err != nil {
 		return err

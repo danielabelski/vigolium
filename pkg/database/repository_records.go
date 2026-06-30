@@ -5,10 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	neturl "net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/uptrace/bun"
 
+	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"go.uber.org/zap"
 )
@@ -443,7 +447,7 @@ func (r *Repository) UpdateRecordAnnotations(ctx context.Context, uuid string, r
 
 // GetRecordsWithResponseBody returns HTTP records that have a non-empty response body,
 // using UUID-based cursor pagination. Only columns needed for batch secret scanning are selected.
-func (r *Repository) GetRecordsWithResponseBody(ctx context.Context, projectUUID, afterUUID string, limit int) ([]*HTTPRecord, error) {
+func (r *Repository) GetRecordsWithResponseBody(ctx context.Context, projectUUID, afterUUID string, limit int, hosts ...HostTarget) ([]*HTTPRecord, error) {
 	var records []*HTTPRecord
 	q := r.db.NewSelect().
 		Model(&records).
@@ -454,6 +458,8 @@ func (r *Repository) GetRecordsWithResponseBody(ctx context.Context, projectUUID
 	if projectUUID != "" {
 		q = q.Where("project_uuid = ?", projectUUID)
 	}
+	// Optional in-scope origin filter — empty means all project records.
+	q = applyHostScopeFilter(q, hosts)
 	if afterUUID != "" {
 		q = q.Where("uuid > ?", afterUUID)
 	}
@@ -486,7 +492,7 @@ type ReSpiderCandidate struct {
 // deterministic. Each returned row carries a full raw_response body, so the
 // caller pages with a modest limit and reduces each page before reading the
 // next rather than materializing every body at once.
-func (r *Repository) GetReSpiderCandidates(ctx context.Context, projectUUID, afterUUID string, limit int) ([]ReSpiderCandidate, error) {
+func (r *Repository) GetReSpiderCandidates(ctx context.Context, projectUUID, afterUUID string, limit int, hosts ...HostTarget) ([]ReSpiderCandidate, error) {
 	var rows []ReSpiderCandidate
 	q := r.db.NewSelect().
 		TableExpr("http_records").
@@ -497,6 +503,7 @@ func (r *Repository) GetReSpiderCandidates(ctx context.Context, projectUUID, aft
 	if projectUUID != "" {
 		q = q.Where("project_uuid = ?", projectUUID)
 	}
+	q = applyHostScopeFilter(q, hosts)
 	if afterUUID != "" {
 		q = q.Where("uuid > ?", afterUUID)
 	}
@@ -529,8 +536,17 @@ type HostTarget struct {
 	Port     int    `bun:"port"`
 }
 
-// GetDistinctHosts returns distinct scheme+hostname+port combinations from HTTP records, filtered by project.
-func (r *Repository) GetDistinctHosts(ctx context.Context, projectUUID string) ([]HostTarget, error) {
+// dbTimestampString formats t to the DB's second-precision UTC timestamp string, matching
+// how created_at/cursor timestamps are stored and compared (so the comparison works on
+// SQLite text columns as well as Postgres).
+func dbTimestampString(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// GetDistinctHosts returns distinct scheme+hostname+port combinations from HTTP records,
+// filtered by project. When a non-zero `since` is supplied, only records created at/after
+// that time are considered (used to find origins discovered during a specific scan).
+func (r *Repository) GetDistinctHosts(ctx context.Context, projectUUID string, since ...time.Time) ([]HostTarget, error) {
 	var hosts []HostTarget
 	q := r.db.NewSelect().
 		TableExpr("http_records").
@@ -538,11 +554,162 @@ func (r *Repository) GetDistinctHosts(ctx context.Context, projectUUID string) (
 	if projectUUID != "" {
 		q = q.Where("project_uuid = ?", projectUUID)
 	}
+	if len(since) > 0 && !since[0].IsZero() {
+		q = q.Where("created_at >= ?", dbTimestampString(since[0]))
+	}
 	err := q.Scan(ctx, &hosts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get distinct hosts: %w", err)
 	}
 	return hosts, nil
+}
+
+// InScopeHosts returns the distinct (scheme, hostname, port) origins in the project that
+// are in scope for the supplied CLI targets. An origin is in scope when its hostname passes
+// the scope matcher AND EITHER its (scheme, port) matches one of the targets' origins
+// (default ports normalized like stored records: https→443, http→80) OR it was discovered
+// during the current scan (records created at/after the scan's start). Returns nil when
+// there are no targets (no filter — a project-wide pass). This is the single source of
+// truth for the origin scoping the executor applies via WithHostScopes, so
+// DynamicAssessment, KnownIssueScan, spidering/discovery seeds, and the scan-completion
+// record count all derive the same set.
+//
+// The full-origin match keeps e.g. localhost:3000 separate from localhost:8080 left in the
+// project by a prior scan, while the current-scan provenance carve-out still lets THIS
+// scan's own discoveries on a different port (e.g. the --intensity deep port sweep, or a
+// followed cross-port link) be scanned. Records carry no scan_uuid, so provenance is keyed
+// on the scan's start time. If no target yields a determinable scheme/port (e.g. all bare
+// hosts), the scheme/port constraint is dropped — a safe fallback that never over-excludes.
+func (r *Repository) InScopeHosts(ctx context.Context, scopeCfg config.ScopeConfig, targets []string, projectUUID, scanUUID string) []HostTarget {
+	if len(targets) == 0 {
+		return nil
+	}
+	matcher := config.NewScopeMatcher(scopeCfg, targets...)
+	allowedOrigins := parseTargetOrigins(targets)
+	hosts, err := r.GetDistinctHosts(ctx, projectUUID)
+	if err != nil {
+		return nil
+	}
+	currentScanOrigins := r.originsDiscoveredByScan(ctx, projectUUID, scanUUID)
+	var out []HostTarget
+	for _, h := range hosts {
+		if !matcher.InScopeRequest(h.Hostname, "/", "", "") {
+			continue
+		}
+		if len(allowedOrigins) > 0 {
+			_, originMatch := allowedOrigins[originKey(h.Scheme, h.Port)]
+			_, fromScan := currentScanOrigins[fullOriginKey(h)]
+			if !originMatch && !fromScan {
+				continue
+			}
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// HostnamesOf returns the distinct hostnames of the given origins, order-preserving.
+// Used to derive a hostname-only filter (e.g. for findings, which carry no port column)
+// from a set of in-scope origins.
+func HostnamesOf(hosts []HostTarget) []string {
+	if len(hosts) == 0 {
+		return nil
+	}
+	var hostnames []string
+	seen := make(map[string]struct{}, len(hosts))
+	for _, h := range hosts {
+		if _, ok := seen[h.Hostname]; ok {
+			continue
+		}
+		seen[h.Hostname] = struct{}{}
+		hostnames = append(hostnames, h.Hostname)
+	}
+	return hostnames
+}
+
+// originKey is the map key for a (scheme, port) origin pair.
+func originKey(scheme string, port int) string {
+	return strings.ToLower(scheme) + ":" + strconv.Itoa(port)
+}
+
+// fullOriginKey is the map key for a complete (scheme, hostname, port) origin.
+func fullOriginKey(h HostTarget) string {
+	return strings.ToLower(h.Scheme) + "://" + strings.ToLower(h.Hostname) + ":" + strconv.Itoa(h.Port)
+}
+
+// originsDiscoveredByScan returns the full origin keys (scheme://host:port) of hosts with
+// records created during the given scan. http_records carry no scan_uuid, so the scan's
+// start time is used as the provenance boundary: records created at/after it belong to this
+// scan. (A precise alternative would populate http_records.scan_uuid at save time; the
+// time boundary avoids that wider change at the cost of fragility under concurrent
+// same-project scans.) Empty scanUUID (or an unknown scan) yields nil, so callers fall
+// back to pure origin matching.
+func (r *Repository) originsDiscoveredByScan(ctx context.Context, projectUUID, scanUUID string) map[string]struct{} {
+	if scanUUID == "" {
+		return nil
+	}
+	scan, err := r.GetScanByUUID(ctx, scanUUID)
+	if err != nil || scan == nil || scan.StartedAt.IsZero() {
+		return nil
+	}
+	hosts, err := r.GetDistinctHosts(ctx, projectUUID, scan.StartedAt)
+	if err != nil {
+		return nil
+	}
+	keys := make(map[string]struct{}, len(hosts))
+	for _, h := range hosts {
+		keys[fullOriginKey(h)] = struct{}{}
+	}
+	return keys
+}
+
+// parseTargetOrigins extracts the set of (scheme, port) origins from CLI target URLs,
+// normalizing default ports the same way stored records do (via httpmsg.GetDefaultPort).
+// Targets without a determinable scheme are skipped; an empty result means "no scheme/port
+// constraint" to the caller. The set is across all targets, not per-target: in the rare
+// multi-target scan with the same host on different ports, a record may match a sibling
+// target's port — an accepted trade-off vs per-target matching complexity.
+func parseTargetOrigins(targets []string) map[string]struct{} {
+	origins := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		u, err := neturl.Parse(strings.TrimSpace(t))
+		if err != nil || u.Hostname() == "" || u.Scheme == "" {
+			continue
+		}
+		scheme := strings.ToLower(u.Scheme)
+		port := httpmsg.GetDefaultPort(scheme)
+		if p := u.Port(); p != "" {
+			port, _ = strconv.Atoi(p)
+		}
+		origins[originKey(scheme, port)] = struct{}{}
+	}
+	return origins
+}
+
+// applyHostScopeFilter restricts q to the given in-scope origins when the list is
+// non-empty; an empty list is a no-op. Each HostTarget is a flexible predicate: an empty
+// Scheme or zero Port is left unconstrained, so {Hostname} matches any origin on that host
+// while {Scheme,Hostname,Port} matches the exact origin. Origins are OR-ed together.
+func applyHostScopeFilter(q *bun.SelectQuery, hosts []HostTarget) *bun.SelectQuery {
+	if len(hosts) == 0 {
+		return q
+	}
+	var conds []string
+	var args []interface{}
+	for _, h := range hosts {
+		parts := []string{"hostname = ?"}
+		args = append(args, h.Hostname)
+		if h.Scheme != "" {
+			parts = append(parts, "scheme = ?")
+			args = append(args, h.Scheme)
+		}
+		if h.Port != 0 {
+			parts = append(parts, "port = ?")
+			args = append(args, h.Port)
+		}
+		conds = append(conds, "("+strings.Join(parts, " AND ")+")")
+	}
+	return q.Where("("+strings.Join(conds, " OR ")+")", args...)
 }
 
 // PathTarget represents a distinct scheme+hostname+port+path combination from HTTP records.
@@ -553,8 +720,10 @@ type PathTarget struct {
 	Path     string `bun:"path"`
 }
 
-// GetDistinctPaths returns distinct scheme+hostname+port+path combinations from HTTP records, filtered by project.
-func (r *Repository) GetDistinctPaths(ctx context.Context, projectUUID string) ([]PathTarget, error) {
+// GetDistinctPaths returns distinct scheme+hostname+port+path combinations from HTTP records,
+// filtered by project and, when hosts is non-empty, restricted to those in-scope origins
+// (matching the executor's WithHostScopes convention). Empty hosts means no origin filter.
+func (r *Repository) GetDistinctPaths(ctx context.Context, projectUUID string, hosts ...HostTarget) ([]PathTarget, error) {
 	var paths []PathTarget
 	q := r.db.NewSelect().
 		TableExpr("http_records").
@@ -562,6 +731,7 @@ func (r *Repository) GetDistinctPaths(ctx context.Context, projectUUID string) (
 	if projectUUID != "" {
 		q = q.Where("project_uuid = ?", projectUUID)
 	}
+	q = applyHostScopeFilter(q, hosts)
 	err := q.Scan(ctx, &paths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get distinct paths: %w", err)

@@ -799,14 +799,22 @@ type SeverityCount struct {
 	Count    int64  `bun:"count" json:"count"`
 }
 
-// CountFindingsBySeverity returns finding counts grouped by severity.
-func CountFindingsBySeverity(ctx context.Context, db *DB, projectUUID string) (map[string]int64, error) {
+// CountFindingsBySeverity returns finding counts grouped by severity, filtered by
+// project and, when hostnames is non-empty, restricted to findings on those in-scope
+// hosts. Empty hostnames means no host filter. Findings are scoped by hostname only
+// (the findings table carries no scheme/port column), unlike the origin-precise record
+// scoping; this lets the scan-completion summary count only findings on the hosts
+// actually scanned, not leftovers from prior scans in the same project.
+func CountFindingsBySeverity(ctx context.Context, db *DB, projectUUID string, hostnames ...string) (map[string]int64, error) {
 	var rows []SeverityCount
 	q := db.NewSelect().
 		Model((*Finding)(nil)).
 		ColumnExpr("severity, COUNT(*) AS count")
 	if projectUUID != "" {
 		q = q.Where("project_uuid = ?", projectUUID)
+	}
+	if len(hostnames) > 0 {
+		q = q.Where("hostname IN (?)", bun.List(hostnames))
 	}
 	err := q.GroupExpr("severity").
 		Scan(ctx, &rows)

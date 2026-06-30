@@ -246,6 +246,10 @@ func TestResolveFindingHostname(t *testing.T) {
 		want    string
 	}{
 		{"explicit host wins", "api.example.com", "https://other.com/x", "", "api.example.com"},
+		{"explicit host port stripped", "localhost:3000", "https://other.com/x", "", "localhost"},
+		{"explicit host port stripped non-default", "api.example.com:8443", "", "", "api.example.com"},
+		{"explicit ipv6 host port stripped", "[::1]:3000", "", "", "::1"},
+		{"explicit host no port unchanged", "localhost", "", "", "localhost"},
 		{"parse from url", "", "https://example.com/path?q=1", "", "example.com"},
 		{"parse from matched when no url", "", "", "https://matched.example.org/p", "matched.example.org"},
 		{"url preferred over matched", "", "https://from-url.com/a", "https://from-matched.com/b", "from-url.com"},

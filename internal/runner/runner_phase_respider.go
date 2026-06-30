@@ -31,12 +31,16 @@ const respiderPageSize = 500
 func (r *Runner) collectReSpiderEvaluated(ctx context.Context) ([]respiderEvaluated, error) {
 	var evals []respiderEvaluated
 	afterUUID := ""
+	// Restrict re-spider candidates to this scan's in-scope origins (scheme/host/port),
+	// so SPA routes left in the project by a prior scan of a different origin (e.g. a
+	// different port on the host) are not re-crawled.
+	inScopeHosts := r.getInScopeDBHosts(ctx)
 	for len(evals) < candidateScanLimit {
 		page := respiderPageSize
 		if remaining := candidateScanLimit - len(evals); remaining < page {
 			page = remaining
 		}
-		rows, err := r.repository.GetReSpiderCandidates(ctx, r.options.ProjectUUID, afterUUID, page)
+		rows, err := r.repository.GetReSpiderCandidates(ctx, r.options.ProjectUUID, afterUUID, page, inScopeHosts...)
 		if err != nil {
 			return nil, err
 		}

@@ -58,7 +58,7 @@ func TestOneShotDBInputSource_ReturnsAllRecords(t *testing.T) {
 	n := 10
 	inserted := insertTestRecordsWithHost(t, repo, host, n)
 
-	source := NewOneShotDBInputSource(db, repo, scanUUID).WithHostnames([]string{host})
+	source := NewOneShotDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
 	var got []string
 	for {
 		item, err := source.Next(ctx)
@@ -103,7 +103,7 @@ func TestOneShotDBInputSource_TimestampCollision(t *testing.T) {
 	_ = db.NewSelect().TableExpr("http_records").ColumnExpr("COUNT(DISTINCT created_at)").Scan(ctx, &distinct)
 	t.Logf("%d records, %d distinct timestamps", n, distinct)
 
-	source := NewOneShotDBInputSource(db, repo, scanUUID).WithHostnames([]string{host})
+	source := NewOneShotDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
 	count := 0
 	for {
 		item, err := source.Next(ctx)
@@ -136,7 +136,7 @@ func TestAuditPhasePattern_SeedThenAudit(t *testing.T) {
 	inserted := insertTestRecordsWithHost(t, repo, host, n)
 
 	// Simulate seed phase: read all records (advances cursor to end)
-	seed := NewOneShotDBInputSource(db, repo, scanUUID).WithHostnames([]string{host})
+	seed := NewOneShotDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
 	for {
 		item, err := seed.Next(ctx)
 		if errors.Is(err, io.EOF) {
@@ -161,7 +161,7 @@ func TestAuditPhasePattern_SeedThenAudit(t *testing.T) {
 	}
 
 	// Audit phase should get all records
-	audit := NewOneShotDBInputSource(db, repo, scanUUID).WithHostnames([]string{host})
+	audit := NewOneShotDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
 	var auditUUIDs []string
 	for {
 		item, err := audit.Next(ctx)
@@ -235,7 +235,7 @@ func TestConcurrentWritesDuringCursorRead(t *testing.T) {
 		}
 	}()
 
-	source := NewOneShotDBInputSource(db, repo, scanUUID).WithHostnames([]string{host})
+	source := NewOneShotDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
 	count := 0
 	for {
 		item, err := source.Next(ctx)
@@ -265,7 +265,7 @@ func TestOneShotDBInputSource_CursorAdvancesOnlyOnComplete(t *testing.T) {
 	host := "ack.example.com"
 	insertTestRecordsWithHost(t, repo, host, 2)
 
-	source := NewOneShotDBInputSource(db, repo, scanUUID).WithHostnames([]string{host})
+	source := NewOneShotDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
 	item, err := source.Next(ctx)
 	if err != nil {
 		t.Fatalf("Next(): %v", err)
@@ -298,7 +298,7 @@ func TestRiskPrioritizedDBInputSource_DoesNotSkipNonRiskRecords(t *testing.T) {
 		t.Fatalf("UpdateRiskScores: %v", err)
 	}
 
-	source := NewRiskPrioritizedDBInputSource(db, repo, scanUUID).WithHostnames([]string{host})
+	source := NewRiskPrioritizedDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
 	var got []string
 	for {
 		item, err := source.Next(ctx)
@@ -330,7 +330,7 @@ func TestRiskPrioritizedDBInputSource_DoesNotSkipNonRiskRecords(t *testing.T) {
 	if scan.ProcessedCount != int64(len(inserted)) {
 		t.Fatalf("processed_count=%d, want %d", scan.ProcessedCount, len(inserted))
 	}
-	remaining, err := repo.CountRecordsAfterCursor(ctx, scan.CursorAt, scan.CursorUUID, host)
+	remaining, err := repo.CountRecordsAfterCursor(ctx, scan.CursorAt, scan.CursorUUID, HostTarget{Hostname: host})
 	if err != nil {
 		t.Fatalf("CountRecordsAfterCursor: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestRiskPrioritizedDBInputSource_BatchedFetchAcrossChunks(t *testing.T) {
 		t.Fatalf("UpdateRiskScores: %v", err)
 	}
 
-	source := NewRiskPrioritizedDBInputSource(db, repo, scanUUID).WithHostnames([]string{host})
+	source := NewRiskPrioritizedDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
 	var got []string
 	for {
 		item, err := source.Next(ctx)
@@ -400,7 +400,7 @@ func TestRiskPrioritizedDBInputSource_BatchedFetchAcrossChunks(t *testing.T) {
 	if scan.ProcessedCount != int64(n) {
 		t.Fatalf("processed_count=%d, want %d", scan.ProcessedCount, n)
 	}
-	remaining, err := repo.CountRecordsAfterCursor(ctx, scan.CursorAt, scan.CursorUUID, host)
+	remaining, err := repo.CountRecordsAfterCursor(ctx, scan.CursorAt, scan.CursorUUID, HostTarget{Hostname: host})
 	if err != nil {
 		t.Fatalf("CountRecordsAfterCursor: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestRiskPrioritizedDBInputSource_ParamShapeCoalescing(t *testing.T) {
 
 	const maxSamples = 2
 	source := NewRiskPrioritizedDBInputSource(db, repo, scanUUID).
-		WithHostnames([]string{host}).
+		WithHostScopes([]HostTarget{{Hostname: host}}).
 		WithParamShapeCoalescing(maxSamples)
 
 	var got int
@@ -478,7 +478,7 @@ func TestRiskPrioritizedDBInputSource_ParamShapeCoalescing(t *testing.T) {
 
 	// The cursor must advance past ALL 7 inserted records, not just the 4 scanned.
 	scan, _ := repo.GetScanByUUID(ctx, scanUUID)
-	remaining, err := repo.CountRecordsAfterCursor(ctx, scan.CursorAt, scan.CursorUUID, host)
+	remaining, err := repo.CountRecordsAfterCursor(ctx, scan.CursorAt, scan.CursorUUID, HostTarget{Hostname: host})
 	if err != nil {
 		t.Fatalf("CountRecordsAfterCursor: %v", err)
 	}

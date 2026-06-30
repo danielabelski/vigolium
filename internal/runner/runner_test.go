@@ -175,3 +175,37 @@ func TestBuildKnownIssueScanHostTargets(t *testing.T) {
 		})
 	}
 }
+
+func TestHostURLsFromHostTargets(t *testing.T) {
+	tests := []struct {
+		name  string
+		hosts []database.HostTarget
+		want  []string
+	}{
+		{name: "empty input", hosts: nil, want: nil},
+		{
+			name: "standard ports omitted, non-standard kept",
+			hosts: []database.HostTarget{
+				{Scheme: "http", Hostname: "localhost", Port: 3000},
+				{Scheme: "http", Hostname: "example.com", Port: 80},
+				{Scheme: "https", Hostname: "example.com", Port: 443},
+				{Scheme: "https", Hostname: "example.com", Port: 8443},
+			},
+			want: []string{"http://localhost:3000", "http://example.com", "https://example.com", "https://example.com:8443"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hostURLsFromHostTargets(tt.hosts)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d urls, want %d\ngot:  %v\nwant: %v", len(got), len(tt.want), got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("url[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

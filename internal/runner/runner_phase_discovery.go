@@ -44,10 +44,11 @@ func (r *Runner) runDiscoveryPhase(ctx context.Context, infra *phaseInfra) error
 
 	var discoverSrc *source.DeparosDiscoverySource
 	if r.options.DiscoverEnabled && len(r.options.Targets) > 0 {
-		additionalTargets, err := r.getInScopeHostURLs(ctx, infra.scopeMatcher)
-		if err != nil {
-			zap.L().Warn("Discovery: failed to get DB hosts for deparos expansion", zap.Error(err))
-		}
+		// In-scope origins (scheme/host/port) for this scan's CLI targets, shared by the
+		// host-URL expansion and the path enrichment below so neither pulls in records
+		// left by prior scans of a different origin (e.g. a different port on the host).
+		inScopeHosts := r.getInScopeDBHosts(ctx)
+		additionalTargets := hostURLsFromHostTargets(inScopeHosts)
 
 		// When auto-fuzzing, keep the off-host SSO/login domain(s) the target
 		// redirected to out of scope — fuzz the original target host for hidden
@@ -76,7 +77,7 @@ func (r *Runner) runDiscoveryPhase(ctx context.Context, infra *phaseInfra) error
 			enrichTargets = r.settings.Discovery.EnrichTargets
 		}
 		if enrichTargets && r.repository != nil {
-			pathTargets, pathErr := r.repository.GetDistinctPaths(ctx, r.options.ProjectUUID)
+			pathTargets, pathErr := r.repository.GetDistinctPaths(ctx, r.options.ProjectUUID, inScopeHosts...)
 			if pathErr != nil {
 				zap.L().Warn("Discovery: failed to get DB paths for enrichment", zap.Error(pathErr))
 			} else if len(pathTargets) > 0 {
@@ -89,10 +90,11 @@ func (r *Runner) runDiscoveryPhase(ctx context.Context, infra *phaseInfra) error
 
 		discoveryTargets = dedupTargets(r.options.Targets, additionalTargets)
 		deparosCfg := r.buildDeparosConfig(additionalTargets)
-		discoverSrc, err = source.NewDeparosDiscoverySource(deparosCfg)
-		if err != nil {
-			zap.L().Warn("Failed to initialize deparos discovery", zap.Error(err))
+		src, srcErr := source.NewDeparosDiscoverySource(deparosCfg)
+		if srcErr != nil {
+			zap.L().Warn("Failed to initialize deparos discovery", zap.Error(srcErr))
 		} else {
+			discoverSrc = src
 			sources = append(sources, discoverSrc)
 		}
 	} else {
@@ -558,10 +560,7 @@ func (r *Runner) runSpideringPhase(ctx context.Context, infra *phaseInfra) error
 	}
 
 	targets := r.options.Targets
-	dbHosts, err := r.getInScopeHostURLs(ctx, infra.scopeMatcher)
-	if err != nil {
-		zap.L().Warn("Spidering: failed to get DB hosts", zap.Error(err))
-	}
+	dbHosts := r.getInScopeHostURLs(ctx)
 	targets = dedupTargets(targets, dbHosts)
 
 	expandSeedParents := false

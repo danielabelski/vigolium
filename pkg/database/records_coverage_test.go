@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 )
 
@@ -304,6 +307,32 @@ func TestGetRecordsWithResponseBody(t *testing.T) {
 	if len(page) != 2 {
 		t.Errorf("cursor page = %d, want 2", len(page))
 	}
+
+	// Origin filter: only records on the in-scope host are returned, so bodies left in
+	// the project by prior scans of other hosts don't leak into a scoped scan.
+	insertRecordP(t, repo, DefaultProjectUUID, "GET", "other.example.com", "/x", 200)
+	scoped, err := repo.GetRecordsWithResponseBody(ctx, DefaultProjectUUID, "", 10, HostTarget{Hostname: "body.example.com"})
+	if err != nil {
+		t.Fatalf("GetRecordsWithResponseBody (hosts): %v", err)
+	}
+	if len(scoped) != 3 {
+		t.Errorf("GetRecordsWithResponseBody(hosts) = %d, want 3", len(scoped))
+	}
+	for _, rec := range scoped {
+		if rec.Hostname != "body.example.com" {
+			t.Errorf("scoped record host = %q, want body.example.com", rec.Hostname)
+		}
+	}
+
+	// Full-origin filter: same hostname, different port is excluded.
+	insertRecordP(t, repo, DefaultProjectUUID, "GET", "body.example.com:8080", "/y", 200)
+	byOrigin, err := repo.GetRecordsWithResponseBody(ctx, DefaultProjectUUID, "", 10, HostTarget{Scheme: "https", Hostname: "body.example.com", Port: 443})
+	if err != nil {
+		t.Fatalf("GetRecordsWithResponseBody (origin): %v", err)
+	}
+	if len(byOrigin) != 3 {
+		t.Errorf("GetRecordsWithResponseBody(origin :443) = %d, want 3 (port 8080 excluded)", len(byOrigin))
+	}
 }
 
 func TestDeleteRecord(t *testing.T) {
@@ -343,6 +372,110 @@ func TestGetDistinctHostsAndPaths(t *testing.T) {
 	}
 	if len(paths) != 3 {
 		t.Errorf("GetDistinctPaths = %d, want 3", len(paths))
+	}
+
+	// Origin filter restricts paths to the given in-scope hosts, so KnownIssueScan
+	// won't build targets for hosts left in the project by prior scans.
+	scopedPaths, err := repo.GetDistinctPaths(ctx, DefaultProjectUUID, HostTarget{Hostname: "h1.example.com"})
+	if err != nil {
+		t.Fatalf("GetDistinctPaths(hosts): %v", err)
+	}
+	if len(scopedPaths) != 2 {
+		t.Errorf("GetDistinctPaths(hosts) = %d, want 2", len(scopedPaths))
+	}
+	for _, p := range scopedPaths {
+		if p.Hostname != "h1.example.com" {
+			t.Errorf("scoped path host = %q, want h1.example.com", p.Hostname)
+		}
+	}
+}
+
+func TestInScopeHosts(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	insertRecordP(t, repo, DefaultProjectUUID, "GET", "app.uniquekw.com", "/a", 200)
+	insertRecordP(t, repo, DefaultProjectUUID, "GET", "other.example.org", "/b", 200)
+
+	// Default (relaxed) scope keeps only hosts matching the target's keyword, and the
+	// origin must match the target's scheme+port (https:443 here).
+	got := repo.InScopeHosts(ctx, config.ScopeConfig{}, []string{"https://uniquekw.com/"}, DefaultProjectUUID, "")
+	if len(got) != 1 || got[0].Hostname != "app.uniquekw.com" {
+		t.Errorf("InScopeHosts = %v, want one origin on app.uniquekw.com", got)
+	}
+
+	// No targets → nil (no filter, project-wide pass).
+	if got := repo.InScopeHosts(ctx, config.ScopeConfig{}, nil, DefaultProjectUUID, ""); got != nil {
+		t.Errorf("InScopeHosts(no targets) = %v, want nil", got)
+	}
+}
+
+// TestInScopeHostsPortDiscrimination is the core localhost case: same hostname on a
+// different port (left by a prior scan, no scan provenance) must NOT be in scope.
+func TestInScopeHostsPortDiscrimination(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	insertRecordP(t, repo, DefaultProjectUUID, "GET", "localhost:3000", "/a", 200)
+	insertRecordP(t, repo, DefaultProjectUUID, "GET", "localhost:8080", "/b", 200)
+
+	got := repo.InScopeHosts(ctx, config.ScopeConfig{}, []string{"https://localhost:3000/"}, DefaultProjectUUID, "")
+	if len(got) != 1 {
+		t.Fatalf("InScopeHosts = %v, want exactly one origin (localhost:3000)", got)
+	}
+	if got[0].Hostname != "localhost" || got[0].Port != 3000 {
+		t.Errorf("InScopeHosts = %+v, want localhost:3000 (8080 excluded)", got[0])
+	}
+}
+
+// TestInScopeHostsCurrentScanProvenance verifies the provenance carve-out: a different
+// port discovered DURING this scan (records created at/after the scan start) is in scope,
+// while a different-port host left by a PRIOR scan (created before this scan) stays out.
+func TestInScopeHostsCurrentScanProvenance(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	scanUUID := uuid.New().String()
+	if err := repo.CreateScan(ctx, &Scan{UUID: scanUUID, ProjectUUID: DefaultProjectUUID, Status: "running"}); err != nil {
+		t.Fatalf("CreateScan: %v", err)
+	}
+	scan, err := repo.GetScanByUUID(ctx, scanUUID)
+	if err != nil {
+		t.Fatalf("GetScanByUUID: %v", err)
+	}
+
+	// Prior-scan leftover on a different port: backdate it to before this scan started.
+	insertRecordP(t, repo, DefaultProjectUUID, "GET", "localhost:9999", "/old", 200)
+	if _, err := repo.DB().NewUpdate().Model((*HTTPRecord)(nil)).
+		Set("created_at = ?", scan.StartedAt.Add(-time.Hour)).
+		Where("hostname = ? AND port = ?", "localhost", 9999).
+		Exec(ctx); err != nil {
+		t.Fatalf("backdate leftover: %v", err)
+	}
+
+	// This scan's own discovery on a different port than the target (e.g. port sweep):
+	// created now, i.e. at/after the scan start.
+	insertRecordP(t, repo, DefaultProjectUUID, "GET", "localhost:8080", "/new", 200)
+
+	got := repo.InScopeHosts(ctx, config.ScopeConfig{}, []string{"https://localhost:3000/"}, DefaultProjectUUID, scanUUID)
+
+	var has8080, has9999 bool
+	for _, h := range got {
+		switch h.Port {
+		case 8080:
+			has8080 = true
+		case 9999:
+			has9999 = true
+		}
+	}
+	if !has8080 {
+		t.Errorf("InScopeHosts should include localhost:8080 discovered during this scan, got %v", got)
+	}
+	if has9999 {
+		t.Errorf("InScopeHosts should exclude prior-scan leftover localhost:9999, got %v", got)
 	}
 }
 

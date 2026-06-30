@@ -728,9 +728,15 @@ func (r *Runner) runKnownIssueScanPhase(ctx context.Context, infra *phaseInfra) 
 				terminal.HiCyan(`vigolium config set known_issue_scan.severities "critical,high,medium,low,info"`))
 		}
 	}
+	// Restrict KnownIssueScan to the same in-scope origins DynamicAssessment uses, so
+	// targets/bodies from prior scans of other origins in this project (e.g. localhost
+	// records on a different port left in the default project) don't leak into this scan.
+	// Empty means no CLI targets/scope — fall back to a project-wide pass (mirrors DA).
+	inScopeHosts := r.getInScopeDBHosts(ctx)
+
 	r.printTargetDetail(r.formatTargetCounts(ctx, len(r.options.Targets)))
 	if r.repository != nil && r.options.Verbose {
-		paths, _ := r.repository.GetDistinctPaths(ctx, r.options.ProjectUUID)
+		paths, _ := r.repository.GetDistinctPaths(ctx, r.options.ProjectUUID, inScopeHosts...)
 		if len(paths) > 0 {
 			var knownIssueScanTargets []string
 			if enrichTargets {
@@ -770,7 +776,7 @@ func (r *Runner) runKnownIssueScanPhase(ctx context.Context, infra *phaseInfra) 
 	// curtailment, not a failure.
 	nucleiCtx, nucleiCancel := phaseDeadline(ctx, kisMaxDuration)
 	defer nucleiCancel()
-	if err := r.runKnownIssueScan(nucleiCtx, onResult); err != nil {
+	if err := r.runKnownIssueScan(nucleiCtx, onResult, inScopeHosts); err != nil {
 		if nucleiCtx.Err() != nil {
 			zap.L().Warn("KnownIssueScan: Nuclei scan stopped at phase max_duration", zap.Error(nucleiCtx.Err()))
 		} else {
@@ -787,7 +793,7 @@ func (r *Runner) runKnownIssueScanPhase(ctx context.Context, infra *phaseInfra) 
 	// is a curtailment, distinct from a genuine scanner failure.
 	kingfisherCtx, kingfisherCancel := phaseDeadline(ctx, kisMaxDuration)
 	defer kingfisherCancel()
-	if err := r.runKingfisherBatch(kingfisherCtx, infra, onResult); err != nil {
+	if err := r.runKingfisherBatch(kingfisherCtx, infra, onResult, inScopeHosts); err != nil {
 		if kingfisherCtx.Err() != nil {
 			zap.L().Warn("KnownIssueScan: Kingfisher secret scan curtailed before all response bodies were scanned — phase max_duration reached", zap.Error(kingfisherCtx.Err()))
 		} else {
@@ -837,7 +843,7 @@ type kfRecordMeta struct {
 }
 
 // runKingfisherBatch scans all response bodies in the database for secrets using Kingfisher.
-func (r *Runner) runKingfisherBatch(ctx context.Context, infra *phaseInfra, onResult func(*output.ResultEvent)) error {
+func (r *Runner) runKingfisherBatch(ctx context.Context, infra *phaseInfra, onResult func(*output.ResultEvent), inScopeHosts []database.HostTarget) error {
 	if r.repository == nil {
 		return fmt.Errorf("kingfisher batch: database repository required")
 	}
@@ -870,7 +876,7 @@ func (r *Runner) runKingfisherBatch(ctx context.Context, infra *phaseInfra, onRe
 			return err
 		}
 
-		records, err := r.repository.GetRecordsWithResponseBody(ctx, r.options.ProjectUUID, cursor, kingfisherBatchSize)
+		records, err := r.repository.GetRecordsWithResponseBody(ctx, r.options.ProjectUUID, cursor, kingfisherBatchSize, inScopeHosts...)
 		if err != nil {
 			return fmt.Errorf("kingfisher batch: failed to fetch records: %w", err)
 		}
@@ -1162,8 +1168,11 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 		}
 	}
 
-	// Compute in-scope hostnames to filter DB records by CLI target hostnames
-	inScopeHostnames := r.getInScopeDBHostnamesList(ctx)
+	// Compute in-scope origins (scheme/host/port) to filter DB records by CLI targets.
+	// inScopeHostnames is derived for the hostname-only paths (finding dedup), which
+	// carry no port column.
+	inScopeHosts := r.getInScopeDBHosts(ctx)
+	inScopeHostnames := database.HostnamesOf(inScopeHosts)
 
 	// Shared insertion point cache across feedback rounds to avoid cold-start overhead
 	ipCache, _ := lru.New[string, []httpmsg.InsertionPoint](4096)
@@ -1364,7 +1373,7 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 		sorSourceFilter := database.IngestRecordSources
 
 		continuousSource := database.NewDBInputSource(r.repository.DB(), r.repository, infra.scanUUID, 2*time.Second).
-			WithHostnames(inScopeHostnames).
+			WithHostScopes(inScopeHosts).
 			WithIncludeSources(sorSourceFilter).
 			WithIdleTimeout(r.options.ScanOnReceiveIdleTimeout).
 			WithOnActivity(func(records int, idleFor time.Duration, firstBatch bool) {
@@ -1430,7 +1439,7 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 					// Count only user-ingested records so the "new ingested
 					// records" counter matches what the DB poller will
 					// actually scan (see sorSourceFilter above).
-					if cnt, cErr := r.repository.CountRecordsAfterCursorBySource(ctx, s.StartedAt, "", sorSourceFilter, inScopeHostnames); cErr == nil {
+					if cnt, cErr := r.repository.CountRecordsAfterCursorBySource(ctx, s.StartedAt, "", sorSourceFilter, inScopeHosts); cErr == nil {
 						ingestedCount = cnt
 					}
 				}
@@ -1536,7 +1545,7 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 
 	// Feedback loop: re-scan newly discovered URLs
 	for round := 0; round < feedbackRounds; round++ {
-		processed, err := r.runDynamicAssessmentRound(ctx, infra, round, inScopeHostnames, activeModules, passiveModules, baseExecutorCfg, oastService)
+		processed, err := r.runDynamicAssessmentRound(ctx, infra, round, inScopeHosts, activeModules, passiveModules, baseExecutorCfg, oastService)
 		if err != nil {
 			zap.L().Error("DynamicAssessment: executor error", zap.Error(err), zap.Int("round", round))
 			break
@@ -1557,7 +1566,7 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 		}
 
 		if round < feedbackRounds-1 {
-			newCount, countErr := r.countRemainingDynamicAssessmentRecords(ctx, infra.scanUUID, inScopeHostnames)
+			newCount, countErr := r.countRemainingDynamicAssessmentRecords(ctx, infra.scanUUID, inScopeHosts)
 			if countErr != nil || newCount == 0 {
 				if countErr != nil {
 					zap.L().Debug("DynamicAssessment: failed to count remaining records", zap.Error(countErr))
@@ -1575,7 +1584,7 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 		}
 
 		if round == feedbackRounds-1 {
-			newCount, countErr := r.countRemainingDynamicAssessmentRecords(ctx, infra.scanUUID, inScopeHostnames)
+			newCount, countErr := r.countRemainingDynamicAssessmentRecords(ctx, infra.scanUUID, inScopeHosts)
 			if countErr == nil && newCount > 0 {
 				fmt.Fprintf(os.Stderr, "  %s %s %s\n",
 					terminal.TipPrefix(), terminal.Orange(fmt.Sprintf("%d", newCount)), terminal.Gray(fmt.Sprintf("new records discovered but skipped (max_feedback_rounds=%d)", feedbackRounds)))
@@ -1595,7 +1604,7 @@ func (r *Runner) runDynamicAssessmentRound(
 	ctx context.Context,
 	infra *phaseInfra,
 	round int,
-	inScopeHostnames []string,
+	inScopeHosts []database.HostTarget,
 	activeModules []modules.ActiveModule,
 	passiveModules []modules.PassiveModule,
 	baseCfg core.ExecutorConfig,
@@ -1603,7 +1612,7 @@ func (r *Runner) runDynamicAssessmentRound(
 ) (int64, error) {
 	roundStart := time.Now()
 	dbSource := database.NewRiskPrioritizedDBInputSource(r.repository.DB(), r.repository, infra.scanUUID).
-		WithHostnames(inScopeHostnames).
+		WithHostScopes(inScopeHosts).
 		WithParamShapeCoalescing(r.resolveMaxParamShapeSamples())
 
 	executor := core.NewExecutor(baseCfg, dbSource, activeModules, passiveModules)
@@ -1648,12 +1657,12 @@ func (r *Runner) runDynamicAssessmentRound(
 	return processed, nil
 }
 
-func (r *Runner) countRemainingDynamicAssessmentRecords(ctx context.Context, scanUUID string, hostnames []string) (int64, error) {
+func (r *Runner) countRemainingDynamicAssessmentRecords(ctx context.Context, scanUUID string, hosts []database.HostTarget) (int64, error) {
 	currentScan, err := r.repository.GetScanByUUID(ctx, scanUUID)
 	if err != nil {
 		return 0, err
 	}
-	return r.repository.CountRecordsAfterCursor(ctx, currentScan.CursorAt, currentScan.CursorUUID, hostnames...)
+	return r.repository.CountRecordsAfterCursor(ctx, currentScan.CursorAt, currentScan.CursorUUID, hosts...)
 }
 
 // waitForNewRecords polls until at least one record exists after the scan cursor,
@@ -1683,13 +1692,16 @@ func (r *Runner) waitForNewRecords(ctx context.Context, scanUUID string, pollInt
 }
 
 // runKnownIssueScan executes known issue scanning using the nuclei Go library.
-func (r *Runner) runKnownIssueScan(ctx context.Context, onResult func(*output.ResultEvent)) error {
+// inScopeHosts restricts targets to the current scan's in-scope origins (scheme/host/port;
+// empty = project-wide pass, mirroring DynamicAssessment), so records left in the project
+// by prior scans of other origins don't leak into this scan's targets.
+func (r *Runner) runKnownIssueScan(ctx context.Context, onResult func(*output.ResultEvent), inScopeHosts []database.HostTarget) error {
 	if r.repository == nil {
 		return fmt.Errorf("known-issue-scan: database repository required")
 	}
 
-	// Query distinct paths from DB and build targets
-	paths, err := r.repository.GetDistinctPaths(ctx, r.options.ProjectUUID)
+	// Query distinct paths from DB (scoped to in-scope origins) and build targets
+	paths, err := r.repository.GetDistinctPaths(ctx, r.options.ProjectUUID, inScopeHosts...)
 	if err != nil {
 		return fmt.Errorf("known-issue-scan: failed to query paths: %w", err)
 	}
@@ -1710,7 +1722,9 @@ func (r *Runner) runKnownIssueScan(ctx context.Context, onResult func(*output.Re
 		targets = buildKnownIssueScanHostTargets(paths)
 	}
 
-	zap.L().Info("KnownIssueScan: targets from database", zap.Int("count", len(targets)))
+	zap.L().Info("KnownIssueScan: targets from database",
+		zap.Int("count", len(targets)),
+		zap.Int("in_scope_origins", len(inScopeHosts)))
 
 	// Build KnownIssueScan config from settings
 	cfg := knownissuescan.Config{

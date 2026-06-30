@@ -20,40 +20,14 @@ import (
 	"go.uber.org/zap"
 )
 
-// getInScopeDBHostnamesList returns the list of hostnames from the database that are
-// in scope according to the CLI targets and origin mode. When no targets are configured,
-// returns nil (meaning no hostname filter — all records are included).
-func (r *Runner) getInScopeDBHostnamesList(ctx context.Context) []string {
-	if len(r.options.Targets) == 0 || r.repository == nil {
+// getInScopeDBHosts returns the in-scope (scheme, hostname, port) origins from the
+// database according to the CLI targets and origin mode. When no targets are configured,
+// returns nil (meaning no origin filter — all records are included).
+func (r *Runner) getInScopeDBHosts(ctx context.Context) []database.HostTarget {
+	if r.repository == nil || r.settings == nil {
 		return nil
 	}
-
-	// Build a scope matcher from current settings and CLI targets
-	var scopeMatcher *config.ScopeMatcher
-	if r.settings != nil {
-		scopeMatcher = config.NewScopeMatcher(r.settings.Scope, r.options.Targets...)
-	}
-
-	hosts, err := r.repository.GetDistinctHosts(ctx, r.options.ProjectUUID)
-	if err != nil {
-		return nil
-	}
-
-	var hostnames []string
-	seen := make(map[string]struct{})
-	for _, h := range hosts {
-		if _, exists := seen[h.Hostname]; exists {
-			continue
-		}
-		seen[h.Hostname] = struct{}{}
-
-		if scopeMatcher != nil && !scopeMatcher.InScopeRequest(h.Hostname, "/", "", "") {
-			continue
-		}
-		hostnames = append(hostnames, h.Hostname)
-	}
-
-	return hostnames
+	return r.repository.InScopeHosts(ctx, r.settings.Scope, r.options.Targets, r.options.ProjectUUID, r.options.ScanUUID)
 }
 
 // targetHostnames extracts unique host:port values from CLI targets.
@@ -93,6 +67,15 @@ func formatKnownIssueScanSummary(counts map[severity.Severity]int, total int) st
 	return fmt.Sprintf("found %s findings — %s", terminal.Orange(fmt.Sprintf("%d", total)), strings.Join(parts, ", "))
 }
 
+// buildOriginURL renders an origin as scheme://host[:port], omitting the port when it is
+// the scheme default (https→443, http→80).
+func buildOriginURL(scheme, host string, port int) string {
+	if (scheme == "https" && port != 443) || (scheme == "http" && port != 80) {
+		return fmt.Sprintf("%s://%s:%d", scheme, host, port)
+	}
+	return fmt.Sprintf("%s://%s", scheme, host)
+}
+
 // buildKnownIssueScanTargetsFromPaths takes distinct path records from the DB and returns
 // deduplicated target URLs with path prefixes (last segment stripped).
 func buildKnownIssueScanTargetsFromPaths(paths []database.PathTarget) []string {
@@ -101,10 +84,7 @@ func buildKnownIssueScanTargetsFromPaths(paths []database.PathTarget) []string {
 
 	for _, p := range paths {
 		// Build host base URL
-		base := fmt.Sprintf("%s://%s", p.Scheme, p.Hostname)
-		if (p.Scheme == "https" && p.Port != 443) || (p.Scheme == "http" && p.Port != 80) {
-			base = fmt.Sprintf("%s://%s:%d", p.Scheme, p.Hostname, p.Port)
-		}
+		base := buildOriginURL(p.Scheme, p.Hostname, p.Port)
 
 		// Strip query string and fragment
 		path := p.Path
@@ -142,11 +122,7 @@ func buildKnownIssueScanHostTargets(paths []database.PathTarget) []string {
 	var targets []string
 
 	for _, p := range paths {
-		base := fmt.Sprintf("%s://%s", p.Scheme, p.Hostname)
-		if (p.Scheme == "https" && p.Port != 443) || (p.Scheme == "http" && p.Port != 80) {
-			base = fmt.Sprintf("%s://%s:%d", p.Scheme, p.Hostname, p.Port)
-		}
-		target := base
+		target := buildOriginURL(p.Scheme, p.Hostname, p.Port)
 		if _, ok := seen[target]; !ok {
 			seen[target] = struct{}{}
 			targets = append(targets, target)
@@ -163,10 +139,7 @@ func buildDiscoveryTargetsFromPaths(paths []database.PathTarget) []string {
 	var targets []string
 
 	for _, p := range paths {
-		base := fmt.Sprintf("%s://%s", p.Scheme, p.Hostname)
-		if (p.Scheme == "https" && p.Port != 443) || (p.Scheme == "http" && p.Port != 80) {
-			base = fmt.Sprintf("%s://%s:%d", p.Scheme, p.Hostname, p.Port)
-		}
+		base := buildOriginURL(p.Scheme, p.Hostname, p.Port)
 
 		path := p.Path
 		if idx := strings.IndexAny(path, "?#"); idx != -1 {
@@ -574,35 +547,26 @@ func (r *Runner) buildExternalHarvesterSource() *source.ExternalHarvesterInputSo
 	return source.NewExternalHarvesterInputSource(h, domains, r.options.Modules)
 }
 
-// getInScopeHostURLs queries distinct hosts from the DB and filters them by scope.
-// Returns a deduplicated list of host URLs (e.g. "https://example.com").
-func (r *Runner) getInScopeHostURLs(ctx context.Context, scopeMatcher *config.ScopeMatcher) ([]string, error) {
-	if r.repository == nil {
-		return nil, nil
-	}
+// getInScopeHostURLs returns deduplicated host URLs (e.g. "https://example.com") for the
+// in-scope origins (scheme/host/port) of the CLI targets — the same scoping
+// dynamic-assessment and known-issue-scan use — so DB hosts on a different port left in
+// the project by a prior scan (e.g. localhost:3000 while targeting localhost:3005) are not
+// re-crawled or re-discovered.
+func (r *Runner) getInScopeHostURLs(ctx context.Context) []string {
+	return hostURLsFromHostTargets(r.getInScopeDBHosts(ctx))
+}
 
-	hosts, err := r.repository.GetDistinctHosts(ctx, r.options.ProjectUUID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query distinct hosts: %w", err)
+// hostURLsFromHostTargets renders origin tuples as host URLs, omitting the port when it is
+// the scheme default (https→443, http→80).
+func hostURLsFromHostTargets(hosts []database.HostTarget) []string {
+	if len(hosts) == 0 {
+		return nil
 	}
-
-	var urls []string
+	urls := make([]string, 0, len(hosts))
 	for _, h := range hosts {
-		// Build URL string
-		target := fmt.Sprintf("%s://%s", h.Scheme, h.Hostname)
-		if (h.Scheme == "https" && h.Port != 443) || (h.Scheme == "http" && h.Port != 80) {
-			target = fmt.Sprintf("%s://%s:%d", h.Scheme, h.Hostname, h.Port)
-		}
-
-		// Filter by scope if matcher is available
-		if scopeMatcher != nil && !scopeMatcher.InScopeRequest(h.Hostname, "/", "", "") {
-			continue
-		}
-
-		urls = append(urls, target)
+		urls = append(urls, buildOriginURL(h.Scheme, h.Hostname, h.Port))
 	}
-
-	return urls, nil
+	return urls
 }
 
 // extractDomains extracts hostnames from target URLs.

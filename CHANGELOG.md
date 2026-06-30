@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.43-beta] - 2026-06-30
+
+A scope-isolation fix release. The known-issue-scan phase, dynamic-assessment, and the scan-completion summary now restrict themselves to the exact origins (scheme + host + port) actually being scanned, so records left in a shared project by prior scans of other origins no longer leak into a run's targets or counts.
+
+### Fixed
+
+- **`known-issue-scan` no longer scans origins outside the current scope** — the Nuclei and Kingfisher secret-scan legs previously pulled *every* record in the project DB, so targets/response bodies from earlier scans of unrelated origins (e.g. leftover `localhost` records in the default project) were silently scanned alongside the current target. Both legs are now restricted to the same in-scope origins `dynamic-assessment` uses; with no CLI targets/scope it falls back to a project-wide pass, matching `dynamic-assessment` semantics.
+- **Record scoping now matches scheme + host + port, not just hostname** — `dynamic-assessment`, `known-issue-scan`, spidering, discovery, and the targeted re-spider select DB records by the CLI target's full origin, so a different port on the same host left by a *prior* scan (e.g. `localhost:8080` while targeting `localhost:3000`) is no longer pulled in. Default ports are normalized (https→443, http→80) so `https://example.com` matches its stored records.
+- **In-scan discoveries are always scanned, regardless of port** — a host found during the *current* scan (a subdomain on the target's scheme/port, or a different-port service from the `--intensity deep` port sweep or a followed cross-port link) is scanned even when its origin differs from the CLI target's. Provenance is keyed on the scan's start time (records carry no `scan_uuid`), so this scan's discoveries are kept while prior scans' leftovers stay out.
+- **The "Native scan completed" summary counts only the scanned origins** — record and finding totals were previously a raw count of the *entire* database (no project filter, no host filter), inflating the summary with leftovers from prior runs. The record count is now scoped to the current project and in-scope origins; the finding count is scoped to the project and in-scope hostnames (the findings table carries no scheme/port column).
+
+### Internal
+
+- New `Repository.InScopeHosts` resolves the in-scope origins from CLI targets + scope config + DB state (single source of truth for the runner phases and the summary): an origin is in scope when its hostname passes the scope matcher AND either its (scheme, port) matches a target OR it was discovered during the current scan (records created at/after the scan start). The DB input sources gain `WithHostScopes`, and `GetDistinctPaths`/`GetRecordsWithResponseBody`/`GetReSpiderCandidates`/`CountRecordsAfterCursor` take an optional variadic `HostTarget` origin filter that is a no-op when empty.
+
 ## [v0.1.42-beta] - 2026-06-28
 
 A performance and false-positive-hardening release. The CLI gains an opt-in update check, the evaluated-math and reflected-value detectors now confirm a match tracks fresh inputs instead of a fixed substring, and a broad hot-path sweep cuts allocations and blocking work across deduplication, the database, discovery, and HTML analysis.

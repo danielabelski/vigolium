@@ -310,7 +310,7 @@ func (r *Repository) AdvanceScanCursorBy(ctx context.Context, scanUUID string, r
 	}
 	// Format cursor_at to match SQLite's CURRENT_TIMESTAMP format (no timezone suffix).
 	// Go's time.Time serialization adds timezone info that breaks SQLite text comparison.
-	cursorAt := recordCreatedAt.UTC().Format("2006-01-02 15:04:05")
+	cursorAt := dbTimestampString(recordCreatedAt)
 	_, err := r.db.NewUpdate().
 		Model((*Scan)(nil)).
 		Set("cursor_at = ?", cursorAt).
@@ -336,30 +336,28 @@ func (r *Repository) ResetScanCursor(ctx context.Context, scanUUID string) error
 }
 
 // CountRecordsAfterCursor counts records after the given cursor position.
-// A zero cursorAt means count all records. When hostnames is non-empty,
-// only records matching those hostnames are counted.
-func (r *Repository) CountRecordsAfterCursor(ctx context.Context, cursorAt time.Time, cursorUUID string, hostnames ...string) (int64, error) {
-	return r.countRecordsAfterCursor(ctx, cursorAt, cursorUUID, nil, hostnames)
+// A zero cursorAt means count all records. When hosts is non-empty, only records
+// matching those in-scope origins (scheme+hostname+port) are counted.
+func (r *Repository) CountRecordsAfterCursor(ctx context.Context, cursorAt time.Time, cursorUUID string, hosts ...HostTarget) (int64, error) {
+	return r.countRecordsAfterCursor(ctx, cursorAt, cursorUUID, nil, hosts)
 }
 
 // CountRecordsAfterCursorBySource is like CountRecordsAfterCursor but also
 // filters on http_records.source. Used by scan-on-receive shallow mode to
 // report only user-ingested traffic in the "new ingested records" status,
 // excluding finding/scanner artefacts produced by the scan itself.
-func (r *Repository) CountRecordsAfterCursorBySource(ctx context.Context, cursorAt time.Time, cursorUUID string, sources []string, hostnames []string) (int64, error) {
-	return r.countRecordsAfterCursor(ctx, cursorAt, cursorUUID, sources, hostnames)
+func (r *Repository) CountRecordsAfterCursorBySource(ctx context.Context, cursorAt time.Time, cursorUUID string, sources []string, hosts []HostTarget) (int64, error) {
+	return r.countRecordsAfterCursor(ctx, cursorAt, cursorUUID, sources, hosts)
 }
 
-func (r *Repository) countRecordsAfterCursor(ctx context.Context, cursorAt time.Time, cursorUUID string, sources []string, hostnames []string) (int64, error) {
+func (r *Repository) countRecordsAfterCursor(ctx context.Context, cursorAt time.Time, cursorUUID string, sources []string, hosts []HostTarget) (int64, error) {
 	q := r.db.NewSelect().Model((*HTTPRecord)(nil))
 
 	if !cursorAt.IsZero() {
 		q = q.Where("(created_at > ? OR (created_at = ? AND uuid > ?))", cursorAt, cursorAt, cursorUUID)
 	}
 
-	if len(hostnames) > 0 {
-		q = q.Where("hostname IN (?)", bun.List(hostnames))
-	}
+	q = applyHostScopeFilter(q, hosts)
 
 	if len(sources) > 0 {
 		q = q.Where("source IN (?)", bun.List(sources))

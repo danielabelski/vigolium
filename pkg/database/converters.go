@@ -313,7 +313,13 @@ func firstNonEmpty(values ...string) string {
 // explicit Host field on the event, then parsing the URL or matched-at value.
 func resolveFindingHostname(host, url, matched string) string {
 	if host != "" {
-		return host
+		// event.Host is populated inconsistently by modules: some set the bare host
+		// ("localhost"), others the authority with port ("localhost:3000"). The
+		// findings table carries no port column, and the scan-completion summary +
+		// hostname filters (CountFindingsBySeverity, GetFindingsByHostname) all match
+		// the bare hostname stored on http_records. Normalize to the bare host so a
+		// port-bearing event.Host doesn't get filtered out of those queries.
+		return stripHostPort(host)
 	}
 	for _, candidate := range []string{url, matched} {
 		if candidate == "" {
@@ -324,6 +330,22 @@ func resolveFindingHostname(host, url, matched string) string {
 		}
 	}
 	return ""
+}
+
+// stripHostPort returns the bare host from an authority value, dropping any
+// ":port" suffix. Handles IPv6 literals ("[::1]:3000" → "::1") and bare hosts
+// (no port) unchanged. Parsing as "//host" lets net/url do the host[:port]
+// (and bracketed-IPv6) splitting without us reimplementing it.
+func stripHostPort(host string) string {
+	if host == "" {
+		return ""
+	}
+	if parsed, err := neturl.Parse("//" + host); err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	// Fallback: parse failed (e.g. an unusual value) — keep the original so we
+	// never lose the host entirely.
+	return host
 }
 
 // extractResponseHTTPVersion extracts the HTTP version from the raw response status line.

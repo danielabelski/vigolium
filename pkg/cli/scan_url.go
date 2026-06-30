@@ -839,7 +839,8 @@ func runRunnerScan(rr *httpmsg.HttpRequestResponse, target string) (err error) {
 	finishFSExport(db, opts)
 	if !opts.Silent {
 		fmt.Fprintf(os.Stderr, "\n%s %s\n", terminal.Aqua(terminal.SymbolSparkle), terminal.BoldAqua("Native scan completed"))
-		printScanCompletionSummary(repo, time.Since(scanStart))
+		hosts := summaryScopeHosts(context.Background(), repo, settings, opts.Targets, opts.ProjectUUID, opts.ScanUUID)
+		printScanCompletionSummary(repo, opts.ProjectUUID, hosts, time.Since(scanStart))
 	}
 	evaluateFailOnGate(repo, opts.ProjectUUID, opts.ScanUUID, opts.Silent)
 

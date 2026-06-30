@@ -80,8 +80,8 @@ func (r *Runner) printPhaseDetail(detail string) {
 func (r *Runner) formatTargetCounts(ctx context.Context, cliCount int) string {
 	var dbCount int64
 	if r.repository != nil {
-		hostnames := r.getInScopeDBHostnamesList(ctx)
-		dbCount, _ = r.repository.CountRecordsAfterCursor(ctx, time.Time{}, "", hostnames...)
+		hosts := r.getInScopeDBHosts(ctx)
+		dbCount, _ = r.repository.CountRecordsAfterCursor(ctx, time.Time{}, "", hosts...)
 	}
 	total := int64(cliCount) + dbCount
 	return fmt.Sprintf("Targets: %s (%s CLI | %s HTTP Records)",
@@ -350,8 +350,8 @@ func (r *Runner) printScanConfig() {
 	targetsLine := fmt.Sprintf("Targets: %s", terminal.Orange(fmt.Sprintf("%d", len(opts.Targets))))
 	if r.repository != nil {
 		ctx := context.Background()
-		hostnames := r.getInScopeDBHostnamesList(ctx)
-		if dbCount, err := r.repository.CountRecordsAfterCursor(ctx, time.Time{}, "", hostnames...); err == nil && dbCount > 0 {
+		hosts := r.getInScopeDBHosts(ctx)
+		if dbCount, err := r.repository.CountRecordsAfterCursor(ctx, time.Time{}, "", hosts...); err == nil && dbCount > 0 {
 			targetsLine += fmt.Sprintf(" (CLI: %s | HTTP Records: %s)",
 				terminal.Orange(fmt.Sprintf("%d", len(opts.Targets))),
 				terminal.Orange(fmt.Sprintf("%d", dbCount)))
