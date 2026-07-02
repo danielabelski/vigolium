@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 func TestNew(t *testing.T) {
@@ -86,4 +87,63 @@ func TestScanPerRequest_NoSink(t *testing.T) {
 	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, results)
+}
+
+// TestScanPerRequest_InertVoidZero_NoFinding drops the browser no-op
+// javascript:void(0), the single most common benign javascript: URI.
+func TestScanPerRequest_InertVoidZero_NoFinding(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `<html><a href="javascript:void(0)">menu</a><a href="javascript:void(0);">x</a></html>`
+	ctx := makeHTTPCtx("GET / HTTP/1.1", "text/html", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "javascript:void(0) is a browser no-op, not a sink")
+}
+
+// TestScanPerRequest_AspNetPostback_NoFinding drops framework-generated ASP.NET
+// WebForms postback helpers, the systematic Medium false positive on .aspx pages.
+func TestScanPerRequest_AspNetPostback_NoFinding(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `<html>` +
+		`<a href="javascript:__doPostBack(&#39;lnkPostback&#39;,&#39;&#39;)">next</a>` +
+		`<a href="javascript:WebForm_DoPostBackWithOptions(new WebForm_PostBackOptions(&quot;lnk&quot;))">go</a>` +
+		`<a href="javascript:document.forgotPassword.submit();">reset</a>` +
+		`</html>`
+	ctx := makeHTTPCtx("GET /overview/default.aspx HTTP/1.1", "text/html", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "static framework postback / form-submit URIs must not be flagged")
+}
+
+// TestScanPerRequest_StaticSink_Info keeps a non-inert, non-reflected
+// javascript: URI as an Info observation (not Medium).
+func TestScanPerRequest_StaticSink_Info(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `<html><a href="javascript:runApp('config')">start</a></html>`
+	ctx := makeHTTPCtx("GET / HTTP/1.1", "text/html", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	assert.Equal(t, severity.Info, results[0].Info.Severity, "static javascript: URI is an Info observation")
+}
+
+// TestScanPerRequest_ReflectedSink_Medium escalates a reflected parameter in a
+// javascript: URI to Medium/Firm.
+func TestScanPerRequest_ReflectedSink_Medium(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `<html><a href="javascript:runHandler('payloadval')">x</a></html>`
+	ctx := makeHTTPCtx("GET /?cb=payloadval HTTP/1.1", "text/html", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	assert.Equal(t, severity.Medium, results[0].Info.Severity)
+	assert.Equal(t, severity.Firm, results[0].Info.Confidence)
 }

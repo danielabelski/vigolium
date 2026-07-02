@@ -18,6 +18,30 @@ func IsJSOrTSContentType(contentType string) bool {
 		strings.Contains(ct, "ecmascript")
 }
 
+// IsNonHTMLReflectionContext reports whether a response Content-Type declares a
+// concrete non-HTML type, in which case an injected HTML/template marker is only
+// a data value (a JSON string, an XML text node), never rendered markup — so a
+// reflected-marker match is NOT evidence of HTML/CSTI/XSS injection. HTML-family
+// types (text/html, application/xhtml+xml) and an empty/unknown Content-Type
+// return false so genuine HTML reflections and header-less responses still
+// qualify. This is the canonical FastAPI/Pydantic 422 application/json
+// validation-error echo false positive: the bad parameter (markup intact) is
+// echoed back inside the JSON `input` field but never rendered as HTML.
+//
+// Use this to gate markup-REFLECTION oracles (a raw Contains(body, payload)).
+// Do NOT use it for evaluated-result oracles (SSTI/OGNL computed products, SQL
+// error strings, command-output needles) — those legitimately appear in JSON.
+func IsNonHTMLReflectionContext(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	if ct == "" {
+		return false
+	}
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	return !strings.Contains(ct, "html")
+}
+
 // staticAssetContentTypes are response Content-Type fragments served by static
 // assets and binary payloads — scripts, styles, fonts, images, media, archives.
 // App-level signals (error strings, secrets, tech fingerprints, JSON-RPC method

@@ -174,3 +174,33 @@ func TestScanPerRequest_Differential(t *testing.T) {
 		}
 	})
 }
+
+// TestScanPerRequest_NaturalKeyVariance reproduces the reported false positive: an
+// endpoint whose response ALWAYS carries a privilege-shaped word (here "level", in
+// an SSR page's embedded state / feature-flag blob) that the captured baseline
+// snapshot happened to lack — so the key looks "newly reflected" even though the
+// server ignores the injected field and never reflects arbitrary input. The
+// canary control passes (arbitrary fields are not echoed); the single-sample diff
+// + newly-reflected check would flag it. The reflection-tracks-injection reconfirm
+// sends a fresh no-key control, sees "level" present WITHOUT injection, and drops.
+func TestScanPerRequest_NaturalKeyVariance(t *testing.T) {
+	// Response embeds "level" in its own state on every request, regardless of input,
+	// and does NOT echo arbitrary/unknown fields (so the canary control does not bail).
+	const ssrBody = `{"status":"ok","username":"bob","state":{"level":3,"theme":"dark"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, ssrBody)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	// Baseline snapshot lacks "level" (captured before the flag / a stale render).
+	rr := jsonPost(t, srv.URL+"/profile", `{"username":"bob"}`, `{"status":"ok","username":"bob"}`)
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("a privilege word that appears in a fresh no-key control (natural page content, not our injection) must not be reported, got %d: %+v", len(res), res)
+	}
+}

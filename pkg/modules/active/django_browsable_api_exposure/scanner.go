@@ -12,8 +12,18 @@ import (
 )
 
 var (
-	markers     = []string{"django-rest-framework", "rest_framework", "browsable-api", "api-breadcrumb", "content-main"}
-	antiMarkers = []string{"404 Not Found"}
+	// strongMarkers are Django-REST-Framework-specific tokens that appear only in
+	// a genuine DRF browsable-API page (framework name, static asset path, the
+	// browsable-api class). At least one MUST be present to report.
+	strongMarkers = []string{"django-rest-framework", "rest_framework", "browsable-api"}
+	// corroborators are generic layout tokens that DRF's template also uses but
+	// which occur widely in unrelated themes/SPAs ("content-main", "api-breadcrumb").
+	// They are recorded as supporting evidence only — NEVER a sole trigger. The
+	// motivating false-positive class: the module re-requests the ORIGINAL page
+	// with Accept: text/html, so any benign 200 HTML shell carrying a "content-main"
+	// div would otherwise be reported as a Django browsable-API exposure.
+	corroborators = []string{"api-breadcrumb", "content-main"}
+	antiMarkers   = []string{"404 Not Found"}
 )
 
 // Module implements the Django Browsable API Exposure active scanner.
@@ -145,16 +155,22 @@ func (m *Module) probeWithAcceptHTML(
 		return nil
 	}
 
-	matched := false
+	// A DRF-specific anchor must be present; generic layout tokens alone are not
+	// enough (they occur in unrelated pages the module re-fetches with Accept: html).
 	var matchedMarkers []string
-	for _, marker := range markers {
+	for _, marker := range strongMarkers {
 		if strings.Contains(body, marker) {
-			matched = true
 			matchedMarkers = append(matchedMarkers, marker)
 		}
 	}
-	if !matched {
+	if len(matchedMarkers) == 0 {
 		return nil
+	}
+	// Record any generic layout tokens as supporting evidence only.
+	for _, marker := range corroborators {
+		if strings.Contains(body, marker) {
+			matchedMarkers = append(matchedMarkers, marker)
+		}
 	}
 
 	urlx, _ := ctx.URL()

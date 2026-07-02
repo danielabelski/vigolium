@@ -16,7 +16,12 @@ var (
 **Fix:** Treat Authorization values as secrets: keep them out of logs, caches, and URLs, send only over TLS, scope and expire tokens, and rotate exposed credentials.`
 
 	ModuleConfirmation = "Confirmed when a request carries an Authorization header with a real credential (not a bare scheme or placeholder) and the response is the application, not a WAF/CDN edge block"
-	ModuleSeverity     = severity.Medium
-	ModuleConfidence   = severity.Tentative
-	ModuleTags         = []string{"authentication", "info-disclosure", "light"}
+	// Observing that a client sent its OWN Authorization header to its OWN API
+	// over TLS is reconnaissance/inventory, not a vulnerability — the credential
+	// was never disclosed to a third party. The module text says "Informational",
+	// so the severity must match: reporting this at Medium produced a large volume
+	// of over-severe findings (one per authenticated endpoint) across every host.
+	ModuleSeverity   = severity.Info
+	ModuleConfidence = severity.Tentative
+	ModuleTags       = []string{"authentication", "info-disclosure", "light"}
 )

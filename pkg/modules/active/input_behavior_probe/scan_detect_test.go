@@ -31,6 +31,37 @@ func TestTagDistance(t *testing.T) {
 	assert.Equal(t, 4, tagDistance(nil, a))
 }
 
+// TestConfirmChange_TagLegHighVariancePageNotConfirmed reproduces the tag-leg
+// false positive: a page whose HTML tag COUNT changes on every render (rotating
+// feed / personalized SSR shell / A-B block) that the 2-sample jitter calibration
+// under-sampled. The probe re-fetch diverges from the baseline (so the old
+// single-baseline confirm would accept it), but a fresh no-payload control diverges
+// just as much — proving the delta is ambient page variance, not input handling —
+// so confirmChange must reject it.
+func TestConfirmChange_TagLegHighVariancePageNotConfirmed(t *testing.T) {
+	t.Parallel()
+	var n int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Always many tags, but a DIFFERENT count every request → any fetch diverges
+		// far from a small fixed baseline, for the probe AND the no-payload control.
+		c := atomic.AddInt64(&n, 1)
+		_, _ = w.Write([]byte("<html><body>" + strings.Repeat("<div>x</div>", int(20+c%13)) + "</body></html>"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/feed?q=seed")
+	baseline := &detectionBaseline{
+		tagCounts:  extractTagCounts("<html><body><div>x</div></body></html>"),
+		statusCode: 200,
+		tagJitter:  2, // under-sampled: the page actually swings by ~20 tags
+	}
+	change := &behaviorChange{TagsChanged: true, IsInteresting: true}
+
+	ok := confirmChange(rr, client, baseline, rr.Request().Raw(), change)
+	assert.False(t, ok, "a page whose tag count varies every request must not confirm a tag-leg change: the no-payload control diverges too")
+}
+
 func TestDetectChange_JitterWithinCalibrationNotInteresting(t *testing.T) {
 	base := &detectionBaseline{
 		tagCounts:  extractTagCounts("<html><body><div></div></body></html>"),
@@ -62,9 +93,35 @@ func TestDetectChange_StatusTransitionStandsAlone(t *testing.T) {
 		statusCode: 200,
 		tagJitter:  0,
 	}
-	ch := detectChange(base, "<html></html>", 500) // identical tags, 200→500
+	// identical tags, 200→500, and the 500 LEAKS an application error — the status
+	// signal must stand on its own without any tag change.
+	ch := detectChange(base, "<html><body>Traceback (most recent call last):\n  File \"/app/x.py\", line 5</body></html>", 500)
 	assert.True(t, ch.IsInteresting)
-	assert.True(t, ch.statusInteresting, "200→500 is an independent status signal")
+	assert.True(t, ch.statusInteresting, "a leaking 200→500 is an independent status signal")
+}
+
+// TestDetectChange_GenericServerErrorNotInteresting is the false-positive this fix
+// targets: a malformed-encoding probe (%ff/%00/polyglot in a path or forwarding
+// header) makes the edge/URL decoder answer with a bland 500 — an empty body, a
+// generic "Internal Server Error", or a JSON "URI malformed". It leaks nothing, so
+// it is edge rejection of bad input, not the application handling it, and must not
+// be reported. This reproduced deterministically across ~30 CDN-fronted hosts.
+func TestDetectChange_GenericServerErrorNotInteresting(t *testing.T) {
+	base := &detectionBaseline{
+		tagCounts:  extractTagCounts("<html><body><div>app</div></body></html>"),
+		statusCode: 200,
+		tagJitter:  0,
+	}
+	for _, body := range []string{
+		"",                            // empty body (X-Forwarded-Host: %00 → 500)
+		"Internal error has occurred", // Express default handler
+		`{"status":"error","message":"URI malformed"}`, // decodeURIComponent on %ff
+		"<html><body>Internal Server Error</body></html>",
+	} {
+		ch := detectChange(base, body, 500)
+		assert.False(t, ch.statusInteresting, "a generic edge/decoder 500 must not be a status signal: %q", body)
+		assert.False(t, ch.IsInteresting, "a generic edge/decoder 500 must not be reported: %q", body)
+	}
 }
 
 // TestDetectChange_RedirectEmptyBodyNotInteresting reproduces reported finding #26:
@@ -264,12 +321,15 @@ func TestScanPerRequest_PathProbe302RedirectNoFalsePositive(t *testing.T) {
 }
 
 // TestScanPerRequest_ServerErrorIsReported is the status-signal positive: a probe
-// (any appended query param) drives the server to a 500, an independent signal
-// that stands on its own without tag reproduction.
+// (any appended query param) drives the server to a 500 that LEAKS an application
+// stack trace — an independent signal that stands on its own without tag reproduction.
 func TestScanPerRequest_ServerErrorIsReported(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" {
 			w.WriteHeader(http.StatusInternalServerError)
+			// A genuine app error leaks how it failed; that leak is what makes a 500
+			// an input-handling lead (a bare edge 500 is suppressed as noise).
+			_, _ = w.Write([]byte("Traceback (most recent call last):\n  File \"/app/views.py\", line 42, in handler"))
 			return
 		}
 		_, _ = w.Write([]byte("<html><body>ok</body></html>"))

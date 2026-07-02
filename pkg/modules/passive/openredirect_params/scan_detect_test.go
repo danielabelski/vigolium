@@ -63,3 +63,46 @@ func TestScanPerRequest_Benign(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }
+
+// TestScanPerRequest_NonURLValueSkipped is the regression for the dominant
+// false-positive class across the Snapchat scan corpus: a parameter whose *name*
+// matches a redirect keyword but whose *value* can never be a redirect target.
+// "location=Boulder" (a job-search city filter), "cb=<timestamp>" (a cache
+// buster), and a long identifier whose name merely contains "url" must all be
+// skipped.
+func TestScanPerRequest_NonURLValueSkipped(t *testing.T) {
+	t.Parallel()
+	m := New()
+	cases := []string{
+		"GET /jobs?location=Boulder",
+		"GET /jobs?location=San+Francisco",
+		"GET /cm/s?bt=1d53c387&cb=1782847109189",
+		"GET /s/sfsites/aura?getArticleUrlNameAndVersionId=1",
+	}
+	for _, reqLine := range cases {
+		ctx := makeReqCtx(reqLine)
+		results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+		require.NoError(t, err)
+		assert.Empty(t, results, "non-URL redirect-keyword value must be skipped: %q", reqLine)
+	}
+}
+
+// TestScanPerRequest_URLShapedValueFlagged verifies real redirect targets in
+// every common shape still fire: absolute URL, protocol-relative, URL-encoded,
+// internal path, and a scheme-less bare host.
+func TestScanPerRequest_URLShapedValueFlagged(t *testing.T) {
+	t.Parallel()
+	m := New()
+	cases := []string{
+		"GET /login?redirect=//evil.com",
+		"GET /login?redirect_uri=https%3A%2F%2Falt.example.io%2Fauth",
+		"GET /go?url=/dashboard",
+		"GET /go?callback=evil.com/steal",
+	}
+	for _, reqLine := range cases {
+		ctx := makeReqCtx(reqLine)
+		results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+		require.NoError(t, err)
+		assert.NotEmpty(t, results, "URL-shaped redirect value must be flagged: %q", reqLine)
+	}
+}

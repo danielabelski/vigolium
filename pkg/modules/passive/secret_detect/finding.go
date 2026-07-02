@@ -46,6 +46,11 @@ func NewSecretFinding(f *kingfisher.Finding, sev severity.Severity, conf severit
 			"rule_id":   f.RuleID(),
 			"rule_name": f.RuleName(),
 			"validated": f.IsValidated(),
+			// Short, normalised classification of the secret (e.g. "JWT", "Google
+			// API key"). The console renders it as a leading bracket before the
+			// matched value; it also rides along in the jsonl/DB `meta` object for
+			// triage.
+			"pattern": PatternLabel(f.RuleName(), f.Snippet()),
 		},
 	}
 }

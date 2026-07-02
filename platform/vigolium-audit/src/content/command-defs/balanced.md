@@ -219,7 +219,7 @@ If `VIGOLIUM_AUDIT_INFO_AVAILABLE=true` (or `vigolium-results/INFO.md` exists), 
 
 Spawn `vigolium-audit:threat-modeler` (foreground) with the following additional instruction in the prompt:
 
-> "BALANCED MODE: Skip Domain Attack Research Modes B and C. Only run Mode A if the project is a library/plugin/protocol. Skip generating `## Spec Gap Candidates` and `## Phase 4 CodeQL Extraction Targets` sections. Focus on: Project Classification, Architecture Model, DFD/CFD Slices, Attack Surface, and Threat Model. If `vigolium-results/INFO.md` exists, read it first and use it as authoritative for the sections it covers (per the agent's INFO.md handling rules)."
+> "BALANCED MODE: Skip Domain Attack Research Modes B and C. Only run Mode A if the project is a library/plugin/protocol. Skip generating `## Spec Gap Candidates` and `## Phase 4 CodeQL Extraction Targets` sections. Focus on: Project Classification, Architecture Model, DFD/CFD Slices, Attack Surface, and Threat Model. Still run Step 6 — write `vigolium-results/attack-surface/unauthenticated-surface.md` (balanced has no access-auditor phase, so this is the final unauthenticated-surface artifact). If `vigolium-results/INFO.md` exists, read it first and use it as authoritative for the sections it covers (per the agent's INFO.md handling rules)."
 
 Wait for completion. Mark T2 complete.
 
@@ -360,7 +360,7 @@ rm -rf vigolium-results/codeql-queries/
 rm -rf vigolium-results/semgrep-rules/
 rm -rf vigolium-results/semgrep-res/
 ```
-Retained: `vigolium-results/audit-state.json`, `vigolium-results/file-state.json`, `vigolium-results/INFO.md` (if present), `vigolium-results/attack-surface/knowledge-base-report.md`, `vigolium-results/attack-surface/intent-corpus.json`, `vigolium-results/attack-surface/intent-reconciliation.md`, `vigolium-results/findings/`, `vigolium-results/findings-theoretical/` (if present), `vigolium-results/final-audit-report.md`. If consistency checks failed, skip cleanup and report the failures to the user first.
+Retained: `vigolium-results/audit-state.json`, `vigolium-results/file-state.json`, `vigolium-results/INFO.md` (if present), `vigolium-results/attack-surface/knowledge-base-report.md`, `vigolium-results/attack-surface/unauthenticated-surface.md`, `vigolium-results/attack-surface/intent-corpus.json`, `vigolium-results/attack-surface/intent-reconciliation.md`, `vigolium-results/findings/`, `vigolium-results/findings-theoretical/` (if present), `vigolium-results/final-audit-report.md`. If consistency checks failed, skip cleanup and report the failures to the user first.
 
 Mark T9 (phase `B9`) complete. Update `audits[-1].completed_at` and `audits[-1].status` to `complete`. Print post-audit summary.
 

@@ -20,14 +20,23 @@ type deserError struct {
 	pattern   *regexp.Regexp
 }
 
+// errorPatterns are framework deserialization-error signatures. The two-anchor
+// forms below (X ... Y) deliberately bound the gap between the anchors:
+// unbounded ".*" filler lets a lazy match bridge two coincidental words tens of
+// KB apart in a large single-line body (the classic "Oracle.*?Driver spanned a
+// Salesforce Aura app shell" false positive), and a Java FQCN filler is further
+// constrained to package-name characters ([\w.$]) so it cannot cross JSON/HTML
+// structure. A genuine leak names the class in one compact phrase, so the bounds
+// never clip a true positive. The general match-span guard in checkDeserError is
+// the backstop for any signature that still matches too wide.
 var errorPatterns = []deserError{
-	{"Java", regexp.MustCompile(`(?i)(?:java\.io\.ObjectInputStream|java\.io\.InvalidClassException|java\.lang\.ClassCastException.*deserializ|ClassNotFoundException.*deserializ|InvalidObjectException|StreamCorruptedException)`)},
+	{"Java", regexp.MustCompile(`(?i)(?:java\.io\.ObjectInputStream|java\.io\.InvalidClassException|java\.lang\.ClassCastException.{0,80}deserializ|ClassNotFoundException.{0,80}deserializ|InvalidObjectException|StreamCorruptedException)`)},
 	{"Java", regexp.MustCompile(`(?i)(?:org\.apache\.commons\.collections\.functors|com\.sun\.org\.apache\.xalan|ysoserial|CommonsCollections)`)},
-	{"PHP", regexp.MustCompile(`(?i)(?:unserialize\(\)|O:\d+:"[^"]+"|PHP Fatal error.*unserialize|__wakeup|__destruct.*called)`)},
+	{"PHP", regexp.MustCompile(`(?i)(?:unserialize\(\)|O:\d+:"[^"]+"|PHP Fatal error.{0,80}unserialize|__wakeup|__destruct.{0,40}called)`)},
 	{"Python", regexp.MustCompile(`(?i)(?:pickle\.loads|cPickle\.loads|_pickle\.UnpicklingError|yaml\.load|yaml\.unsafe_load)`)},
-	{"Ruby", regexp.MustCompile(`(?i)(?:Marshal\.load|YAML\.load|Psych::DisallowedClass|ERB.*new.*result|Gem::Installer)`)},
+	{"Ruby", regexp.MustCompile(`(?i)(?:Marshal\.load|YAML\.load|Psych::DisallowedClass|ERB\.{0,20}new.{0,80}result|Gem::Installer)`)},
 	{".NET", regexp.MustCompile(`(?i)(?:System\.Runtime\.Serialization|BinaryFormatter|SoapFormatter|ObjectStateFormatter|LosFormatter|NetDataContractSerializer|TypeNameHandling)`)},
-	{"Java", regexp.MustCompile(`(?i)(?:org\.apache\.commons\.beanutils|com\.sun\.rowset\.JdbcRowSetImpl|org\.hibernate\..*Exception|org\.springframework\..*SerializationException)`)},
+	{"Java", regexp.MustCompile(`(?i)(?:org\.apache\.commons\.beanutils|com\.sun\.rowset\.JdbcRowSetImpl|org\.hibernate\.[\w.$]{0,80}Exception|org\.springframework\.[\w.$]{0,80}SerializationException)`)},
 }
 
 // deserPayload defines a deserialization probe.
@@ -142,6 +151,16 @@ func (m *Module) ScanPerInsertionPoint(
 			continue
 		}
 
+		// A 404 / redirect means the route never resolved, so no deserialization
+		// ran: a framework class-name or error substring in such a body is page
+		// noise (a JS bundle, a SPA shell), not a leaked deserialization error.
+		// Mirrors the sqli/nosqli error-based modules — only a genuine application
+		// error surface can carry the leak.
+		if !infra.IsErrorSurfaceStatus(resp) {
+			resp.Close()
+			continue
+		}
+
 		body := resp.Body().String()
 		if framework, matched := checkDeserError(body, origBody, p.payload); matched {
 			results = append(results, &output.ResultEvent{
@@ -180,12 +199,16 @@ func (m *Module) ScanPerInsertionPoint(
 func checkDeserError(body, origBody, payload string) (string, bool) {
 	body = modkit.StripReflected(body, payload)
 	for _, ep := range errorPatterns {
-		if ep.pattern.MatchString(body) {
-			if origBody != "" && ep.pattern.MatchString(origBody) {
-				continue
-			}
-			return ep.framework, true
+		// Accept only a plausibly compact signature span (the shared error-based
+		// guard), so a two-anchor pattern whose filler bridged unrelated content on
+		// a large body is not read as a leak.
+		if !modkit.MatchWithinSpan(ep.pattern, body, modkit.MaxErrorSignatureSpan) {
+			continue
 		}
+		if origBody != "" && ep.pattern.MatchString(origBody) {
+			continue
+		}
+		return ep.framework, true
 	}
 	return "", false
 }

@@ -1,6 +1,10 @@
 package sqli_error_based
 
-import "regexp"
+import (
+	"regexp"
+
+	"github.com/vigolium/vigolium/pkg/modules/modkit"
+)
 
 var (
 	errorsRegexp = map[string][]*regexp.Regexp{
@@ -68,7 +72,18 @@ var (
 		"Oracle": {
 			regexp.MustCompile(`\bORA-\d{5}`),
 			regexp.MustCompile("Oracle error"),
-			regexp.MustCompile("Oracle.*?Driver"),
+			// "Oracle" and "Driver" are both common English words that occur
+			// independently in ordinary page content (analytics feature-flag
+			// names, UI labels). An unbounded ".*?" between them let this match
+			// span unrelated content: the motivating false positive was a 547KB
+			// Salesforce Aura app shell whose inline feature-flag list
+			// ("...userHasAwsRdsOracleEnabled...") and a lone
+			// "enableTopDriversBreakdown" label sat 60KB apart yet were matched as
+			// a single span and reported as Critical/Certain Oracle SQLi. A genuine
+			// Oracle driver error names the driver in one short phrase ("Oracle ODBC
+			// Driver", "[Oracle][ODBC Driver]"), so bound the gap to keep the two
+			// tokens within the same phrase.
+			regexp.MustCompile(`Oracle.{0,40}?Driver`),
 			regexp.MustCompile(`Warning.*?\W(oci|ora)_`),
 			regexp.MustCompile("quoted string not properly terminated"),
 			regexp.MustCompile("SQL command not properly ended"),
@@ -243,8 +258,10 @@ var (
 func checkBodyContainsErrorMsg(body string) (string, *regexp.Regexp, bool) {
 	for name, rgExpList := range errorsRegexp {
 		for _, regExp := range rgExpList {
-			matched := regExp.MatchString(body)
-			if matched {
+			// Accept only if SOME match of this pattern is a plausibly compact error
+			// signature (not an "X.*?Y" span that bridged unrelated page content in a
+			// large body). Shared with the other error-based modules via modkit.
+			if modkit.MatchWithinSpan(regExp, body, modkit.MaxErrorSignatureSpan) {
 				return name, regExp, true
 			}
 		}

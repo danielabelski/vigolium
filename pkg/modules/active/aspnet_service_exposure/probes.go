@@ -29,9 +29,14 @@ var commonProbes = []probe{
 		desc:        "OData service metadata endpoint exposed under /api path, revealing entity data model",
 	},
 	{
-		path:        "/_vti_bin/",
-		name:        "SharePoint VTI Bin",
-		markers:     []string{"<pre>", "Parent Directory", "Index of", ".asmx"},
+		path: "/_vti_bin/",
+		name: "SharePoint VTI Bin",
+		// A bare "<pre>" was dropped: it is a generic HTML tag that a benign 200
+		// page at this route can carry, and an ANY-of match on it reported a
+		// "directory listing exposed" on pages that were not listings. A genuine
+		// IIS/SharePoint listing is identified by the parent-directory / index
+		// phrasing or the listed service-file extensions.
+		markers:     []string{"Parent Directory", "Index of", ".asmx"},
 		antiMarkers: []string{"404", "Not Found", "403", "Forbidden"},
 		sev:         severity.Medium,
 		desc:        "SharePoint _vti_bin directory exposed, revealing available web service endpoints",
@@ -39,7 +44,7 @@ var commonProbes = []probe{
 	{
 		path:        "/Services/",
 		name:        "Services Directory",
-		markers:     []string{"<pre>", "Parent Directory", "Index of", ".svc", ".asmx"},
+		markers:     []string{"Parent Directory", "Index of", ".svc", ".asmx"},
 		antiMarkers: []string{"404", "Not Found", "403", "Forbidden"},
 		sev:         severity.Low,
 		desc:        "ASP.NET Services directory listing exposed, revealing available web service files",

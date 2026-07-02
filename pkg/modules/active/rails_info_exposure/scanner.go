@@ -97,6 +97,24 @@ func (m *Module) ScanPerRequest(
 	return results, nil
 }
 
+// looksLikeRailsHealthCheck reports whether a /up response is the genuine Rails
+// health page rendered by Rails::HealthController#show (Rails 7.1+):
+//
+//	<!DOCTYPE html><html><body style="background-color: #01d28e"></body></html>
+//
+// It is a tiny text/html page whose defining trait is a coloured <body> status
+// banner (green when healthy). Requiring that exact shape stops the markerless /up
+// probe from fingerprinting every framework that merely returns a small 200 for
+// /up — a Node/Express geo endpoint answering {"country":...} JSON, a generic
+// catch-all, a load-balancer "OK" — as a Rails app.
+func looksLikeRailsHealthCheck(contentType, body string) bool {
+	if contentType != "" && !strings.Contains(strings.ToLower(contentType), "text/html") {
+		return false
+	}
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "<body") && strings.Contains(lower, "background-color")
+}
+
 func (m *Module) fingerprint404(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
@@ -212,25 +230,20 @@ func (m *Module) probeEndpoint(
 			return nil
 		}
 	} else {
-		// For the /up probe (no markers): a genuine Rails health check
-		// (Rails::HealthController#show) always renders a non-empty body — the
-		// default green status page, or a custom "OK"/JSON payload. An empty or
-		// whitespace-only 200 carries no signal: it is the classic catch-all /
-		// CDN placeholder that returns a blank 200 for every unknown child path.
-		// The soft-404 fingerprint can't catch it because a blank body never
-		// matches the host's non-empty wildcard shell (empty hash ≠ shell hash,
-		// length ratio ≈ 1.0), so reject the blank body outright here.
-		if len(strings.TrimSpace(body)) == 0 {
+		// For the /up probe (no markers): confirm the response is the genuine Rails
+		// health page rendered by Rails::HealthController#show, not merely a small
+		// 200. Accepting any small non-empty 200 mis-fingerprinted every app that
+		// answers /up — a Node/Express geo endpoint returning {"country":...} JSON,
+		// a catch-all, a load-balancer "OK" — as Rails (observed firing "firm" on an
+		// X-Powered-By: Express host). looksLikeRailsHealthCheck demands the Rails
+		// shape; the soft-404 check then rules out a host that wildcards that shape.
+		ct := ""
+		if resp.Response() != nil {
+			ct = resp.Response().Header.Get("Content-Type")
+		}
+		if !looksLikeRailsHealthCheck(ct, body) {
 			return nil
 		}
-		// ...accept any 200 with small body (< 1024 bytes)...
-		if len(body) >= 1024 {
-			return nil
-		}
-		// ...but only if it isn't just the host's wildcard / soft-404 shell. A
-		// server that returns a small 200 for every path would otherwise make a
-		// markerless /up "hit" meaningless. ConfirmNotSoft404 compares against a
-		// cached host-wide random-path fingerprint and fails open on probe error.
 		if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, status, []byte(body), "") {
 			return nil
 		}

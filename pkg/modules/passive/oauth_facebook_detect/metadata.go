@@ -16,7 +16,10 @@ var (
 **Fix:** Strictly validate redirect_uri against an exact allowlist of registered callback URLs (full path, no wildcard host).`
 
 	ModuleConfirmation = "Confirmed when request URL contains Facebook OAuth parameters (client_id, redirect_uri) matching known OAuth flow patterns"
-	ModuleSeverity     = severity.Medium
-	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"authentication", "session", "light"}
+	// The module text says "Informational recon, not a confirmed flaw" — noting a
+	// redirect_uri/next parameter on a Facebook OAuth request is inventory, not a
+	// vulnerability. Reporting it at Medium over-severed a recon signal.
+	ModuleSeverity   = severity.Info
+	ModuleConfidence = severity.Firm
+	ModuleTags       = []string{"authentication", "session", "light"}
 )

@@ -28,8 +28,10 @@ func TestNew_Metadata(t *testing.T) {
 func TestScanPerInsertionPoint_DetectsReflectedXSS(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Echo the message parameter back verbatim (unencoded reflection).
-		_, _ = w.Write([]byte("chat: " + r.URL.Query().Get("message")))
+		// Echo the message parameter back verbatim (unencoded reflection) into an
+		// HTML response — the context where injected markup actually renders.
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<div>chat: " + r.URL.Query().Get("message") + "</div>"))
 	}))
 	defer srv.Close()
 
@@ -41,6 +43,31 @@ func TestScanPerInsertionPoint_DetectsReflectedXSS(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "expected an injection finding when a WS param reflects payloads")
 	assert.True(t, res[0].MatcherStatus)
+}
+
+// TestScanPerInsertionPoint_JSONEchoNotXSS is the regression for the FastAPI
+// JSON-validation-error false positive: a WS-named param is echoed verbatim
+// (markup intact) inside an application/json body, so the raw-substring XSS match
+// passes, yet the tag is a JSON string value that never renders as HTML. The
+// content-type gate must drop the XSS category. (The SQLi/template categories are
+// unaffected — their markers legitimately appear in JSON.)
+func TestScanPerInsertionPoint_JSONEchoNotXSS(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// FastAPI/Pydantic-style validation error echoing the bad value.
+		_, _ = w.Write([]byte(`{"detail":[{"loc":["query","message"],"input":"` +
+			r.URL.Query().Get("message") + `"}]}`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/api/ws?message=hello")
+	ip := modtest.InsertionPoint(t, rr, "message")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an HTML payload echoed inside a JSON body is not rendered XSS")
 }
 
 // TestScanPerInsertionPoint_SkipsNonWSParam ensures a parameter whose name is

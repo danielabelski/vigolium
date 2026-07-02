@@ -175,6 +175,36 @@ Derive Expected Scope from:
 3. KB's `## CFD Slices` authz annotations if present
 4. Commit archaeology's auth-path activity (recently-modified auth surfaces deserve extra scrutiny)
 
+## Step 3b — Unauthenticated Surface Extract
+
+Now that the matrix is built, produce the authoritative `vigolium-results/attack-surface/unauthenticated-surface.md` — the exhaustive view of what an **anonymous attacker** (no valid session, token, or API key) can reach. Phase D4 `threat-modeler` seeded a best-effort version of this file from the architecture model; **you supersede it** with the route-matrix-derived list because your enumeration is exhaustive. Read the existing file first (if present) and carry over any non-route entry points it captured that your matrix does not cover (e.g. an unauthenticated queue consumer the threat-modeler noted).
+
+A matrix row belongs in this file when an anonymous request reaches its handler body — i.e. `Expected Scope = public`, OR the combined Layer-1/Layer-2/Layer-3 guard stack is empty (`missing-guard`), OR the only guard is a bypassable hidden control channel (`middleware-gap`, from Layer 4). Do NOT include rows whose guard establishes identity before the handler runs.
+
+Preserve the exact structure below so downstream phases and merge-mode consolidation can parse it. The `Why pre-auth` value is one of `by-design` / `missing-guard` / `middleware-gap`; `missing-guard` and `middleware-gap` rows must have a corresponding finding draft filed in Step 4 (cross-reference the draft's `p6-<NNN>` id in the Blast radius / Notes column).
+
+```markdown
+# Unauthenticated Attack Surface
+
+Reachable by an anonymous attacker — no valid session, token, or API key.
+
+**Coverage**: <N entry points> | <M by-design public> | <P missing-guard / middleware-gap>
+**Auth model**: <how identity is established, e.g. JWT bearer via requireAuth middleware (src/mw/auth.ts:12)>
+**Coverage gaps**: <dynamically-registered / reflection-based / unresolved handlers, or "none">
+
+## Pre-Auth HTTP / API Routes
+
+| # | Method | Path | Handler (file:line) | Why pre-auth | Notable inputs / sinks | Blast radius |
+|---|--------|------|---------------------|--------------|------------------------|--------------|
+
+## Other Unauthenticated Entry Points
+
+| Kind | Entry point (file:line) | Why pre-auth | Notes |
+|------|-------------------------|--------------|-------|
+```
+
+If no endpoint is reachable pre-auth, write the header block with `**Coverage**: 0 entry points` and a one-line explanation rather than empty tables.
+
 ## Step 4 — Systematic Vulnerability Review
 
 For each finding class below, scan the matrix + source and emit a draft whenever the evidence meets the threshold. Write drafts to `vigolium-results/findings-draft/p6-<NNN>-<slug>.md`.
@@ -289,6 +319,7 @@ At the end of your run, append a short `## Authorization Audit` section to `vigo
 - Dynamic/unresolved endpoints: <M> (see `vigolium-results/attack-surface/authz-coverage-gaps.md`)
 - Drafts filed: <count> (split by class)
 - Matrix: `vigolium-results/attack-surface/authz-matrix.md`
+- Unauthenticated surface: `vigolium-results/attack-surface/unauthenticated-surface.md` (<P> pre-auth entry points, <Q> flagged missing-guard/middleware-gap)
 ```
 
 This hand-off lets Phase 10 chambers know which authz concerns are already documented and which surface areas need chamber attention.

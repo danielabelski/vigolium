@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.45-beta] - 2026-07-02
+
+A false-positive-hardening and severity-calibration release. A broad sweep stops markup-reflection, error-signature, IDOR, and differential detectors from self-triggering on echoed input, framework build artifacts, and ambiguous numeric parameters; a batch of low-signal passive detectors drops from Medium to Low/Info; and secret findings now carry a short credential-family label.
+
+### Added
+
+- **Secret findings are labelled by credential family** — `secret-detect` tags each finding with a short classification (`JWT`, `Google API key`, `reCAPTCHA site key`, `Google OAuth client ID`, or the Kingfisher rule name verbatim), rendered as a leading `[JWT]` bracket on the console line and carried in the jsonl/DB `meta.pattern` field. The console renderer picks up any module's `Metadata["pattern"]`, so it's a generic opt-in.
+
+### Fixed
+
+- **Markup-reflection oracles ignore JSON/XML-echoed payloads** — a new `modkit.IsNonHTMLReflectionContext` treats an HTML/template marker echoed inside a non-HTML response (the canonical FastAPI/Pydantic `422 application/json` validation-error echo) as a data value, not rendered markup. Applied to the reflection paths of `csti-detection`, `pdf-generation-injection`, and `ws-injection`; evaluated-result oracles (SSTI/OGNL/SQL errors) are left alone.
+- **Error-signature detectors bound their match span** — a loosely-anchored `X.*?Y` pattern could bridge two coincidental words across a large body (`Oracle.*?Driver` spanning 60 KB of a Salesforce Aura shell). The shared `modkit.MatchWithinSpan` / `MaxErrorSignatureSpan` (512 B) gate requires a compact span while still firing on a genuine short signature elsewhere. Applied to `sqli-error-based`, `insecure-deserialization`, and siblings.
+- **IDOR detectors no longer flag bare sequential integers** — `authzutil.ClassifyParam` drops the value signal for a plain sequential integer lacking both an identifier-shaped name and a resource-noun path context, so telemetry/pagination/status params (`page_number=5`, `responseStatus=200`) stop being misreported. Wired into `idor-guid` and `idor-params-detect`.
+- **Passive server-side detectors skip client build bundles** — `jsframework.IsClientBuildArtifact` skips immutable framework output (`/_next/static/`, `/_nuxt/`), where server-only constructs are compiled out, so a shared vendor chunk no longer yields one false positive per host. Applied across the Next.js/Nuxt/server-action detectors and `cache-data-leak`.
+- **Differential detectors confirm against non-determinism** — `http-method-tampering` and `race-interference` add determinism controls so a per-request token/nonce or SSR variance between legs isn't mistaken for a method-override or race divergence.
+- **Discovery extension-fuzz gating** — deparos trusts a start URL's `.aspx`/`.php`/`.jsp` suffix as a stack signal only when the URL was actually *served* as that extension (2xx/401/403, not a 3xx/404/5xx recon seed), plus a per-extension catch-all guard (two random `<nonce>.<ext>` probes) so an SPA/CDN that 200s any path isn't fingerprinted into a wrong-stack wordlist fuzz.
+- **Lower-signal passive findings recalibrated** — `oauth-facebook-detect` and `graphql-introspection-detect` → Info; `serialized-object-detect`, `jackson-deserialize-detect`, `sensitive-api-fields-detect`, `api-pagination-leak`, `auth-headers-detect` → Low; `jwt-claims-detect` now grades per-issue (hygiene → Low, `alg=none` → High); `postmessage-handler-detect`, `javascript-uri-sink`, `openredirect-params`, `input-reflection-detect`, and `unsafe-html-sink` gained value-shape/context gates.
+
+### Internal
+
+- New shared helpers `modkit.IsNonHTMLReflectionContext`, `modkit.MatchWithinSpan` + `modkit.MaxErrorSignatureSpan`, `jsframework.IsClientBuildArtifact`, the `authzutil.ClassifyParam` sequential-int gate, and `secret_detect.PatternLabel`; `format_screen.go` renders any finding's `Metadata["pattern"]` as a leading bracket. Regression tests added alongside each hardened module.
+
 ## [v0.1.44-beta] - 2026-07-01
 
 A false-positive-hardening release. Path-probe exposure modules no longer confirm on their own last path segment reflected into a content route, several injection detectors no longer self-trigger on an endpoint that merely echoes the rejected payload back, and secret-detect treats copy-paste sample credentials on documentation pages as low-value.

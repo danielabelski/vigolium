@@ -99,10 +99,17 @@ func (w *StandardWriter) formatScreen(output *ResultEvent) []byte {
 	termWidth := terminal.TerminalWidth()
 	remaining := termWidth - prefixLen
 
-	// Build suffix parts (extracted results, fuzzing parameter) first to account for their width
+	// Build suffix parts (pattern label, extracted results, fuzzing parameter)
+	// first to account for their width.
 	var suffix string
+	// A leading [pattern] bracket names the kind of match ahead of the value —
+	// e.g. secret-detect tags each finding with the credential family ("JWT",
+	// "Google API key") so the console line reads `... [JWT] [eyJ…]`.
+	if label := patternLabel(output); label != "" {
+		suffix = " [" + EscapeOneLine(label) + "]"
+	}
 	if len(output.ExtractedResults) > 0 {
-		suffix = " [" + EscapeOneLine(strings.Join(output.ExtractedResults, ",")) + "]"
+		suffix += " [" + EscapeOneLine(strings.Join(output.ExtractedResults, ",")) + "]"
 	}
 	if output.IsFuzzingResult && output.FuzzingParameter != "" {
 		suffix += " [" + output.FuzzingParameter + "]"
@@ -143,6 +150,21 @@ func (w *StandardWriter) formatScreen(output *ResultEvent) []byte {
 	}
 
 	return builder.Bytes()
+}
+
+// patternLabel returns the optional short classification a module attaches to a
+// finding via Metadata["pattern"] — the kind of match, rendered as a leading
+// bracket before the extracted value (e.g. secret-detect's credential family
+// "JWT" / "Google API key"). Empty when the module sets no such label, so the
+// console line is unchanged for every module that doesn't opt in.
+func patternLabel(output *ResultEvent) string {
+	if output == nil || output.Metadata == nil {
+		return ""
+	}
+	if v, ok := output.Metadata["pattern"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
 }
 
 // severityColor returns ANSI color coded severity string with symbol

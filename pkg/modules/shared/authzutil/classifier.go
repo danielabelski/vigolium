@@ -163,6 +163,20 @@ func ClassifyParam(name, value string, isPathParam bool, pathSegments []string) 
 		resourceNoun, pathScore = ClassifyPathContext(pathSegments, value)
 	}
 
+	// A bare sequential integer is the single most ambiguous "value" signal: a
+	// download-bandwidth reading, a metric, an HTTP status code, a page number,
+	// a Unix timestamp and a positional path segment are all just digits, and
+	// only a tiny fraction are enumerable object references. On its own it is not
+	// enough to call a parameter an object ID — that inference needs corroboration
+	// from either a recognizable identifier name (id, user_id, *_id, …) or a
+	// resource-noun path context (/users/123). Without either, drop the value
+	// signal so telemetry/pagination parameters like
+	// connection_download_bandwidth_bps=1520435, page_number=5, value=48741 or
+	// responseStatus=200 are no longer misreported as IDOR candidates.
+	if idType == SequentialInt && nameSignal == NoSignal && resourceNoun == "" {
+		valueScore = 0
+	}
+
 	totalScore := nameScore + valueScore + pathScore
 
 	return IDClassification{

@@ -78,6 +78,46 @@ func TestScanPerRequest_NumericFilteredOut(t *testing.T) {
 	assert.Empty(t, results)
 }
 
+// TestScanPerRequest_PathSegmentNotReflected is the regression for the dominant
+// false positive across the Snapchat scan corpus: a route name reflecting in its
+// own page. "/about" renders a page that naturally contains "about" (nav, title,
+// canonical link), so treating the path segment as a reflected parameter is noise.
+// Path segments must be skipped; only real query/body parameter values count.
+func TestScanPerRequest_PathSegmentNotReflected(t *testing.T) {
+	t.Parallel()
+	m := New()
+	ctx := makeHTTPCtx(
+		"GET /about HTTP/1.1",
+		"text/html",
+		`<html><head><link rel="canonical" href="/about"></head><body><nav>About us</nav></body></html>`,
+	)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "a reflected path segment is a route name in its own page, not an injection signal")
+}
+
+// TestScanPerRequest_QueryReflectedDespitePathSegment ensures skipping path
+// segments does not suppress a genuine query-parameter reflection sharing the
+// same request.
+func TestScanPerRequest_QueryReflectedDespitePathSegment(t *testing.T) {
+	t.Parallel()
+	m := New()
+	ctx := makeHTTPCtx(
+		"GET /about?ref=hello-world HTTP/1.1",
+		"text/html",
+		`<html><body>About page for hello-world</body></html>`,
+	)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	assert.Contains(t, results[0].ExtractedResults[0], "ref=hello-world")
+	for _, r := range results[0].ExtractedResults {
+		assert.NotContains(t, r, "1=about", "positional path segment must not be reported")
+	}
+}
+
 // TestScanPerRequest_NonHTML drives a JSON response (non-HTML) with a reflected
 // value and expects the module to bail out before scanning.
 func TestScanPerRequest_NonHTML(t *testing.T) {

@@ -249,6 +249,111 @@ func noiseBody(n int64) string {
 	return fmt.Sprintf("{\"data\":\"%020d\",\"pad\":%q}", n, strings.Repeat("x", 120))
 }
 
+// distinctObjectServer serves a valid 200 object embedding whatever value the
+// given parameter carries, so any neighbor value returns a distinct >100-byte
+// body — the exact shape that trips the neighbor-differs IDOR oracle. It is used
+// by the control-parameter regressions to prove those params are skipped BEFORE
+// any probe is sent (probe counter stays zero), not merely filtered afterwards.
+func distinctObjectServer(t *testing.T, param string, probes *int64) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(probes, 1)
+		v := r.URL.Query().Get(param)
+		_, _ = fmt.Fprintf(w, "{\"%s\":%q,\"owner\":%q,\"pad\":%q}", param, v, "user-"+v, strings.Repeat("x", 120))
+	}))
+}
+
+// TestScanPerInsertionPoint_PaginationParamSkipped is the regression for the
+// reported pagination false positive: a page_size / page_number / limit
+// parameter carries a windowing value, not an object reference, so predicting
+// ±1 legitimately returns a shorter/longer page. Even though the backend serves
+// a distinct 200 body for every value, the module must skip the parameter
+// without sending a single probe.
+func TestScanPerInsertionPoint_PaginationParamSkipped(t *testing.T) {
+	t.Parallel()
+	for _, param := range []string{"page_size", "page_number", "limit", "offset"} {
+		param := param
+		t.Run(param, func(t *testing.T) {
+			t.Parallel()
+			var probes int64
+			srv := distinctObjectServer(t, param, &probes)
+			defer srv.Close()
+
+			client := modtest.Requester(t)
+			rr := modtest.Response(
+				modtest.Request(t, srv.URL+"/api/objects?"+param+"=20"),
+				"application/json",
+				"{\"owner\":\"user-20\",\"pad\":\""+strings.Repeat("x", 120)+"\"}",
+			)
+			ip := modtest.InsertionPoint(t, rr, param)
+
+			res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+			require.NoError(t, err)
+			assert.Empty(t, res, "a pagination parameter is not an object reference")
+			assert.Zero(t, atomic.LoadInt64(&probes), "a pagination parameter must not be probed at all")
+		})
+	}
+}
+
+// TestScanPerInsertionPoint_FrameworkCounterSkipped is the regression for the
+// Salesforce Aura false positives: `r` is a per-page request counter and `_dfs`
+// is a framework definition-service version — neither is an enumerable object
+// reference, and the underscore-prefixed convention marks reserved framework
+// parameters. The module must skip them before probing.
+func TestScanPerInsertionPoint_FrameworkCounterSkipped(t *testing.T) {
+	t.Parallel()
+	for _, param := range []string{"r", "_dfs", "_lrmc"} {
+		param := param
+		t.Run(param, func(t *testing.T) {
+			t.Parallel()
+			var probes int64
+			srv := distinctObjectServer(t, param, &probes)
+			defer srv.Close()
+
+			client := modtest.Requester(t)
+			rr := modtest.Response(
+				modtest.Request(t, srv.URL+"/s/sfsites/aura?"+param+"=31"),
+				"application/json",
+				"{\"owner\":\"user-31\",\"pad\":\""+strings.Repeat("x", 120)+"\"}",
+			)
+			ip := modtest.InsertionPoint(t, rr, param)
+
+			res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+			require.NoError(t, err)
+			assert.Empty(t, res, "a framework request counter / version is not an object reference")
+			assert.Zero(t, atomic.LoadInt64(&probes), "a framework control parameter must not be probed at all")
+		})
+	}
+}
+
+// TestScanPerInsertionPoint_EpochTimestampSkipped is the regression for the
+// Salesforce static-resource cache-buster false positive:
+// /resource/1603755438000/NavStyleSheet embeds a 13-digit millisecond epoch
+// timestamp as a positional path segment. That value is a last-modified cache
+// key, not an enumerable id, so its ±1 neighbor is meaningless and the module
+// must not probe it.
+func TestScanPerInsertionPoint_EpochTimestampSkipped(t *testing.T) {
+	t.Parallel()
+	var probes int64
+	// "modified" is neither id-named nor a control param, so the finding can only
+	// be suppressed by the epoch-timestamp value guard itself.
+	srv := distinctObjectServer(t, "modified", &probes)
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(
+		modtest.Request(t, srv.URL+"/resource?modified=1603755438000"),
+		"application/json",
+		"{\"owner\":\"user\",\"pad\":\""+strings.Repeat("x", 120)+"\"}",
+	)
+	ip := modtest.InsertionPoint(t, rr, "modified")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a 13-digit epoch-ms cache-buster is not an object reference")
+	assert.Zero(t, atomic.LoadInt64(&probes), "an epoch-timestamp value must not be probed at all")
+}
+
 // TestScanPerInsertionPoint_NonDeterministicEndpoint is the regression for the
 // sequential-id false positive: the backend returns different content on every
 // request regardless of the id, so a predicted id+/-1 "returns a valid different

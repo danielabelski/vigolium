@@ -37,9 +37,12 @@ var devProbes = []devProbe{
 		desc:    "SockJS node info endpoint exposed, indicating webpack dev server is accessible",
 	},
 	{
-		path:    "/__open-in-editor",
-		name:    "Vue CLI Open-in-Editor",
-		markers: []string{},
+		path: "/__open-in-editor",
+		name: "Vue CLI Open-in-Editor",
+		// launch-editor-middleware (react-dev-utils / @vue/cli) identifies itself in
+		// its response when the `file` query param is missing. Requiring that token
+		// stops the probe firing on any app that merely returns a 200 for this path.
+		markers: []string{"launch-editor", "launchEditor", "required query param"},
 		desc:    "Vue CLI open-in-editor debug endpoint exposed, potentially allowing arbitrary file reads",
 	},
 	{
@@ -49,20 +52,22 @@ var devProbes = []devProbe{
 		desc:       "Nuxt.js hot module replacement endpoint exposed, indicating a development server in production",
 	},
 	{
-		path:    "/__remix_dev/",
-		name:    "Remix Dev Server",
-		markers: []string{},
-		desc:    "Remix development server endpoint exposed, indicating dev mode is accessible in production",
+		path:       "/__remix_dev/",
+		name:       "Remix Dev Server",
+		expectedCT: "text/event-stream",
+		desc:       "Remix development server endpoint exposed, indicating dev mode is accessible in production",
 	},
 	{
-		path: "/__esbuild__/",
-		name: "esbuild Dev Server",
-		desc: "esbuild development server endpoint exposed",
+		path:       "/__esbuild__/",
+		name:       "esbuild Dev Server",
+		expectedCT: "text/event-stream",
+		desc:       "esbuild development server endpoint exposed",
 	},
 	{
-		path: "/__parcel_hmr/",
-		name: "Parcel HMR",
-		desc: "Parcel hot module replacement endpoint exposed",
+		path:       "/__parcel_hmr/",
+		name:       "Parcel HMR",
+		expectedCT: "text/event-stream",
+		desc:       "Parcel hot module replacement endpoint exposed",
 	},
 	{
 		path:       "/_next/turbopack-hmr",

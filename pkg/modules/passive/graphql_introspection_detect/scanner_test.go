@@ -16,7 +16,9 @@ func TestNew(t *testing.T) {
 	require.NotNil(t, m)
 	assert.Equal(t, ModuleID, m.ID())
 	assert.Equal(t, ModuleName, m.Name())
-	assert.Equal(t, severity.Medium, m.Severity())
+	// Introspection-enabled is schema disclosure / a hardening gap (many public
+	// GraphQL APIs enable it by design), reported as a Low-severity lead.
+	assert.Equal(t, severity.Low, m.Severity())
 	assert.Equal(t, severity.Firm, m.Confidence())
 	assert.Equal(t, modkit.PassiveScanScopeResponse, m.Scope())
 	assert.Equal(t, modkit.ScanScopeRequest, m.ScanScopes())

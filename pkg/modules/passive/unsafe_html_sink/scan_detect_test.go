@@ -79,6 +79,60 @@ func TestScanPerRequest_EvalSuppressedInTestFile(t *testing.T) {
 	assert.Empty(t, results)
 }
 
+// TestScanPerRequest_ReactRuntimePropFilter_NoFinding ensures React's own
+// runtime prop-filter, which string-compares the prop name
+// ("dangerouslySetInnerHTML"!==a), is not flagged — this bare-string mention was
+// the dominant false positive on every React main-*.js bundle.
+func TestScanPerRequest_ReactRuntimePropFilter_NoFinding(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `function f(r,n){for(var a in r)if(r.hasOwnProperty(a)&&"children"!==a&&"dangerouslySetInnerHTML"!==a&&void 0!==r[a]){}}`
+	ctx := makeHTTPCtx("/_next/static/chunks/main-93dbaebda72da021.js", "application/javascript", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "React runtime prop-name string comparison must not be flagged")
+}
+
+// TestScanPerRequest_MinifiedDangerousProp_Firing keeps a genuine minified
+// dangerouslySetInnerHTML object assignment (dangerouslySetInnerHTML:{__html:x}).
+func TestScanPerRequest_MinifiedDangerousProp_Firing(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `e.createElement("div",{dangerouslySetInnerHTML:{__html:a}})`
+	ctx := makeHTTPCtx("/app/chunk.js", "application/javascript", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, results, "a real dangerouslySetInnerHTML assignment must still be flagged")
+}
+
+// TestScanPerRequest_EmptyClearingWrites_NoFinding drops inert clearing/no-op
+// sink writes (el.innerHTML="", document.write("")).
+func TestScanPerRequest_EmptyClearingWrites_NoFinding(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `el.innerHTML = ""; frame.document.write('');`
+	ctx := makeHTTPCtx("/WebResource.axd", "application/javascript", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "empty clearing writes carry no markup and must not be flagged")
+}
+
+// TestScanPerRequest_NonEmptyInnerHTML_Firing keeps a real innerHTML assignment
+// with a dynamic value.
+func TestScanPerRequest_NonEmptyInnerHTML_Firing(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `el.innerHTML = buildRow(userInput);`
+	ctx := makeHTTPCtx("/app/render.js", "application/javascript", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, results, "a non-empty innerHTML assignment must still be flagged")
+}
+
 // TestScanPerRequest_CleanCode verifies that benign JS code produces no findings.
 func TestScanPerRequest_CleanCode(t *testing.T) {
 	t.Parallel()

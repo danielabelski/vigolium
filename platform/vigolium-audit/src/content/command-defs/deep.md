@@ -298,7 +298,7 @@ If `VIGOLIUM_AUDIT_INFO_AVAILABLE=true` (or `vigolium-results/INFO.md` exists in
 
 Spawn `vigolium-audit:threat-modeler` (foreground) with the following addition to the prompt:
 
-> "If `vigolium-results/INFO.md` exists, read it first and use it as authoritative for the sections it covers (per the agent's INFO.md handling rules). Run domain attack research, threat modeling, and Phase D5 extraction targets as normal. In `## Architecture Model`, emit an explicit `Multi-service: true|false` line — `true` only when more than one independently deployable service/process is present (multiple distinct Dockerfiles / compose service definitions / `services/*` / `apps/*` / `cmd/*` entry points, or in-repo internal HTTP/gRPC/queue peers). This marker gates Phase D5 cross-service edge enumeration and the Phase D8 chamber's cross-service taint reasoning."
+> "If `vigolium-results/INFO.md` exists, read it first and use it as authoritative for the sections it covers (per the agent's INFO.md handling rules). Run domain attack research, threat modeling, Phase D5 extraction targets, and Step 6 (seed `vigolium-results/attack-surface/unauthenticated-surface.md`) as normal — Phase D7 access-auditor will later supersede that file with its exhaustive route-matrix version. In `## Architecture Model`, emit an explicit `Multi-service: true|false` line — `true` only when more than one independently deployable service/process is present (multiple distinct Dockerfiles / compose service definitions / `services/*` / `apps/*` / `cmd/*` entry points, or in-repo internal HTTP/gRPC/queue peers). This marker gates Phase D5 cross-service edge enumeration and the Phase D8 chamber's cross-service taint reasoning."
 
 Mark T3 complete.
 
@@ -318,7 +318,7 @@ Run the post-KB phases in these waves instead of one large fan-out:
 
 **Systematic audit (T6):** a single-agent phase that complements Deep Probe. Prompt:
 
-> `vigolium-audit:access-auditor` — "Phase D7: enumerate every route/handler/consumer, build `vigolium-results/attack-surface/authz-matrix.md`, file drafts `vigolium-results/findings-draft/p6-<NNN>-<slug>.md`. KB: vigolium-results/attack-surface/knowledge-base-report.md. Coordinate with Phase D6 — check vigolium-results/probe-workspace/*/probe-summary.md before filing to avoid duplicate drafts."
+> `vigolium-audit:access-auditor` — "Phase D7: enumerate every route/handler/consumer, build `vigolium-results/attack-surface/authz-matrix.md`, run Step 3b to supersede `vigolium-results/attack-surface/unauthenticated-surface.md` (Phase D4 seeded a best-effort copy — replace it with the exhaustive matrix-derived version, carrying over any non-route entries it captured), file drafts `vigolium-results/findings-draft/p6-<NNN>-<slug>.md`. KB: vigolium-results/attack-surface/knowledge-base-report.md. Coordinate with Phase D6 — check vigolium-results/probe-workspace/*/probe-summary.md before filing to avoid duplicate drafts."
 
 **Deep Probe Dispatch (T5):**
 
@@ -486,7 +486,7 @@ rm -rf vigolium-results/semgrep-rules/
 rm -rf vigolium-results/semgrep-res/
 rm -f vigolium-results/attack-pattern-registry.json
 ```
-Retained: `vigolium-results/audit-state.json`, `vigolium-results/file-state.json`, `vigolium-results/INFO.md` (if present), `vigolium-results/attack-surface/knowledge-base-report.md`, `vigolium-results/attack-surface/cross-service-edges.{json,md}` (if multi-service), `vigolium-results/attack-surface/intent-corpus.json`, `vigolium-results/attack-surface/intent-reconciliation.md`, `vigolium-results/findings/`, `vigolium-results/findings-theoretical/` (if present), `vigolium-results/final-audit-report.md`. If consistency checks failed, skip cleanup and report the failures to the user first.
+Retained: `vigolium-results/audit-state.json`, `vigolium-results/file-state.json`, `vigolium-results/INFO.md` (if present), `vigolium-results/attack-surface/knowledge-base-report.md`, `vigolium-results/attack-surface/unauthenticated-surface.md`, `vigolium-results/attack-surface/cross-service-edges.{json,md}` (if multi-service), `vigolium-results/attack-surface/intent-corpus.json`, `vigolium-results/attack-surface/intent-reconciliation.md`, `vigolium-results/findings/`, `vigolium-results/findings-theoretical/` (if present), `vigolium-results/final-audit-report.md`. If consistency checks failed, skip cleanup and report the failures to the user first.
 
 Mark T11 complete (`audits[-1].phases["D12"].status = "complete"`). Update `audits[-1].completed_at` and `audits[-1].status` to `complete`. Print post-audit summary.
 

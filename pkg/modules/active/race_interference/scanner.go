@@ -138,12 +138,30 @@ func (m *Module) ScanPerInsertionPoint(
 	sequentialResults := m.sendSequentialProbes(ctx, ip, httpClient, anchor)
 
 	var sequentialWrongIdResults []*ProbeResult
+	var sequentialDivergent []*ProbeResult
 	for _, result := range sequentialResults {
 		if result.Err != nil {
 			continue
 		}
 		if result.HasWrongId {
 			sequentialWrongIdResults = append(sequentialWrongIdResults, result)
+		}
+		// Determinism control for the Request Interference leg. A SEQUENTIAL probe
+		// (no concurrency) that still diverges from the baseline proves the endpoint
+		// is non-deterministic on its own — a per-request CSRF token / nonce /
+		// timestamp / SSR shell that the 3-sample baseline under-sampled and marked
+		// static. When that is the case, a PARALLEL divergence is that same
+		// per-request noise, not a concurrency effect, so it must not be reported.
+		// WAF/rate-limit divergence is excluded exactly as in the parallel phase.
+		if !baseline.Matches(result.StatusCode, result.Body, result.Headers) {
+			serverHeader := ""
+			if vals := result.Headers["Server"]; len(vals) > 0 {
+				serverHeader = vals[0]
+			}
+			if !status403To421Filter(baseline.statusCode, result.StatusCode) &&
+				!isWafBlocked(result.StatusCode, serverHeader) {
+				sequentialDivergent = append(sequentialDivergent, result)
+			}
 		}
 	}
 
@@ -198,10 +216,13 @@ func (m *Module) ScanPerInsertionPoint(
 
 	// Request Interference: no wrongId but divergent responses in parallel.
 	// Divergence alone is a weak signal, so we emit at most one finding per
-	// URL (scope-level grouping via ParamFindings) to keep output readable.
+	// URL (scope-level grouping via ParamFindings) to keep output readable, and
+	// only when SEQUENTIAL probes stayed on-baseline — i.e. the divergence is
+	// attributable to concurrency, not to an endpoint that varies every response.
 	if m.options.EnableRequestInterferenceDetection &&
 		len(parallelWrongIdResults) == 0 &&
 		len(parallelDivergent) > 0 &&
+		len(sequentialDivergent) == 0 &&
 		m.reserveInterferenceSlot(scanCtx, urlx.Scheme, urlx.Host, urlx.Path) {
 
 		result := parallelDivergent[0]

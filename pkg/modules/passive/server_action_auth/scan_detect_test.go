@@ -12,13 +12,36 @@ import (
 // makeJSCtx builds a request/response pair serving the given JS body from a .js
 // path so CanProcess accepts it.
 func makeJSCtx(body string) *httpmsg.HttpRequestResponse {
-	rawReq := []byte("GET /app/actions.js HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	return makeJSCtxAt("/app/actions.js", body)
+}
+
+// makeJSCtxAt is makeJSCtx with a caller-chosen request path.
+func makeJSCtxAt(path, body string) *httpmsg.HttpRequestResponse {
+	rawReq := []byte("GET " + path + " HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	req := httpmsg.NewHttpRequestWithService(
 		httpmsg.NewServiceSecure("example.com", 443, true),
 		rawReq,
 	)
 	resp := httpmsg.NewHttpResponse([]byte("HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n\r\n" + body))
 	return httpmsg.NewHttpRequestResponse(req, resp)
+}
+
+// TestScanPerRequest_NextStaticBundleSkipped is the regression for the
+// client-build-artifact false positive: the Next.js compiler ships the
+// "use server" directive string plus loose mutation-shaped tokens
+// (Object.create(...), .remove(...)) in framework runtime chunks, so scanning a
+// /_next/static/ bundle produced one "Server Action Missing Authorization"
+// finding per host. Server action bodies are compiled out of client bundles, so
+// the module must skip these immutable build paths.
+func TestScanPerRequest_NextStaticBundleSkipped(t *testing.T) {
+	t.Parallel()
+	m := New()
+	// Same signal that fires at /app/actions.js, but served from a client bundle.
+	body := `function t(){"use server"};o.create({});e.remove(1)`
+	ctx := makeJSCtxAt("/_next/static/chunks/main-93dbaebda72da021.js", body)
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "a client build artifact must not be scanned for server-action bugs")
 }
 
 func TestNew(t *testing.T) {

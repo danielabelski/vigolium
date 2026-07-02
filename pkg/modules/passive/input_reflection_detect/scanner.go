@@ -82,6 +82,17 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 
 	var reflected []string
 	for _, p := range params {
+		// Skip positional path segments (ParamPathFolder/ParamPathFilename).
+		// A route name is inherently part of the page it renders — "/about" almost
+		// always contains "about" in its nav, title, canonical link or breadcrumb —
+		// so a path segment "reflecting" is not a meaningful injection signal, just
+		// noise. Reflection detection here targets query/body parameter values,
+		// which is where a reflected value points at a real XSS candidate. Path
+		// injection is covered by the active path-XSS scanners.
+		if p.Type() == httpmsg.ParamPathFolder || p.Type() == httpmsg.ParamPathFilename {
+			continue
+		}
+
 		val := p.Value()
 
 		// Filter out uninteresting values

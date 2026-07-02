@@ -16,7 +16,10 @@ var (
 **Fix:** Disable Jackson default typing (use a strict allowlist via PolymorphicTypeValidator), avoid deserializing untrusted data, and suppress stack traces.`
 
 	ModuleConfirmation = "Confirmed when response contains Jackson type discriminator fields or Java deserialization error patterns"
-	ModuleSeverity     = severity.Medium
-	ModuleConfidence   = severity.Tentative
-	ModuleTags         = []string{"java", "deserialization", "light"}
+	// Precondition/lead only ("not confirmed exploitable"); the scanner tiers each
+	// finding (Info for a leaked deser error, Low for @class/@type polymorphic
+	// typing). Low is the ceiling — never Medium.
+	ModuleSeverity   = severity.Low
+	ModuleConfidence = severity.Tentative
+	ModuleTags       = []string{"java", "deserialization", "light"}
 )

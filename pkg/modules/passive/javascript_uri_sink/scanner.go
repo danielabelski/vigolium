@@ -117,6 +117,7 @@ func (m *Module) ScanPerRequest(
 		seen[normalized] = true
 
 		conf := severity.Tentative
+		sev := severity.Info
 		var reflectedParam string
 
 		// Check if any request parameter value appears in the matched sink
@@ -127,6 +128,23 @@ func (m *Module) ScanPerRequest(
 				reflectedParam = param
 				break
 			}
+		}
+
+		// A javascript: URI is only an XSS *sink* when untrusted input reaches it.
+		// With no reflected request parameter the URI is site-authored (or
+		// framework-generated) code that runs the page's own script — an
+		// observation, not a vulnerability — so it stays Info; only a reflected
+		// parameter flowing into the URI escalates to Medium. Inert browser no-ops
+		// (javascript:void(0)) and framework postback/form-submit helpers
+		// (ASP.NET __doPostBack / WebForm_DoPostBackWithOptions, document.form.submit())
+		// carry no URL-supplied script surface at all, so they are dropped
+		// entirely: those were the systematic Medium false positives observed on
+		// static ASP.NET WebForms pages (__doPostBack links, javascript:void(0)).
+		if reflectedParam == "" && isInertJavaScriptURI(matchLower) {
+			continue
+		}
+		if reflectedParam != "" {
+			sev = severity.Medium
 		}
 
 		extracted := []string{
@@ -145,7 +163,7 @@ func (m *Module) ScanPerRequest(
 			Info: output.Info{
 				Name:        "JavaScript URI Sink",
 				Description: fmt.Sprintf("Found javascript: URI in HTML attribute: %s", modkit.Truncate(normalized, 120)),
-				Severity:    ModuleSeverity,
+				Severity:    sev,
 				Confidence:  conf,
 				Tags:        []string{"xss", "javascript-uri", "html-sink"},
 				Reference:   []string{"https://cwe.mitre.org/data/definitions/79.html"},
@@ -158,6 +176,34 @@ func (m *Module) ScanPerRequest(
 	}
 
 	return results, nil
+}
+
+// inertJSURISubstrings are lowercased fragments that mark a javascript: URI as
+// carrying no attacker-reachable script surface: browser no-ops that only cancel
+// default link navigation, and framework-generated postback / form-submit
+// helpers whose invoked symbol is static and framework-controlled. A match on
+// any of these (in the absence of a reflected request parameter) is
+// developer/framework boilerplate, not a sink.
+var inertJSURISubstrings = []string{
+	// Browser no-ops.
+	"javascript:void(0)", "javascript:void 0", "javascript: void(0)",
+	"javascript:;", "javascript:''", "javascript:\"\"",
+	// ASP.NET WebForms postback helpers.
+	"__dopostback", "webform_dopostback", "webform_postbackoptions",
+	// Static form-submit navigation suppressor (document.<form>.submit()).
+	".submit()",
+}
+
+// isInertJavaScriptURI reports whether a matched javascript: attribute is a
+// browser-inert no-op or a framework-generated postback/submit helper that never
+// executes URL-supplied input. matchLower must already be lowercased.
+func isInertJavaScriptURI(matchLower string) bool {
+	for _, inert := range inertJSURISubstrings {
+		if strings.Contains(matchLower, inert) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractParamValues collects parameter values from the request URL query and body.

@@ -121,3 +121,22 @@ func TestContainsLDAPError(t *testing.T) {
 	assert.True(t, containsLDAPError("Bad search filter near token"))
 	assert.False(t, containsLDAPError("everything is fine"))
 }
+
+// TestContainsLDAPError_GenericTokensNotFlagged pins the generic-token false
+// positive: ordinary English / UI phrasing that merely mentions LDAP or a "search
+// filter" must NOT be read as an LDAP-layer error, while genuine driver-class /
+// error-envelope signatures still are.
+func TestContainsLDAPError_GenericTokensNotFlagged(t *testing.T) {
+	t.Parallel()
+
+	// Generic phrasing that used to trip the removed bare tokens — must stay quiet.
+	assert.False(t, containsLDAPError(`<a href="/sso">Login with LDAP</a>`), "a bare LDAP mention is not an error")
+	assert.False(t, containsLDAPError(`Please adjust your search filter and try again`), "a UI 'search filter' phrase is not an error")
+	assert.False(t, containsLDAPError(`<div class="invalid attribute">check the form</div>`), "a generic 'invalid attribute' is not an LDAP error")
+	assert.False(t, containsLDAPError(`image filter error while rendering thumbnail`), "a generic 'filter error' is not an LDAP error")
+
+	// Genuine LDAP-layer signatures still detected.
+	assert.True(t, containsLDAPError(`LDAP: error code 49 - 80090308: LdapErr: DSID-0C0903A9`), "standard LDAP error-code envelope must match")
+	assert.True(t, containsLDAPError(`com.sun.jndi.ldap.LdapCtx.processReturnCode`), "JNDI LDAP driver class must match")
+	assert.True(t, containsLDAPError(`javax.naming.directory.InvalidSearchFilterException`), "JNDI naming exception must match")
+}

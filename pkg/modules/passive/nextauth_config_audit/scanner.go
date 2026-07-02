@@ -111,15 +111,23 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		// Check cookie security flags
+		// Check cookie security flags. Severity tracks the WORST issue rather than a
+		// flat Medium: a missing Secure/HttpOnly flag on a session cookie is a real
+		// session-theft exposure (Medium), but a missing SameSite attribute (browsers
+		// default to Lax) or SameSite=None-without-Secure (the browser rejects the
+		// cookie) is CSRF hygiene (Low). Reporting a SameSite-only cookie at Medium
+		// over-severed it.
 		var issues []string
+		sev := severity.Low
 
 		if isHTTPS && !strings.Contains(cookieLower, "secure") {
 			issues = append(issues, "Missing Secure flag on HTTPS")
+			sev = severity.Medium
 		}
 
 		if !strings.Contains(cookieLower, "httponly") {
 			issues = append(issues, "Missing HttpOnly flag")
+			sev = severity.Medium
 		}
 
 		if !strings.Contains(cookieLower, "samesite") {
@@ -141,7 +149,7 @@ func (m *Module) ScanPerRequest(
 				Info: output.Info{
 					Name:        fmt.Sprintf("NextAuth.js Insecure Cookie: %s", matchedName),
 					Description: fmt.Sprintf("NextAuth session cookie %q has insecure configuration: %s", matchedName, strings.Join(issues, "; ")),
-					Severity:    severity.Medium,
+					Severity:    sev,
 					Confidence:  severity.Firm,
 					Tags:        []string{"nextauth", "cookies", "session-management"},
 					Reference:   []string{"https://next-auth.js.org/configuration/options#cookies"},

@@ -58,6 +58,22 @@ func TestScanPerRequest_NoContext(t *testing.T) {
 	assert.Empty(t, results)
 }
 
+// TestScanPerRequest_SmallCountSkipped is the regression for the public-content
+// false positive: a Zendesk-style help-center API returns a full pagination
+// envelope (count + page_count + per_page + page) but the collection is tiny
+// (5 categories). A count that small discloses nothing business-sensitive, so it
+// must be suppressed even though every pagination marker is present.
+func TestScanPerRequest_SmallCountSkipped(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `{"categories": [], "count": 5, "page": 1, "per_page": 100, "page_count": 1}`
+	ctx := makeHTTPCtx("/api/v2/help_center/en-us/categories", "application/json", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "a tiny public collection count is not a sensitive disclosure")
+}
+
 // TestScanPerRequest_NonJSON verifies that HTML responses are skipped entirely.
 func TestScanPerRequest_NonJSON(t *testing.T) {
 	t.Parallel()

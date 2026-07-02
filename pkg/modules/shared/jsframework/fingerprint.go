@@ -17,6 +17,21 @@ func HasNextJSMarkers(body string) bool {
 	return strings.Contains(body, "__NEXT_DATA__") || strings.Contains(body, "/_next/")
 }
 
+// IsClientBuildArtifact reports whether a path is under a JS framework's
+// immutable client build-output directory (Next.js `/_next/static/`, Nuxt
+// `/_nuxt/`). Server-only data-fetching / caching / server-action code is
+// compiled OUT of these bundles by the bundler, so a passive detector that
+// greps a served chunk for server-side constructs only finds framework-machinery
+// strings — the same bundle hash appears across every site using that framework,
+// producing one false positive per host. Source-analysis detectors should skip
+// these paths. NOTE: server_only_boundary_audit is the deliberate exception — it
+// scans exactly these paths to catch server code that leaked into the client
+// bundle — so it must NOT call this.
+func IsClientBuildArtifact(path string) bool {
+	p := strings.ToLower(path)
+	return strings.Contains(p, "/_next/static/") || strings.Contains(p, "/_nuxt/")
+}
+
 // LooksLikeNextJS returns true if the host is fingerprinted as Next.js,
 // or the body contains Next.js markers as a fallback.
 func LooksLikeNextJS(host, body string) bool {

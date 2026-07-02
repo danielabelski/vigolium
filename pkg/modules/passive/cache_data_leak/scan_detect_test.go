@@ -46,6 +46,42 @@ func TestScanPerRequest_StaticPropsAuth(t *testing.T) {
 	assert.Contains(t, results[0].Info.Name, "Cache Data Leak")
 }
 
+// TestScanPerRequest_NextStaticBundleSkipped is the regression for the reported
+// framework-runtime false positive: the Next.js client bundle
+// `/_next/static/chunks/main-*.js` ships the string "getStaticProps" plus loose
+// tokens like sessionStorage / document.cookie on every Next.js site, so the old
+// bare-string pair fired once per host. Server data-fetching code is stripped
+// from client bundles, so a match under /_next/static/ must be skipped.
+func TestScanPerRequest_NextStaticBundleSkipped(t *testing.T) {
+	t.Parallel()
+	m := New()
+	// Shape of a minified framework bundle: references getStaticProps as machinery
+	// and touches sessionStorage / cookies / an Authorization header — none of
+	// which is a real server getStaticProps auth fetch.
+	body := `t.getStaticProps;var e=window.sessionStorage;document.cookie;h.set("Authorization",x)`
+	ctx := makeJSCtx("/snapchat-dot-com/_next/static/chunks/main-93dbaebda72da021.js", body)
+	require.True(t, m.CanProcess(ctx))
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "a Next.js client build artifact must not be scanned for server caching bugs")
+}
+
+// TestScanPerRequest_BundleStringReferenceOnly verifies that even outside
+// /_next/static/, a bare "getStaticProps" reference paired with loose tokens
+// (sessionStorage, an Authorization header) no longer fires — Pattern 1 now
+// requires a getStaticProps definition and a call-shaped server accessor.
+func TestScanPerRequest_BundleStringReferenceOnly(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `n.getStaticProps&&n.getStaticProps();var s=window.sessionStorage,c=document.cookie;`
+	ctx := makeJSCtx("/app.bundle.js", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "a bare getStaticProps reference plus loose session tokens is not a real static-generation auth leak")
+}
+
 // TestScanPerRequest_Clean verifies a benign static page with no auth access
 // produces no findings.
 func TestScanPerRequest_Clean(t *testing.T) {

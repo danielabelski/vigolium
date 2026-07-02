@@ -447,6 +447,16 @@ func (m *Module) testMethodSwitching(
 				continue
 			}
 
+			// Reproduce control (parity with testNoAuth/testDowngradedAuth): re-issue
+			// the switched-method request and require the same privileged content
+			// across fresh samples. A per-request-varying body (randomized SSR shell,
+			// live dashboard, per-request token) that merely differs from the
+			// method-baseline once will not reproduce content-similar, so it is
+			// dropped rather than flagged as a function-level auth bypass.
+			if !confirmPrivilegedReproduces(ctx, httpClient, modifiedRaw, respStatus, candBody) {
+				continue
+			}
+
 			ev := modkit.NewEvidenceCollector()
 			ev.Add("original-auth", modkit.CtxRequestRaw(ctx), modkit.CtxResponseRaw(ctx))
 			results = append(results, &output.ResultEvent{

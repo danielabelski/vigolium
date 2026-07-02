@@ -16,7 +16,10 @@ var (
 **Fix:** Disable GraphQL introspection in production (set introspection to false) and restrict schema access to trusted internal or development environments only.`
 
 	ModuleConfirmation = "Confirmed when response contains GraphQL introspection fields (__schema/__type) with schema definition markers"
-	ModuleSeverity     = severity.Medium
-	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"graphql", "api", "info-disclosure", "light"}
+	// Introspection being enabled is schema disclosure / a hardening gap, not a
+	// vulnerability on its own — many public GraphQL APIs enable it by design — so
+	// it is a Low-severity lead rather than Medium.
+	ModuleSeverity   = severity.Low
+	ModuleConfidence = severity.Firm
+	ModuleTags       = []string{"graphql", "api", "info-disclosure", "light"}
 )

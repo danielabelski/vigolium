@@ -77,31 +77,34 @@ func calibrateTagJitter(ctx *httpmsg.HttpRequestResponse, httpClient *http.Reque
 	}
 }
 
-// fetchProbeOutcome re-issues raw and returns its response status code and body's
-// tag multiset. ok is false on any parse/transport error or nil response.
-// NoClustering bypasses the requester's 500ms response cache so each sample is a
-// genuinely fresh render — a cached replay would report zero variance and defeat
-// both jitter calibration and the confirm re-fetch.
-func fetchProbeOutcome(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, raw []byte) (int, map[string]int, bool) {
+// fetchProbeResponse re-issues raw and returns its response status code and body.
+// ok is false on any parse/transport error or nil response. NoClustering bypasses
+// the requester's 500ms response cache so each sample is a genuinely fresh render —
+// a cached replay would report zero variance and defeat both jitter calibration and
+// the confirm re-fetch.
+func fetchProbeResponse(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, raw []byte) (int, string, bool) {
 	// raw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
 	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 	if err != nil {
-		return 0, nil, false
+		return 0, "", false
 	}
 	defer resp.Close()
 	if resp.Response() == nil {
-		return 0, nil, false
+		return 0, "", false
 	}
-	return resp.Response().StatusCode, extractTagCounts(resp.Body().String()), true
+	return resp.Response().StatusCode, resp.Body().String(), true
 }
 
 // fetchTagCounts re-issues raw and returns its response body's tag multiset,
 // discarding the status — used by jitter calibration, which only measures body
 // variance. ok is false on any parse/transport error or nil response.
 func fetchTagCounts(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, raw []byte) (map[string]int, bool) {
-	_, counts, ok := fetchProbeOutcome(ctx, httpClient, raw)
-	return counts, ok
+	_, body, ok := fetchProbeResponse(ctx, httpClient, raw)
+	if !ok {
+		return nil, false
+	}
+	return extractTagCounts(body), true
 }
 
 // behaviorChange describes what changed between baseline and fuzzed response.
@@ -197,6 +200,19 @@ func detectChange(baseline *detectionBaseline, fuzzBody string, fuzzStatus int) 
 	// before it is reported, so a one-off blip or a flapping baseline never survives.
 	change.statusInteresting = notableStatusTransition(baseline.statusCode, fuzzStatus)
 
+	// A →5xx transition is only a genuine input-handling lead when the server LEAKS
+	// an application error (stack trace, framework/SQL exception, debug page). A
+	// generic edge/decoder 5xx — an empty body, "Internal Server Error", or a
+	// "URI malformed" reply to a malformed percent-escape (%ff, %00, an invalid
+	// %-escape in the polyglot) injected into the path or a forwarding header — is
+	// infrastructure rejecting malformed input, not the application. It reproduces
+	// deterministically (so confirmStatusTransition can't filter it) and fires on
+	// essentially every CDN/Node/Express-fronted host: pure noise. The 403→200
+	// access-control flip carries no body requirement and is left untouched.
+	if change.statusInteresting && fuzzStatus >= 500 && !bodyLeaksServerError(fuzzBody) {
+		change.statusInteresting = false
+	}
+
 	change.IsInteresting = tagsChanged || change.statusInteresting
 	return change
 }
@@ -229,7 +245,25 @@ func confirmChange(
 	if totalTags(counts) < minComparableTags {
 		return false
 	}
-	return tagDistance(baseline.tagCounts, counts) > baseline.tagJitter+tagChangeMargin
+	if tagDistance(baseline.tagCounts, counts) <= baseline.tagJitter+tagChangeMargin {
+		return false // the probe's divergence did not reproduce
+	}
+	// Fresh no-payload control (parity with the status leg's ctrl==baseline gate):
+	// the divergence must be payload-DRIVEN, not ambient page variance the 2-sample
+	// jitter under-sampled. If the UNMODIFIED request now diverges from the baseline
+	// by as much, the page simply re-renders differently every request (rotating
+	// feed, personalized SSR shell, A/B block) and the tag delta is that noise, not
+	// input handling. Only a control that itself carries real structure can disprove;
+	// a near-empty flaky control is inconclusive and left to the probe evidence.
+	ctrlCounts, ok := fetchTagCounts(ctx, httpClient, ctx.Request().Raw())
+	if !ok {
+		return false
+	}
+	if totalTags(ctrlCounts) >= minComparableTags &&
+		tagDistance(baseline.tagCounts, ctrlCounts) > baseline.tagJitter+tagChangeMargin {
+		return false
+	}
+	return true
 }
 
 // confirmStatusTransition validates that a notable status transition is genuinely
@@ -249,11 +283,17 @@ func confirmStatusTransition(
 	baseline *detectionBaseline,
 	probeRaw []byte,
 ) bool {
-	probeStatus, _, ok := fetchProbeOutcome(ctx, httpClient, probeRaw)
+	probeStatus, probeBody, ok := fetchProbeResponse(ctx, httpClient, probeRaw)
 	if !ok || !notableStatusTransition(baseline.statusCode, probeStatus) {
 		return false
 	}
-	ctrlStatus, _, ok := fetchProbeOutcome(ctx, httpClient, ctx.Request().Raw())
+	// Mirror detectChange's leak gate on the fresh re-fetch: a reproduced →5xx must
+	// still leak an application error, or it is generic edge/decoder rejection that
+	// happens to reproduce (as malformed-input rejections always do).
+	if probeStatus >= 500 && !bodyLeaksServerError(probeBody) {
+		return false
+	}
+	ctrlStatus, _, ok := fetchProbeResponse(ctx, httpClient, ctx.Request().Raw())
 	if !ok {
 		return false
 	}

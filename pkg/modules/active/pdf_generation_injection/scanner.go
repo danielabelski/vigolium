@@ -271,6 +271,17 @@ func reflectedHTMLIsGenuine(ctx *httpmsg.HttpRequestResponse, body, contentType 
 	if modkit.IsStaticAssetContentType(contentType) {
 		return false
 	}
+	// The reflection only counts as HTML-injection evidence when it lands in an
+	// HTML rendering context. A response that declares a concrete non-HTML type
+	// (application/json, text/plain, XML, ...) treats an injected <h1> as a data
+	// value — a JSON string, an XML text node — that is never rendered as markup
+	// and never fed to a PDF renderer. The FastAPI/Pydantic 422 validation error
+	// echoing the bad parameter back inside its JSON `input` field is the
+	// canonical false positive. An empty/unknown content type fails open so
+	// header-less HTML endpoints still run through the remaining gates.
+	if modkit.IsNonHTMLReflectionContext(contentType) {
+		return false
+	}
 	if modkit.ResemblesObservedPage(ctx, body) {
 		return false
 	}

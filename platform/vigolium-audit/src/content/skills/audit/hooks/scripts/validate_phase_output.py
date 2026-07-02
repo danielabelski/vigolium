@@ -22,6 +22,7 @@ KB_FILE = f"{ATTACK_SURFACE_DIR}/knowledge-base-report.md"
 # Files that may legitimately appear inside vigolium-results/attack-surface/ — anything else there is an orphan.
 KNOWN_ATTACK_SURFACE_FILES: set[str] = {
     "knowledge-base-report.md",
+    "unauthenticated-surface.md",
     "authz-matrix.md",
     "authz-coverage-gaps.md",
     "cross-service-edges.json",

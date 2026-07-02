@@ -12,7 +12,10 @@ var nosqlErrorPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)MongoError|BSON|mongod|MongoClient|TopologyDescription`),
 	regexp.MustCompile(`(?i)E11000 duplicate key|cannot index parallel arrays|\$where requires`),
 	regexp.MustCompile(`(?i)couchdb|org\.apache\.couchdb`),
-	regexp.MustCompile(`(?i)com\.datastax\.driver|InvalidRequestException|SyntaxException.*CQL`),
+	// Bound the SyntaxException→CQL gap (mirrors nosqli_error_based): unbounded
+	// ".*CQL" could bridge a stray "SyntaxException" and a distant "CQL" token in a
+	// large body and wrongly suppress a genuine operator-injection finding.
+	regexp.MustCompile(`(?i)com\.datastax\.driver|InvalidRequestException|SyntaxException.{0,40}CQL`),
 }
 
 const (

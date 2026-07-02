@@ -149,8 +149,15 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	body := ctx.Response().BodyToString()
 
 	var findings []string
+	// sensitiveHits counts ACTUAL sensitive-data matches — the only thing that
+	// makes this a finding. The mere presence of a Remix header or a state blob is
+	// NOT a leak: every Remix page ships window.__remixContext / "loaderData",
+	// so triggering on their presence reported Medium/Firm on every Remix site with
+	// zero sensitive data. Those presence lines are kept only as supporting
+	// evidence, surfaced once a real sensitive match exists.
+	sensitiveHits := 0
 
-	// Check for Remix response headers
+	// Remix response headers — context evidence only, never a trigger.
 	for _, headerName := range remixHeaderNames {
 		headerVal := ctx.Response().Header(headerName)
 		if headerVal != "" {
@@ -165,6 +172,7 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 			continue
 		}
 
+		// Blob presence — context evidence only, never a trigger.
 		findings = append(findings, fmt.Sprintf("Remix state blob detected: %s", blob.name))
 
 		for _, sp := range sensitivePatterns {
@@ -174,11 +182,14 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 					continue
 				}
 				findings = append(findings, fmt.Sprintf("[%s] %s: %s", blob.name, sp.name, modkit.Truncate(match, 120)))
+				sensitiveHits++
 			}
 		}
 	}
 
-	if len(findings) == 0 {
+	// A finding requires at least one real sensitive-data match; presence alone
+	// (header or state blob) is normal for any Remix app and not reportable.
+	if sensitiveHits == 0 {
 		return nil, nil
 	}
 

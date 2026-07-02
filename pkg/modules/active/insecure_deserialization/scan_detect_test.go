@@ -3,6 +3,7 @@ package insecure_deserialization
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -102,6 +103,39 @@ func TestCheckDeserError_ReflectedPayloadNotMatched(t *testing.T) {
 	fw, ok := checkDeserError(`PHP Warning: unserialize(): Error at offset 0 of `+phpPayload, "", phpPayload)
 	require.True(t, ok, "a real unserialize() error must still be detected even when it quotes the payload")
 	assert.Equal(t, "PHP", fw)
+}
+
+// TestCheckDeserError_LargeBenignBodyNoSpanFP pins the loosely-anchored-span false
+// positive class (the sibling of the Oracle.*?Driver FP): two anchor words of a
+// two-anchor signature occurring far apart in a large benign single-line body —
+// e.g. a minified SPA shell — must NOT be matched as a spanning "error". A genuine
+// compact signature in the same page still matches.
+func TestCheckDeserError_LargeBenignBodyNoSpanFP(t *testing.T) {
+	t.Parallel()
+
+	// "ClassCastException" and "deserializ" 60KB apart in unrelated content: the old
+	// unbounded ".*deserializ" would bridge them; the bounded pattern + span guard
+	// must not.
+	spanBody := `java.lang.ClassCastException occurred while rendering; ` +
+		strings.Repeat(`this is ordinary page content that mentions neither anchor. `, 1200) +
+		` deserializ-ation settings panel`
+	_, ok := checkDeserError(spanBody, "", "")
+	assert.False(t, ok, "two anchors far apart in a large benign body must not match")
+
+	// A genuine, compact Java deserialization error still matches.
+	fw, ok := checkDeserError(
+		`java.lang.ClassCastException: cannot be cast during deserialization of payload`, "", "")
+	require.True(t, ok, "a compact ClassCastException deserialization error must still match")
+	assert.Equal(t, "Java", fw)
+
+	// Spring FQCN filler must stay within the class-name character set: a
+	// "org.springframework." token and a distant "SerializationException" word
+	// separated by JSON/HTML must not bridge.
+	springSpan := `"org.springframework.boot":true,` +
+		strings.Repeat(`"feature.someFlagEnabled":false,`, 400) +
+		`"label":"SerializationException docs"`
+	_, ok = checkDeserError(springSpan, "", "")
+	assert.False(t, ok, "spring FQCN and a distant SerializationException word must not bridge")
 }
 
 // TestScanPerInsertionPoint_ReflectedPayloadNoFinding drives the full scan against

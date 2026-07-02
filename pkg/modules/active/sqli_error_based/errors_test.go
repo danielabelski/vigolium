@@ -1,6 +1,11 @@
 package sqli_error_based
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/vigolium/vigolium/pkg/modules/modkit"
+)
 
 func TestCheckBodyContainsErrorMsg_SequelizeSQLite(t *testing.T) {
 	tests := []struct {
@@ -90,6 +95,100 @@ func TestCheckBodyContainsErrorMsg_TiDBBoundaries(t *testing.T) {
 			}
 			if hit && dbName != "TiDB" {
 				t.Errorf("dbName = %q, want %q", dbName, "TiDB")
+			}
+		})
+	}
+}
+
+// TestCheckBodyContainsErrorMsg_OracleDriverBoundaries pins the tightened
+// "Oracle...Driver" pattern: a genuine Oracle driver error (the two tokens in one
+// short phrase) must still match, but the two words occurring far apart in
+// ordinary page content must NOT. The motivating false positive was a 547KB
+// Salesforce Aura app shell whose inline analytics feature-flag list carried
+// "...userHasAwsRdsOracleEnabled..." and a lone "enableTopDriversBreakdown" label
+// ~60KB later, matched by the old unbounded "Oracle.*?Driver" as a single span and
+// reported as Critical/Certain Oracle SQLi on both scanned hosts.
+func TestCheckBodyContainsErrorMsg_OracleDriverBoundaries(t *testing.T) {
+	// Reproduces the real Salesforce shell structure: an "Oracle" feature-flag and
+	// a far-away "Driver" label separated by unrelated JSON. The gap exceeds the
+	// bounded pattern's window (and the general span guard), so it must not match.
+	salesforceShell := `"UnifiedAnalytics.userHasAwsRdsOracleEnabled":false,` +
+		strings.Repeat(`"UnifiedAnalytics.userHasSomeConnectorEnabled":false,`, 40) +
+		`"cs.businessUser.enableTopDriversBreakdown":true`
+
+	tests := []struct {
+		name    string
+		body    string
+		wantHit bool
+	}{
+		{
+			name:    "genuine Oracle ODBC Driver error matches",
+			body:    `Microsoft OLE DB Provider for ODBC Drivers error '80040e14' [Oracle][ODBC Driver]invalid SQL statement`,
+			wantHit: true,
+		},
+		{
+			name:    "genuine Oracle JDBC Driver phrase matches",
+			body:    `Error initializing Oracle JDBC Driver: ORA-12154`,
+			wantHit: true,
+		},
+		{
+			name:    "Oracle flag and distant Drivers label do not match",
+			body:    salesforceShell,
+			wantHit: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbName, _, hit := checkBodyContainsErrorMsg(tt.body)
+			if hit != tt.wantHit {
+				t.Errorf("hit = %v, want %v (db=%q)", hit, tt.wantHit, dbName)
+			}
+			if hit && dbName != "Oracle" {
+				t.Errorf("dbName = %q, want %q", dbName, "Oracle")
+			}
+		})
+	}
+}
+
+// TestCheckBodyContainsErrorMsg_OverLongMatchSpanGuard pins the general
+// over-long-match-span safety net: a loosely-anchored "X.*?Y" pattern whose lazy
+// filler bridges an implausibly large span is page noise, not an error leak, and
+// is rejected — while a compact, genuine error of the same DBMS still matches.
+func TestCheckBodyContainsErrorMsg_OverLongMatchSpanGuard(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantHit bool
+		wantDB  string
+	}{
+		{
+			name:    "compact DB2 SQLCODE/SQLSTATE error matches",
+			body:    `SQLCODE=-104, SQLSTATE=42601, SQLERRMC=;END-EXEC`,
+			wantHit: true,
+			wantDB:  "IBM DB2",
+		},
+		{
+			name:    "over-long SQLCODE..SQLSTATE span is rejected",
+			body:    `SQLCODE` + strings.Repeat("1", modkit.MaxErrorSignatureSpan+64) + `SQLSTATE`,
+			wantHit: false,
+		},
+		{
+			name:    "compact error still detected when surrounded by unrelated content",
+			body:    strings.Repeat("benign page content ", 200) + `ORA-01756: quoted string not properly terminated`,
+			wantHit: true,
+			wantDB:  "Oracle",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbName, _, hit := checkBodyContainsErrorMsg(tt.body)
+			if hit != tt.wantHit {
+				t.Errorf("hit = %v, want %v (db=%q)", hit, tt.wantHit, dbName)
+			}
+			if hit && tt.wantDB != "" && dbName != tt.wantDB {
+				t.Errorf("dbName = %q, want %q", dbName, tt.wantDB)
 			}
 		})
 	}

@@ -1,11 +1,14 @@
 package bfla_detection
 
 import (
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,6 +83,68 @@ func TestScanPerRequest_DetectsBFLA(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "expected a BFLA finding when the admin page is reachable without auth")
+}
+
+// bflaRandLetters returns a per-n unique run of non-hex letters (so the ratio
+// normalizer, which collapses hex/digit runs, does not erase it) — used to make a
+// response body's CONTENT genuinely differ on every request. An LCG mixes the seed
+// through every position so distinct seeds yield disjoint strings (a plain
+// seed%len pattern would repeat the same handful of words across requests).
+func bflaRandLetters(n int64) string {
+	const alpha = "ghijklmnopqrstuvwxyz"
+	b := make([]byte, 24)
+	x := uint64(n)*6364136223846793005 + 1442695040888963407
+	for i := range b {
+		x = x*6364136223846793005 + 1442695040888963407
+		b[i] = alpha[(x>>40)%uint64(len(alpha))]
+	}
+	return string(b)
+}
+
+// TestScanPerRequest_MethodSwitchNonDeterministic reproduces the method-switch
+// false positive: an admin path answers a switched, unauthenticated method
+// (POST/PUT/DELETE) with a 2xx body that VARIES every request (a live dashboard /
+// per-request token), differs from the random-path method-baseline, yet is not a
+// privileged write. The reproduce control re-samples the switched method, sees the
+// body fail to hold content-similar across samples, and drops it.
+func TestScanPerRequest_MethodSwitchNonDeterministic(t *testing.T) {
+	t.Parallel()
+	var n int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "-vigolium-wp/") {
+			// Method-baseline probe path: distinct 404 so matchesMethodBaseline is false.
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, "not found")
+			return
+		}
+		if r.Method == "GET" {
+			_, _ = io.WriteString(w, "<html><body>admin console landing overview page for reports</body></html>")
+			return
+		}
+		// Switched write methods: a 2xx body whose CONTENT is substantially different
+		// on every request (a non-deterministic endpoint), so two samples are not
+		// content-similar and the response cannot be shown to reproduce.
+		c := atomic.AddInt64(&n, 1)
+		words := make([]string, 40)
+		for i := range words {
+			words[i] = bflaRandLetters(c*97 + int64(i))
+		}
+		_, _ = fmt.Fprintf(w, "<html><body>%s</body></html>", strings.Join(words, " "))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	// Bare GET, no credentials → testNoAuth/testDowngradedAuth bail; only the
+	// method-switch leg runs. Attach a 2xx HTML baseline (required by ScanPerRequest).
+	rr := modtest.Response(
+		modtest.Request(t, srv.URL+"/admin/reports"),
+		"text/html",
+		"<html><body>admin console landing overview page for reports</body></html>",
+	)
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a switched-method response that varies every request (non-reproducible) must not be flagged as a BFLA bypass")
 }
 
 // TestScanPerRequest_NoFalsePositive ensures an admin endpoint that enforces

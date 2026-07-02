@@ -141,6 +141,7 @@ Common files:
 | File | Produced by | Description |
 | --- | --- | --- |
 | `lite-recon.md` | lite L1 | Source snapshot, manifests, frameworks, entry points, git status, scan exclusions. |
+| `unauthenticated-surface.md` | lite L1, balanced B2, deep D4 (seed) → deep D7 (final) | The subset of the attack surface reachable by an anonymous attacker (no session/token/API key): pre-auth routes and non-route entry points, each tagged `by-design` / `missing-guard` / `middleware-gap`. Present in every intensity. In deep, the access-auditor supersedes the threat-modeler's seed with an exhaustive matrix-derived version. |
 | `knowledge-base-report.md` | balanced B1-B2, deep D4 + many later | The central KB. See section below. |
 | `commit-recon-report.md` | deep D2 | Commit-archaeology high-risk patches and bypass candidates. |
 | `authz-matrix.md` | deep D7 | One row per endpoint with expected vs. actual authorization checks. |
@@ -449,8 +450,8 @@ vigolium-results/tmp/on-demand.bqrs
 
 | Mode | Primary outputs |
 | --- | --- |
-| `lite` | `attack-surface/lite-recon.md`, `findings-draft/l2-*.md`, `findings-draft/l3-*.md`, severity-prefixed `findings/<C\|H\|M><N>-<slug>/` (`draft.md`, `poc.*`, `evidence/`) |
-| `balanced` | `attack-surface/knowledge-base-report.md` + advisory/KB/SAST/probe/chamber sections, `attack-surface/intent-reconciliation.md`, `findings/<id>-<slug>/`, `findings-theoretical/<id>-<slug>/`, `final-audit-report.md` |
+| `lite` | `attack-surface/lite-recon.md`, `attack-surface/unauthenticated-surface.md`, `findings-draft/l2-*.md`, `findings-draft/l3-*.md`, severity-prefixed `findings/<C\|H\|M><N>-<slug>/` (`draft.md`, `poc.*`, `evidence/`) |
+| `balanced` | `attack-surface/knowledge-base-report.md` + advisory/KB/SAST/probe/chamber sections, `attack-surface/unauthenticated-surface.md`, `attack-surface/intent-reconciliation.md`, `findings/<id>-<slug>/`, `findings-theoretical/<id>-<slug>/`, `final-audit-report.md` |
 | `deep` | Full `attack-surface/` corpus (incl. `intent-corpus.json` + `intent-reconciliation.md`), `findings/`, `findings-theoretical/`, `file-state.json`, `final-audit-report.md`; raw chamber/SAST workspaces exist only until successful cleanup |
 | `confirm` | `confirmation-report.md`, `confirm-workspace/*.json`, verdict-grouped `confirm-workspace/report-ready/` + `needs-review/` staging copies, updated `<inventory.dir>/report.md` in either `findings/` or `findings-theoretical/`, evidence under `<inventory.dir>/confirm-evidence/`, optional `confirm-test*` fallback artifacts |
 | `diff` | Re-runs a subset of deep phases against a changed-file scope; produces deltas under the same paths the underlying deep phases use |
@@ -466,9 +467,10 @@ For a completed audit, start with:
 1. `vigolium-results/final-audit-report.md`
 2. `vigolium-results/findings/<ID>-<slug>/report.md` and `vigolium-results/findings-theoretical/<ID>-<slug>/report.md`
 3. `vigolium-results/attack-surface/knowledge-base-report.md`
-4. `vigolium-results/attack-surface/intent-reconciliation.md` (balanced/deep — why a finding was treated as intentional/feature vs a real bug)
-5. `vigolium-results/attack-surface/authz-matrix.md` (if deep)
-6. `vigolium-results/audit-state.json`
+4. `vigolium-results/attack-surface/unauthenticated-surface.md` (all intensities — what an anonymous attacker can reach; triage pre-auth findings first)
+5. `vigolium-results/attack-surface/intent-reconciliation.md` (balanced/deep — why a finding was treated as intentional/feature vs a real bug)
+6. `vigolium-results/attack-surface/authz-matrix.md` (if deep)
+7. `vigolium-results/audit-state.json`
 
 For confirmation results, start with:
 

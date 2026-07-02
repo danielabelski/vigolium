@@ -2,7 +2,9 @@ package api_pagination_leak
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -12,6 +14,13 @@ import (
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/utils"
 )
+
+// minSensitiveCount is the smallest pagination total that plausibly reveals a
+// business-sensitive collection size. Standard REST envelopes on small or public
+// collections (a help center with 5 categories, a blog with a dozen posts)
+// expose tiny counts that disclose nothing — flagging those was the systematic
+// false positive. Below this, the count is not a meaningful information exposure.
+const minSensitiveCount = 1000
 
 // paginationPattern defines a JSON field pattern that reveals record counts.
 type paginationPattern struct {
@@ -121,15 +130,31 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		return nil, nil
 	}
 
-	// Check for pagination fields
+	// Check for pagination fields, tracking the largest count value seen.
 	var matches []string
+	var maxVal int64
 	for _, pat := range paginationPatterns {
 		if m := pat.pattern.FindStringSubmatch(body); len(m) > 1 {
 			matches = append(matches, fmt.Sprintf("%s = %s", pat.name, m[1]))
+			if v, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+				if v > maxVal {
+					maxVal = v
+				}
+			} else {
+				// Digits that overflow int64 are, definitionally, a huge collection.
+				maxVal = math.MaxInt64
+			}
 		}
 	}
 
 	if len(matches) == 0 {
+		return nil, nil
+	}
+
+	// A count is only a meaningful disclosure when it reveals a genuinely large
+	// collection. Tiny totals (a public help center's 5 categories, one page of
+	// results) expose nothing sensitive, so suppress them entirely.
+	if maxVal < minSensitiveCount {
 		return nil, nil
 	}
 

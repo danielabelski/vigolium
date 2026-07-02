@@ -99,11 +99,40 @@ func TestScanPerRequest_NoSignalNonID(t *testing.T) {
 	results, err := m.ScanPerRequest(ctx, scanCtx)
 	require.NoError(t, err)
 
-	// "page=2" has no name signal (0) + sequential int (3) = 3 which meets threshold
-	// but "q=hello" has 0+0=0 so it won't appear
-	// Filter results that are NOT about "page"
-	for _, r := range results {
-		assert.NotEqual(t, "q", r.FuzzingParameter)
+	// Neither param is an object-ID candidate: "q=hello" has no signal at all, and
+	// "page=2" is a bare sequential int with no name signal and no resource-noun
+	// path context — a pagination cursor, not an object reference. The corroboration
+	// gate rejects it, so no finding is produced.
+	assert.Empty(t, results)
+}
+
+// TestScanPerRequest_TelemetryNumericNotIDOR is the regression for the noisiest
+// idor-params-detect false positive observed across the Snapchat scan corpus:
+// analytics/telemetry parameters carry big integers (a bandwidth reading, a
+// metric, an HTTP status echoed back, a page number) that are not object
+// references. A bare numeric value with no identifier name and no resource-noun
+// path context must not be reported as a potential IDOR parameter.
+func TestScanPerRequest_TelemetryNumericNotIDOR(t *testing.T) {
+	m := New()
+	query := "connection_download_bandwidth_bps=1520435&responseStatus=200&value=48741&page_number=5&per_page=100"
+	ctx := makeHTTPCtx("/web-analytics/web/events", query, "text/html", "<html></html>")
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "bare numeric telemetry/pagination params are not object IDs")
+}
+
+// TestScanPerRequest_ErrorPagePathNotIDOR guards the other bare-number false
+// positive: a crawler landing on an error page (/404, /500) turned the status
+// code in the URL path into a "sequential-int object ID". A numeric path segment
+// with no preceding resource noun is not an IDOR candidate.
+func TestScanPerRequest_ErrorPagePathNotIDOR(t *testing.T) {
+	m := New()
+	for _, p := range []string{"/404", "/500", "/8"} {
+		ctx := makeHTTPCtx(p, "", "text/html", "<html>not found</html>")
+		results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+		require.NoError(t, err)
+		assert.Empty(t, results, "numeric path segment %q without a resource noun is not an IDOR candidate", p)
 	}
 }
 

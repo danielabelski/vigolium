@@ -2,6 +2,7 @@ package http_method_tampering
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/pkg/errors"
 	urlutil "github.com/projectdiscovery/utils/url"
@@ -204,6 +205,14 @@ func (m *Module) testDangerousMethods(
 ) ([]*output.ResultEvent, error) {
 	var results []*output.ResultEvent
 
+	// Lazily fetch (once) a benign GET control so a dangerous method that merely
+	// gets routed to the same read handler is not mistaken for an enabled write.
+	// Memoized so we issue at most one control request per endpoint, and only when
+	// a candidate is actually found.
+	getGetControl := sync.OnceValues(func() (methodControl, bool) {
+		return m.fetchMethodControl(ctx, httpClient, "GET")
+	})
+
 	for _, method := range dangerousMethods {
 		// Skip if the original request already uses this method
 		if strings.EqualFold(ctx.Request().Method(), method) {
@@ -232,6 +241,28 @@ func (m *Module) testDangerousMethods(
 				resp.Close()
 				return results, nil // endpoint 2xx-es any method — not a real finding
 			}
+
+			// Confirm the write verb was honored, not merely routed to the same
+			// read handler. A benign GET control tells the two apart:
+			//   • response ~ GET  → the endpoint ignores the verb entirely (geo /
+			//     beacon / RPC handler that answers any method) — nothing written.
+			//   • HTML while GET is non-HTML → the server rendered its SPA / error
+			//     page for the unhandled verb (content-type flip), not a write.
+			// Both are endpoint-level properties, so a hit ends the leg. Skipped
+			// only when the control is unavailable/blocked (stay false-negative safe).
+			dangerSig := modkit.NewResponseSignature(resp.Response().StatusCode, resp.BodyString(), "")
+			if gc, ok := getGetControl(); ok {
+				if modkit.RatioSimilar(gc.sig, dangerSig) {
+					resp.Close()
+					return results, nil // verb-agnostic endpoint — verb ignored
+				}
+				if isHTMLContentType(resp.Response().Header.Get("Content-Type")) &&
+					!isHTMLContentType(gc.contentType) {
+					resp.Close()
+					return results, nil // catch-all SPA / error render, not a write
+				}
+			}
+
 			ev := modkit.NewEvidenceCollector()
 			ev.Add("baseline", string(ctx.Request().Raw()), baselineFullResponse(baseline))
 			results = append(results, &output.ResultEvent{
@@ -272,16 +303,9 @@ func (m *Module) testMethodOverrideHeaders(
 	// endpoint that answers POST identically with or without the header) is not a
 	// finding. Memoized so we issue at most one control request per endpoint, and
 	// only when a candidate is actually found.
-	controlFetched := false
-	var control postControl
-	var controlOK bool
-	getControl := func() (postControl, bool) {
-		if !controlFetched {
-			controlFetched = true
-			control, controlOK = m.fetchPostControl(ctx, httpClient)
-		}
-		return control, controlOK
-	}
+	getControl := sync.OnceValues(func() (postControl, bool) {
+		return m.fetchPostControl(ctx, httpClient)
+	})
 
 	for _, header := range methodOverrideHeaders {
 		for _, overrideMethod := range []string{"DELETE", "PUT"} {
@@ -320,6 +344,22 @@ func (m *Module) testMethodOverrideHeaders(
 				if ctrlOK && modkit.RatioSimilar(ctrl.sig, overrideSig) {
 					resp.Close()
 					continue
+				}
+
+				// Determinism gate: the override "changed" the response only if the
+				// endpoint answers a plain POST deterministically. Endpoints that mint
+				// a fresh token/nonce (analytics init, attestation/session bootstrap)
+				// or stream a variable SSR shell return a different body for ANY two
+				// requests, so the override delta would be pure per-request noise. A
+				// SECOND no-override control must match the first before we trust it;
+				// two dissimilar controls mean the endpoint is non-deterministic and
+				// no override can be confirmed here.
+				if ctrlOK {
+					if ctrl2, ok := m.fetchPostControl(ctx, httpClient); !ok ||
+						!modkit.RatioSimilar(ctrl.sig, ctrl2.sig) {
+						resp.Close()
+						return results, nil
+					}
 				}
 
 				ev := modkit.NewEvidenceCollector()
@@ -399,7 +439,13 @@ func isSuccessfulMethod(statusCode int, body string) bool {
 	if strings.Contains(bodyLower, "method not allowed") ||
 		strings.Contains(bodyLower, "not supported") ||
 		strings.Contains(bodyLower, "/login") ||
-		strings.Contains(bodyLower, "/signin") {
+		strings.Contains(bodyLower, "/signin") ||
+		// Framework soft-errors: a 200 that is actually a session/CSRF/validation
+		// rejection, not a performed action. Salesforce Aura answers ANY verb
+		// (including DELETE) with an aura:invalidSession / exceptionEvent event at
+		// HTTP 200 — the action never ran, so this is not a "successful" method.
+		strings.Contains(bodyLower, "aura:invalidsession") ||
+		strings.Contains(bodyLower, "\"exceptionevent\"") {
 		return false
 	}
 
@@ -409,6 +455,58 @@ func isSuccessfulMethod(statusCode int, body string) bool {
 	}
 
 	return true
+}
+
+// isHTMLContentType reports whether a Content-Type header names a full HTML
+// document. A genuinely honored method-override or an actually-enabled write verb
+// answers with JSON, an empty body, or a status — essentially never a rendered
+// HTML page — so an HTML response to a write/override probe on an endpoint that
+// normally serves non-HTML is the host's SPA shell / error page swallowing the
+// request, not a resource write.
+func isHTMLContentType(contentType string) bool {
+	return strings.Contains(strings.ToLower(contentType), "text/html")
+}
+
+// methodControl is a memoized control response fetched with a benign method. It
+// lets the dangerous-method leg tell a genuinely method-tampered response apart
+// from a verb-agnostic read endpoint (geo/beacon/RPC handler that answers the
+// same content to any verb) and from a catch-all SPA/error renderer.
+type methodControl struct {
+	sig         modkit.ResponseSignature
+	contentType string
+}
+
+// fetchMethodControl issues the request with the given benign method and no
+// tampering, returning its response signature and content type. ok is false on a
+// transport error OR when the control is a WAF/edge/rate-limit block (401/403/429/
+// 503/challenge): a blocked response is the edge talking, not the endpoint, so it
+// cannot serve as a comparison control — callers then fall back to reporting
+// rather than dropping a finding on a transient block. NoClustering bypasses the
+// response cache so the control is a genuinely fresh observation.
+func (m *Module) fetchMethodControl(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	method string,
+) (methodControl, bool) {
+	controlRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), method)
+	if err != nil {
+		return methodControl{}, false
+	}
+	// controlRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(controlRaw, ctx.Service())
+
+	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
+	if err != nil {
+		return methodControl{}, false
+	}
+	defer resp.Close()
+	if resp.Response() == nil || infra.IsBlockedResponse(resp) {
+		return methodControl{}, false
+	}
+	return methodControl{
+		sig:         modkit.NewResponseSignature(resp.Response().StatusCode, resp.BodyString(), ""),
+		contentType: resp.Response().Header.Get("Content-Type"),
+	}, true
 }
 
 // baselineFullResponse renders the cached same-method baseline as a full raw

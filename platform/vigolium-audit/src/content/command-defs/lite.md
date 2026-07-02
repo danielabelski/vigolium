@@ -160,6 +160,30 @@ Build a lightweight project context block by reading file structure and package 
    - **Excluded from scan**: <e.g. tests/, node_modules/, dist/, docs/>
    ```
 
+7. **Write unauthenticated attack surface** to `vigolium-results/attack-surface/unauthenticated-surface.md`. Using the entry points and auth primitives found above, do a best-effort enumeration of what an **anonymous attacker** (no session/token/API key) can reach — pre-auth is the highest-severity reachability class, so L2/L3 findings on this surface are prioritized. This is a fast model-level pass (no exhaustive route grep); flag `<coverage gap>` where framework routing could not be resolved. Classify each entry's **Why pre-auth** as `by-design` (login/signup/health/webhook/public API), `missing-guard` (should plausibly be protected), or `middleware-gap` (guarded only by a bypassable proxy/header signal). Always write the file; if there is no network-facing surface, say so in the header block.
+
+   ```markdown
+   # Unauthenticated Attack Surface
+
+   Reachable by an anonymous attacker — no valid session, token, or API key.
+
+   **Coverage**: <N entry points> | <M by-design public> | <P missing-guard / middleware-gap>
+   **Auth model**: <how identity is established, or "none — no network-facing surface">
+   **Coverage gaps**: <unresolved routing / dynamic handlers, or "none">
+
+   ## Pre-Auth HTTP / API Routes
+
+   | # | Method | Path | Handler (file:line) | Why pre-auth | Notable inputs / sinks | Blast radius |
+   |---|--------|------|---------------------|--------------|------------------------|--------------|
+
+   ## Other Unauthenticated Entry Points
+
+   Non-route surface with no auth — webhook / OAuth callback, health / metrics / debug endpoint, GraphQL introspection, WebSocket pre-handshake, static / file server, unauthenticated queue consumer, file-upload, SSRF-reachable fetcher.
+
+   | Kind | Entry point (file:line) | Why pre-auth | Notes |
+   |------|-------------------------|--------------|-------|
+   ```
+
 Update `vigolium-results/audit-state.json`: set `L1` status to `complete` with timestamp.
 
 ### Phase L2 + L3 (parallel)
@@ -263,6 +287,7 @@ Run a single pass of built-in static analysis security suites, scoped by L1 reco
 5. **Quick dedup and filter**:
    - If a L3 finding overlaps with a L2 finding (same file + line), keep the L2 finding and drop the L3 duplicate.
    - Using `vigolium-results/attack-surface/lite-recon.md` entry points and framework context, drop findings in files that are clearly not reachable from user input (e.g., build scripts, migration utilities, dev-only tooling). Mark dropped findings with `Verdict: FILTERED` rather than deleting them.
+   - Using `vigolium-results/attack-surface/unauthenticated-surface.md`, when a finding sits on (or is reachable from) a pre-auth entry point, elevate its severity one band (e.g. High → Critical) — a bug an anonymous attacker can reach is strictly more severe than the same bug behind auth. Note `pre-auth` in the finding's Category.
 
 Update `vigolium-results/audit-state.json`: set `L3` status to `complete` with timestamp.
 
@@ -286,7 +311,7 @@ After all phases complete:
    rm -rf vigolium-results/codeql-artifacts/
    rm -rf vigolium-results/semgrep-res/
    ```
-   Retained: `vigolium-results/audit-state.json`, `vigolium-results/attack-surface/lite-recon.md`, `vigolium-results/findings/`.
+   Retained: `vigolium-results/audit-state.json`, `vigolium-results/attack-surface/lite-recon.md`, `vigolium-results/attack-surface/unauthenticated-surface.md`, `vigolium-results/findings/`.
 
 5. **Print summary table** to the user:
    ```

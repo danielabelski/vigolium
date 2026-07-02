@@ -113,10 +113,16 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		return nil, nil
 	}
 
-	sev := severity.Medium
+	// This is a passive PRECONDITION signal ("Tentative; not confirmed
+	// exploitable"), not a confirmed deserialization vuln, so it stays below
+	// Medium. A leaked deserialization error is an info-disclosure lead (Info); an
+	// actual @class/@type polymorphic-typing discriminator is the stronger
+	// gadget-attack precondition (Low). The previous code assigned Medium in both
+	// branches (a dead if), over-severing every hit.
+	sev := severity.Info
 	desc := "Jackson polymorphic typing or Java deserialization indicators detected in response"
 	if len(extracted) > 0 && strings.Contains(extracted[0], "Type field") {
-		sev = severity.Medium
+		sev = severity.Low
 		desc = "JSON response contains Jackson type discriminator fields (@class/@type), suggesting polymorphic deserialization is enabled which may allow gadget-based attacks"
 	}
 

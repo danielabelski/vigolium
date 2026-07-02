@@ -209,6 +209,15 @@ func (m *Module) ScanPerRequest(
 		if !keyNewlyReflected(probe.key, res.body, baselineBody) {
 			continue
 		}
+		// Reconfirm the key's reflection TRACKS our injection rather than being the
+		// page's own per-request variance. The baseline is a single (possibly stale)
+		// snapshot, so a common word like "level"/"verified" that drifts in and out
+		// of an SSR page's embedded state (feature flags, personalization) can look
+		// "newly reflected" by coincidence. Require it to reflect again on re-injection
+		// AND be absent from a fresh no-key control before trusting it.
+		if !m.reflectionTracksInjection(ctx, httpClient, injected, originalObj, probe.key) {
+			continue
+		}
 
 		results = append(results, &output.ResultEvent{
 			URL:              urlx.String(),
@@ -280,6 +289,39 @@ func isRejected(status int, body string) bool {
 func keyNewlyReflected(key, injectedBody, baselineBody string) bool {
 	needle := `"` + key + `"`
 	return strings.Contains(injectedBody, needle) && !strings.Contains(baselineBody, needle)
+}
+
+// reflectionTracksInjection reconfirms that a privilege key surfaces in the
+// response BECAUSE we injected it, not because the endpoint's output naturally
+// varies request to request. It re-sends the injected body (the key must reflect
+// again) and sends a fresh no-key control (the key must be ABSENT). It returns
+// false only on positive disproof — a 2xx re-injection that no longer reflects the
+// key, or a 2xx no-key control that already contains it — so a transient transport
+// error never drops a genuine finding (stays false-negative safe).
+func (m *Module) reflectionTracksInjection(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	injected, original map[string]any,
+	key string,
+) bool {
+	needle := `"` + key + `"`
+
+	// (a) Re-inject: a genuinely accepted/echoed field reflects on every send. A 2xx
+	// re-injection that no longer carries the key means the first reflection was
+	// per-request noise, not our field.
+	if re, err := m.sendInjected(ctx, httpClient, injected); err == nil &&
+		re.status >= 200 && re.status < 300 && !strings.Contains(re.body, needle) {
+		return false
+	}
+
+	// (b) Fresh no-key control: if the key name already appears WITHOUT our injection,
+	// its presence is the page's own per-request variance, not mass assignment.
+	if ctl, err := m.sendInjected(ctx, httpClient, original); err == nil &&
+		ctl.status >= 200 && ctl.status < 300 && strings.Contains(ctl.body, needle) {
+		return false
+	}
+
+	return true
 }
 
 // normalizeBody strips all whitespace so two responses can be compared for material

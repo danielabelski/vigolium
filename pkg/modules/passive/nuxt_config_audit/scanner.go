@@ -9,6 +9,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/modules/shared/jsframework"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
@@ -239,8 +240,17 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		}
 	}
 
-	// Check each regex-based config pattern
+	// Check each regex-based config pattern. A nuxt.config option is never served
+	// from the immutable /_nuxt/ build directory, so skip this branch for client
+	// build artifacts: a `runtimeConfig`/`debug:true`/`devtools:true` string inside
+	// a minified runtime bundle is a framework-machinery false positive (same hash
+	// across every Nuxt site). The __NUXT__ state-blob branch above still runs —
+	// that state IS legitimately served in the page.
+	configIsBuildArtifact := jsframework.IsClientBuildArtifact(urlx.Path)
 	for _, pat := range configPatterns {
+		if configIsBuildArtifact {
+			break
+		}
 		match := pat.re.FindString(body)
 		if match == "" {
 			continue

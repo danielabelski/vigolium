@@ -108,7 +108,22 @@ func (m *Module) ScanPerInsertionPoint(
 
 		attackBody := resp.Body().String()
 		fullResponse := resp.FullResponseString()
+		attackContentType := ""
+		if resp.Response() != nil {
+			attackContentType = resp.Response().Header.Get("Content-Type")
+		}
 		resp.Close()
+
+		// CSTI confirmation here is pure LITERAL reflection of the {{...}} probe
+		// (not an evaluated product), so it only holds when the response is an HTML
+		// rendering context the framework will actually interpret. A non-HTML
+		// response (a JSON API echoing the probe in a validation error) reflects the
+		// braces as a data value that no template engine renders — and the per-host
+		// framework fingerprint is inherited from a sibling HTML page, so without
+		// this gate a JSON endpoint on a framework host false-positives.
+		if modkit.IsNonHTMLReflectionContext(attackContentType) {
+			break
+		}
 
 		// Check for literal reflection (not HTML-encoded)
 		reflected := false

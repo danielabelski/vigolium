@@ -75,7 +75,18 @@ func nodeServedConfirmsExtension(node *storage.DiscoveredNode) bool {
 	if resp == nil {
 		return false
 	}
-	return pkghttp.IsSuccessStatus(resp.StatusCode) || pkghttp.IsUnauthorized(resp.StatusCode)
+	return statusConfirmsServedExtension(resp.StatusCode)
+}
+
+// statusConfirmsServedExtension reports whether an HTTP status proves the
+// requested URL's server-side extension actually ran: a 2xx success, or a 401/403
+// auth wall (the handler exists but gates access). A 3xx/404/5xx — or an unknown 0
+// — does not: the request was redirected away, missing, or errored, so its
+// extension is no evidence the server serves that stack. A recon-seeded probe path
+// such as /Telerik.Web.UI.DialogHandler.aspx that a host 404s or 302s must not, on
+// the strength of its ".aspx" suffix alone, confirm ASP.NET and queue a fuzz.
+func statusConfirmsServedExtension(status int) bool {
+	return pkghttp.IsSuccessStatus(status) || pkghttp.IsUnauthorized(status)
 }
 
 // applyFileMetadata extracts all file metadata from urlPath in a single pass

@@ -47,6 +47,41 @@ func TestScanPerInsertionPoint_DetectsReflection(t *testing.T) {
 	assert.Equal(t, severity.Tentative, res[0].Info.Confidence)
 }
 
+// jsonEchoHandler echoes the injected parameter back verbatim inside a JSON
+// validation-error body — the FastAPI/Pydantic `int_parsing` 422 shape, where
+// the bad value (HTML tags intact) lands in the error's `input` field. The
+// markup survives unescaped as a JSON string value but is never rendered as
+// HTML, so it is not PDF-generation evidence.
+func jsonEchoHandler(param string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		v := r.URL.Query().Get(param)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(
+			`{"detail":[{"type":"int_parsing","loc":["query","` + param +
+				`"],"msg":"Input should be a valid integer","input":"` + v + `"}]}`))
+	}
+}
+
+// TestScanPerInsertionPoint_JSONErrorEchoNotHTML is the regression for the
+// FastAPI JSON-validation-error false positive: the injected <h1> probe is echoed
+// verbatim in an application/json 422 body, so the raw-payload substring test
+// passes, yet the marker is a JSON string value that never renders as HTML. The
+// content-type gate must reject it.
+func TestScanPerInsertionPoint_JSONErrorEchoNotHTML(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(jsonEchoHandler("page"))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/feed?page=1")
+	ip := modtest.InsertionPoint(t, rr, "page")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an HTML marker echoed inside a JSON error body is not HTML-rendering evidence")
+}
+
 // encodedReflectingHandler echoes the param back URL-ENCODED inside a URL string
 // — the Cloudflare-Access / SSO-login redirect_url pattern. The bare marker text
 // survives but the injected <h1> tags come back as %3Ch1%3E, so nothing rendered

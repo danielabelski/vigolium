@@ -141,6 +141,39 @@ func TestPrivilegedClaims(t *testing.T) {
 	assert.True(t, hasRole, "should detect role=superuser")
 }
 
+// TestLongLivedTokenIsLow is the regression for the severity-inflation false
+// positive: a well-signed token whose only issue is a long expiry (or a missing
+// iss/aud) is a hygiene lead, not a Medium vulnerability. It must be reported at
+// Low/Tentative, not the flat module-default Medium.
+func TestLongLivedTokenIsLow(t *testing.T) {
+	m := New()
+	now := time.Now().Unix()
+	// exp 60 days out, missing iss/aud — the exact shape of the reported findings.
+	payload := fmt.Sprintf(`{"sub":"1","iat":%d,"exp":%d}`, now, now+60*86400)
+	token := buildJWT(`{"alg":"HS256"}`, payload)
+	ctx := makeHTTPCtxWithAuth(token)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, severity.Low, results[0].Info.Severity, "hygiene-only JWT issues must be Low, not Medium")
+	assert.Equal(t, severity.Tentative, results[0].Info.Confidence)
+}
+
+// TestAlgNoneIsHigh verifies the dangerous alg=none case is escalated above the
+// hygiene tier — a forgeable token is a High/Firm finding.
+func TestAlgNoneIsHigh(t *testing.T) {
+	m := New()
+	token := buildJWT(`{"alg":"none"}`, `{"sub":"1","iss":"test","aud":"app","exp":9999999999}`)
+	ctx := makeHTTPCtxWithAuth(token)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, severity.High, results[0].Info.Severity, "alg=none is a forgeable-token issue and must outrank hygiene leads")
+	assert.Equal(t, severity.Firm, results[0].Info.Confidence)
+}
+
 func TestHealthyJWT(t *testing.T) {
 	m := New()
 	now := time.Now().Unix()

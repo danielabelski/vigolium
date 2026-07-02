@@ -29,20 +29,29 @@ const (
 // reference for what the endpoint returns when the value just doesn't match.
 const controlPayload = "vigolium_ldap_nomatch_zZ9qX7cB"
 
-// ldapErrorPatterns are strings that indicate LDAP-related errors in responses.
+// ldapErrorPatterns are lowercased substrings that indicate a genuine LDAP-layer
+// error in a response body. Every entry must be specific to LDAP: bare generic
+// tokens ("ldap", "search filter", "invalid attribute", "filter error") were
+// removed because they are ordinary English/UI phrasing — "Login with LDAP", a
+// "clear search filter" button, a form "invalid attribute" validation message —
+// that a broadly-named param (user/name/email/search/query) can surface on a
+// benign page, producing a Medium "LDAP Injection: error-based" false positive
+// (the same generic-token-on-a-benign-body class as the Oracle.*?Driver FP). The
+// remaining entries name a driver class, a standard LDAP error envelope, or an
+// LDAP-specific filter/DN error phrase, none of which occur in ordinary content.
 var ldapErrorPatterns = []string{
-	"ldap",
 	"javax.naming",
-	"invalid dn",
-	"bad search filter",
-	"unrecognized search filter",
-	"invalid attribute",
-	"malformed filter",
-	"filter error",
-	"search filter",
+	"com.sun.jndi.ldap",
+	"ldapexception",
+	"ldap: error code", // OpenLDAP / JNDI standard form, e.g. "LDAP: error code 49"
 	"ldap_search",
 	"ldap_bind",
 	"ldap_connect",
+	"invalid dn",
+	"bad search filter",
+	"unrecognized search filter",
+	"invalid attribute syntax",
+	"malformed filter",
 	"error in filter",
 	"expected filter",
 }

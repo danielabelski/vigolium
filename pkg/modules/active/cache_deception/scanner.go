@@ -180,10 +180,17 @@ func (m *Module) ScanPerRequest(
 		// match the baseline — is not sensitive content and is not cache deception.
 		resp2IsSuccess := resp2StatusCode >= 200 && resp2StatusCode < 300
 
+		// The cached response must not only match the baseline's status and size but
+		// actually BE the authenticated content — a length window alone flags any
+		// generic page (login/marketing shell, per-request SSR catch-all) that
+		// happens to land within 10% of the baseline size. BodiesSimilar normalizes
+		// per-request tokens (hex/digit runs) before comparing, so genuinely-cached
+		// sensitive content still matches while a same-size different page does not.
 		bodyMatch := resp2IsSuccess &&
 			resp2StatusCode == baseline.StatusCode &&
 			resp2BodyLen > 0 &&
-			math.Abs(float64(resp2BodyLen-baseline.BodyLen))/float64(baseline.BodyLen) <= 0.10
+			math.Abs(float64(resp2BodyLen-baseline.BodyLen))/float64(baseline.BodyLen) <= 0.10 &&
+			modkit.BodiesSimilar(baseline.Response.BodyToString(), resp2Body)
 
 		// Check for cache indicators
 		cacheHit := false

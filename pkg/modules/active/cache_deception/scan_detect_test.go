@@ -94,6 +94,42 @@ func TestScanPerRequest_NoFalsePositiveOnCachedCdnError(t *testing.T) {
 	assert.Empty(t, res, "a cached CDN 5xx error page is not cache deception")
 }
 
+// publicShellBody is a DIFFERENT public page (login/marketing shell) of similar
+// size to authedBody — same length band, entirely different content.
+var publicShellBody = "<html><body>" + strings.Repeat("please sign in here ", 31) + "</body></html>"
+
+// TestScanPerRequest_NoFalsePositiveOnDifferentCachedPage reproduces the
+// length-only false positive: the confused ".css" path is cached (X-Cache: HIT)
+// and its body length lands within 10% of the authenticated baseline, but the
+// cached content is a DIFFERENT public page, not the sensitive baseline. Matching
+// on length alone would flag it; requiring the cached body to actually resemble
+// the authenticated content (BodiesSimilar) drops it.
+func TestScanPerRequest_NoFalsePositiveOnDifferentCachedPage(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "-vigolium-wp/"):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+		case strings.Contains(r.URL.Path, ".css"):
+			// Cached, similar length, but a DIFFERENT (public) page — not the
+			// authenticated content, so this is not cache deception.
+			w.Header().Set("X-Cache", "HIT")
+			_, _ = w.Write([]byte(publicShellBody))
+		default:
+			_, _ = w.Write([]byte(authedBody))
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/account")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a cached page of merely similar length but different content is not cache deception")
+}
+
 // TestScanPerRequest_NoFalsePositive ensures a backend that never advertises a
 // cache hit (no X-Cache/Age/CF-Cache-Status) yields no finding, even though the
 // confused path returns the same body.

@@ -9,6 +9,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/modules/shared/jsframework"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
@@ -77,6 +78,14 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	urlx, err := ctx.URL()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get URL")
+	}
+
+	// Skip compiled client build artifacts (/_next/static/, /_nuxt/): server-side
+	// data-fetching / server-action / auth code is stripped from client bundles, so a
+	// match there is a framework-machinery false positive (same bundle hash across
+	// every site using the framework). Real issues live in server source.
+	if jsframework.IsClientBuildArtifact(urlx.Path) {
+		return nil, nil
 	}
 
 	// Dedup by host+path

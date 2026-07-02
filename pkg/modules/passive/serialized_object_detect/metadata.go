@@ -16,7 +16,10 @@ var (
 **Fix:** Avoid deserializing untrusted input; if unavoidable, use JSON with schema validation or strict class allow-listing.`
 
 	ModuleConfirmation = "Confirmed when request parameter values contain known serialization format signatures"
-	ModuleSeverity     = severity.Medium
-	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"deserialization", "light"}
+	// The module text says this "confirms an attack surface, not exploitability" —
+	// a serialized blob in a request is a precondition/lead, not a confirmed
+	// deserialization vuln, so it belongs at Low rather than Medium.
+	ModuleSeverity   = severity.Low
+	ModuleConfidence = severity.Firm
+	ModuleTags       = []string{"deserialization", "light"}
 )

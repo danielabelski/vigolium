@@ -161,7 +161,12 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	for _, sf := range sensitiveFields {
 		matched := false
 		for _, pat := range sf.patterns {
-			if strings.Contains(bodyLower, pat) { // pat pre-lowercased at init
+			// The key must be present AND carry a populated value. A field whose
+			// only occurrences are null / true / false / "" is a redacted or
+			// feature-flag field ({"password":null}, {"secret":false}) that leaks
+			// nothing — matching the bare key name there is the systematic false
+			// positive this gate removes.
+			if fieldHasPopulatedValue(bodyLower, pat) { // pat pre-lowercased at init
 				matched = true
 				break
 			}
@@ -215,14 +220,63 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 			Info: output.Info{
 				Name:        "Sensitive API Fields Detected",
 				Description: desc,
-				Severity:    severity.Medium,
-				Confidence:  severity.Tentative,
-				Tags:        []string{"api", "sensitive-data", "information-disclosure", "pii"},
-				Reference:   []string{"https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/"},
+				// A passive NAME match (the value is never inspected for actual
+				// sensitivity) is a review lead, not a confirmed leak — the module
+				// text says "each hit needs review" — so it belongs at Low, not
+				// Medium. The value gate below drops null/empty/boolean fields.
+				Severity:   severity.Low,
+				Confidence: severity.Tentative,
+				Tags:       []string{"api", "sensitive-data", "information-disclosure", "pii"},
+				Reference:  []string{"https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/"},
 			},
 			Metadata: map[string]any{
 				"sensitiveFields": found,
 			},
 		},
 	}, nil
+}
+
+// fieldHasPopulatedValue reports whether the given quoted-key pattern (e.g.
+// `"password":`, pre-lowercased) appears in body followed by a populated value.
+// A value is "populated" when it is a non-empty string, a number, or a nested
+// object/array. It is NOT populated when it is the JSON literal null/true/false
+// or an empty string "" — those are redacted or feature-flag fields that leak
+// nothing, so matching the bare key there was the systematic false positive.
+// Every occurrence is scanned; one populated value is enough.
+func fieldHasPopulatedValue(body, keyPat string) bool {
+	from := 0
+	for {
+		i := strings.Index(body[from:], keyPat)
+		if i < 0 {
+			return false
+		}
+		pos := from + i + len(keyPat)
+		// Skip whitespace between the colon and the value.
+		for pos < len(body) {
+			c := body[pos]
+			if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+				pos++
+				continue
+			}
+			break
+		}
+		from = pos // advance so the next iteration cannot re-match this key
+		if pos >= len(body) {
+			return false
+		}
+		rest := body[pos:]
+		switch {
+		case strings.HasPrefix(rest, `""`),
+			strings.HasPrefix(rest, "null"),
+			strings.HasPrefix(rest, "true"),
+			strings.HasPrefix(rest, "false"):
+			// Benign literal — keep scanning for another occurrence.
+		case strings.HasPrefix(rest, `"`),
+			strings.HasPrefix(rest, "{"),
+			strings.HasPrefix(rest, "["):
+			return true // non-empty string / object / array value
+		case rest[0] == '-' || (rest[0] >= '0' && rest[0] <= '9'):
+			return true // numeric value
+		}
+	}
 }

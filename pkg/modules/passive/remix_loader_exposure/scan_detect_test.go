@@ -42,8 +42,11 @@ func TestScanPerRequest_SensitiveLoaderData(t *testing.T) {
 	assert.Equal(t, "Remix Loader Data Exposure", results[0].Info.Name)
 }
 
-// TestScanPerRequest_StateBlobOnly drives a Remix manifest blob with no sensitive
-// values; the blob detection alone produces a finding.
+// TestScanPerRequest_StateBlobOnly is the regression for the presence-only false
+// positive: every Remix page ships a state blob (window.__remixManifest /
+// __remixContext / "loaderData"), so blob presence WITHOUT any sensitive value
+// must NOT produce a finding — otherwise the module fired Medium/Firm on every
+// Remix site. A finding now requires an actual sensitive-data match.
 func TestScanPerRequest_StateBlobOnly(t *testing.T) {
 	t.Parallel()
 	m := New()
@@ -51,8 +54,7 @@ func TestScanPerRequest_StateBlobOnly(t *testing.T) {
 	ctx := makeHTTPCtx(body)
 	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
 	require.NoError(t, err)
-	require.NotEmpty(t, results)
-	assert.Equal(t, ModuleID, results[0].ModuleID)
+	assert.Empty(t, results, "a Remix state blob with no sensitive data is normal for any Remix app, not a leak")
 }
 
 // TestScanPerRequest_Benign drives an HTML page with no Remix markers and

@@ -16,7 +16,12 @@ var (
 **Fix:** Remove total-count and page-count metadata unless required, prefer cursor-based navigation, and enforce per-object authorization so pagination cannot enumerate restricted records.`
 
 	ModuleConfirmation = "Confirmed when JSON response contains pagination metadata fields exposing total record counts or page navigation details"
-	ModuleSeverity     = severity.Medium
-	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"api", "info-disclosure", "light"}
+	// Exposing a pagination total is an information-exposure lead, not a
+	// vulnerability on its own — nearly every paginated REST API (Zendesk, GitHub,
+	// JSON:API, …) returns these standard envelope fields. It only matters when the
+	// count reveals a genuinely large, business-sensitive collection, so this is a
+	// Low-severity lead for manual assessment rather than a Medium finding.
+	ModuleSeverity   = severity.Low
+	ModuleConfidence = severity.Tentative
+	ModuleTags       = []string{"api", "info-disclosure", "light"}
 )

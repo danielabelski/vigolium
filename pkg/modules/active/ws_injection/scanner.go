@@ -220,17 +220,43 @@ func (m *Module) ScanPerInsertionPoint(
 		// Match against the body only, not the headers — a Server/CSP header
 		// naming a DB engine must not trip a bare pattern.
 		bodyLower := strings.ToLower(resp.Body().String())
+		respContentType := ""
+		if resp.Response() != nil {
+			respContentType = resp.Response().Header.Get("Content-Type")
+		}
 		resp.Close()
+
+		// XSS probes are pure markup-reflection oracles: the injected tag echoed
+		// back only matters if it renders as HTML. A non-HTML response (a JSON API
+		// echoing the payload in a validation error, text/plain, ...) treats the
+		// tag as a data value that never executes — the FastAPI 422 JSON echo FP.
+		// The SQLi / command / template categories match error text or evaluated
+		// results, which legitimately appear in JSON, so gate the XSS category only.
+		if test.category == "XSS" && modkit.IsNonHTMLReflectionContext(respContentType) {
+			continue
+		}
 
 		// Template probes: require the literal payload to be gone (evaluated).
 		if test.requireConsumed && strings.Contains(bodyLower, strings.ToLower(test.payload)) {
 			continue
 		}
 
+		// For the SQLi / command / template categories the patterns are DB-error /
+		// command-output / evaluated-result markers that must come from the SERVER,
+		// not from our own echoed payload. Strip the reflected payload before
+		// matching so its literal text cannot self-match — e.g. the UNION probe
+		// "' UNION SELECT NULL--" echoed into a JSON error body contains the pattern
+		// "union select". XSS keeps the raw body: there the pattern IS the payload
+		// (already gated on HTML content-type above).
+		matchBody := bodyLower
+		if test.category != "XSS" {
+			matchBody = strings.ReplaceAll(matchBody, strings.ToLower(test.payload), " ")
+		}
+
 		for _, pattern := range test.patterns {
 			pl := strings.ToLower(pattern)
 			// Must appear in the fuzzed response AND be absent from the baseline.
-			if strings.Contains(bodyLower, pl) && !strings.Contains(origBodyLower, pl) {
+			if strings.Contains(matchBody, pl) && !strings.Contains(origBodyLower, pl) {
 				results = append(results, &output.ResultEvent{
 					URL:     urlx.String(),
 					Matched: urlx.String(),

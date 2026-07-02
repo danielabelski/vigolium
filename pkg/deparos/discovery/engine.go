@@ -158,6 +158,13 @@ type Engine struct {
 	confirmedExtMu           sync.Mutex
 	candidateExtSet          map[string]struct{}
 	candidateExtOnce         sync.Once
+	// extCatchAll caches, per candidate extension, whether the host answers a
+	// random <nonce>.<ext> as a genuine resource (a catch-all/SPA/CDN that 200s
+	// and reflects any path). The observed/fingerprint confirmation sources
+	// consult it before trusting a .<ext> URL as proof the server runs that
+	// stack; probed once per extension. See extensionServedByCatchAll.
+	extCatchAll   map[string]bool
+	extCatchAllMu sync.Mutex
 	// startURLHeader is a snapshot of the start URL's response headers, captured
 	// during probeStartURL for fingerprint-based extension confirmation.
 	startURLHeader nethttp.Header

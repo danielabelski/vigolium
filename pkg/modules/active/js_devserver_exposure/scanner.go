@@ -142,7 +142,13 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		// Check markers
+		// Check markers. Every probe declares a positive signal — a distinctive
+		// status (expectedStatus), an SSE/stream content-type (expectedCT), or a
+		// body marker. A probe that declares NONE deliberately does not fire: the
+		// former "any non-404, non-HTML 2xx body is a dev server" fallback flagged
+		// any app returning a small JSON/text 200 on one of these paths (an API
+		// gateway echoing the route, a catch-all `{"error":...}`) as a Medium/Firm
+		// dev-server exposure — the same weakness as an empty-marker fingerprint.
 		if len(probe.markers) > 0 {
 			for _, marker := range probe.markers {
 				if strings.Contains(body, marker) {
@@ -150,39 +156,12 @@ func (m *Module) ScanPerRequest(
 					break
 				}
 			}
-			resp.Close()
-			continue
-		}
-
-		// For probes without markers or expectedCT (open-in-editor, remix dev,
-		// esbuild, parcel), a non-404 2xx with a different body from the 404 was
-		// historically enough. That false-positives on a single-page-app behind a
-		// catch-all reverse proxy that serves the same index.html shell for every
-		// path: the dev path returns the app HTML shell and, when the shell varies
-		// even slightly per path, the exact-hash 404 check above does not catch it.
-		// A real dev-server endpoint never returns the application's HTML index
-		// shell (it streams SSE, serves JS/JSON, or returns a terse status), so
-		// reject any HTML-document response here.
-		if len(probe.markers) == 0 && probe.expectedCT == "" && body != "" && !isHTMLShell(ct, body) {
-			results = append(results, buildResult(target, host, probe, string(probeRaw), resp.FullResponseString()))
 		}
 
 		resp.Close()
 	}
 
 	return results, nil
-}
-
-// isHTMLShell reports whether a response looks like an HTML document — the
-// hallmark of a single-page-app catch-all that serves index.html for every
-// path. Dev-server HMR/debug endpoints never return the application HTML shell,
-// so an HTML response on a marker-less probe is the catch-all, not a dev server.
-func isHTMLShell(contentType, body string) bool {
-	if strings.Contains(strings.ToLower(contentType), "text/html") {
-		return true
-	}
-	head := strings.ToLower(strings.TrimSpace(body))
-	return strings.HasPrefix(head, "<!doctype html") || strings.HasPrefix(head, "<html")
 }
 
 // fingerprint404 fetches a known-missing path to learn the host's answer to an

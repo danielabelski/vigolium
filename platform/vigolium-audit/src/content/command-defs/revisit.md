@@ -338,7 +338,7 @@ rm -rf vigolium-results/adversarial-reviews/
 rm -f  vigolium-results/attack-pattern-registry.json
 ```
 
-Retained: `vigolium-results/audit-state.json`, `vigolium-results/revisit-audit-state.json`, `vigolium-results/attack-surface/knowledge-base-report.md`, `vigolium-results/attack-surface/intent-corpus.json`, `vigolium-results/findings/` (confirmed, merged across rounds), `vigolium-results/findings-theoretical/` (theoretical/unconfirmed, merged across rounds), `vigolium-results/final-audit-report.md`, `vigolium-results/attack-surface/authz-matrix.md`, `vigolium-results/attack-surface/cross-service-edges.{json,md}`.
+Retained: `vigolium-results/audit-state.json`, `vigolium-results/revisit-audit-state.json`, `vigolium-results/attack-surface/knowledge-base-report.md`, `vigolium-results/attack-surface/intent-corpus.json`, `vigolium-results/findings/` (confirmed, merged across rounds), `vigolium-results/findings-theoretical/` (theoretical/unconfirmed, merged across rounds), `vigolium-results/final-audit-report.md`, `vigolium-results/attack-surface/authz-matrix.md`, `vigolium-results/attack-surface/unauthenticated-surface.md`, `vigolium-results/attack-surface/cross-service-edges.{json,md}`.
 
 ### Resume Logic
 

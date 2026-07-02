@@ -9,6 +9,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/modules/shared/jsframework"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
@@ -133,6 +134,14 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	urlx, err := ctx.URL()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get URL")
+	}
+
+	// Skip compiled client build artifacts (/_next/static/, /_nuxt/). next.config
+	// options are a build-time config file, never served from these immutable
+	// chunk directories, so a config-shape match inside a minified runtime bundle
+	// is a framework-machinery false positive rather than a real misconfig.
+	if jsframework.IsClientBuildArtifact(urlx.Path) {
+		return nil, nil
 	}
 
 	// Dedup by host

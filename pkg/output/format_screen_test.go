@@ -234,3 +234,40 @@ func TestFormatScreenPrependsHTTPMethod(t *testing.T) {
 	out := terminal.StripANSI(string(w.formatScreen(ev)))
 	assert.Contains(t, out, "POST https://h/login", "HTTP method prepended to matched URL")
 }
+
+func TestFormatScreenPatternLabelBracket(t *testing.T) {
+	// A finding that carries Metadata["pattern"] renders the label as a leading
+	// bracket immediately before the extracted value (secret-detect's use case:
+	// naming the credential family, e.g. `[JWT] [eyJ…]`).
+	w := &StandardWriter{}
+	ev := &ResultEvent{
+		ModuleID:         "secret-detect",
+		ModuleType:       "passive",
+		Info:             Info{Severity: severity.Medium},
+		Matched:          "https://h/app.js",
+		ExtractedResults: []string{"eyJhbGci.eyJzdWIi.sig"},
+		Metadata:         map[string]any{"pattern": "JWT"},
+	}
+
+	prev := terminal.IsTerminal()
+	defer terminal.SetIsTerminal(prev)
+	terminal.SetIsTerminal(false)
+
+	out := terminal.StripANSI(string(w.formatScreen(ev)))
+	assert.Contains(t, out, "[JWT] [eyJhbGci.eyJzdWIi.sig]", "pattern label bracket precedes the extracted value")
+}
+
+func TestFormatScreenNoPatternLabelUnchanged(t *testing.T) {
+	// A finding with no pattern metadata renders exactly as before — no stray
+	// leading bracket — so non-opted-in modules are untouched.
+	w := &StandardWriter{}
+	ev := &ResultEvent{
+		ModuleID:         "unsafe-html-sink",
+		Info:             Info{Severity: severity.Low},
+		Matched:          "https://h/app.js",
+		ExtractedResults: []string{"alert(1)"},
+	}
+	out := terminal.StripANSI(string(w.formatScreen(ev)))
+	assert.Contains(t, out, "[alert(1)]")
+	assert.NotContains(t, out, "] [alert(1)]", "no empty pattern bracket when metadata absent")
+}

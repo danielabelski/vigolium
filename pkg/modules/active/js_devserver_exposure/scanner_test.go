@@ -137,12 +137,31 @@ func TestScanPerRequest_BlanketStatusNoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host returning 204 for every path must not flag a status-only dev-server probe")
 }
 
-// TestIsHTMLShell covers the shell-detection helper directly.
-func TestIsHTMLShell(t *testing.T) {
+// TestScanPerRequest_JSONApiNoFalsePositive reproduces the empty-marker FP class:
+// an app that returns a small, distinct, non-HTML JSON 200 for one of the marker-
+// less dev paths (an API gateway echoing the route, a catch-all error object).
+// The former "any non-HTML 200 is a dev server" fallback flagged it Medium/Firm;
+// now every probe requires a real signal (SSE content-type or a body marker), so
+// a plain JSON 200 must not fire.
+func TestScanPerRequest_JSONApiNoFalsePositive(t *testing.T) {
 	t.Parallel()
-	assert.True(t, isHTMLShell("text/html; charset=utf-8", ""))
-	assert.True(t, isHTMLShell("", "<!DOCTYPE html><html></html>"))
-	assert.True(t, isHTMLShell("", "  <html><body>x</body></html>"))
-	assert.False(t, isHTMLShell("text/event-stream", "event: change\ndata: {}"))
-	assert.False(t, isHTMLShell("application/json", `{"websocket":"...}`))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/vigolium-nonexistent-path-404-check" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
+		}
+		// Distinct, non-HTML JSON 200 for every other path (echoes the path so it
+		// differs from the 404 body and is not the observed page).
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"path":"` + r.URL.Path + `","country":"ZZ"}`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html><body>app</body></html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a plain non-HTML JSON 200 on a marker-less dev path must not be reported as a dev server")
 }
