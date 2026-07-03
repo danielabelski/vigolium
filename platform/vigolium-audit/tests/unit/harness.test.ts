@@ -3,7 +3,12 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "os";
 import { join } from "path";
 import { parse as parseYaml } from "yaml";
-import { installHarness, registerEphemeralHarness, uninstallHarness } from "../../src/engine/harness.js";
+import {
+  harnessInstalled,
+  installHarness,
+  registerEphemeralHarness,
+  uninstallHarness,
+} from "../../src/engine/harness.js";
 
 // Every test here installs a harness, which copies the entire content tree
 // (30+ agents, 15+ skills with reference docs) to a fresh tmpdir. That's real
@@ -241,6 +246,43 @@ describe("registerEphemeralHarness", () => {
     handle.cleanup();
     // Second call must not throw — uninstallHarness is also a no-op when dir is gone.
     expect(() => handle.cleanup()).not.toThrow();
+  }, INSTALL_TIMEOUT_MS);
+
+  test("preserves a pre-existing persistent install on cleanup (claude)", async () => {
+    // Simulate a persistent `vigolium-audit setup claude`.
+    await installHarness("claude");
+    expect(harnessInstalled("claude")).toBe(true);
+
+    // An interactive run over the top must NOT delete it on exit.
+    const handle = await registerEphemeralHarness("claude");
+    handle.cleanup();
+    expect(existsSync(join(claudeDir, ".claude-plugin", "plugin.json"))).toBe(true);
+  }, INSTALL_TIMEOUT_MS);
+
+  test("preserves a pre-existing persistent install on cleanup (codex)", async () => {
+    await installHarness("codex");
+    expect(harnessInstalled("codex")).toBe(true);
+
+    const handle = await registerEphemeralHarness("codex");
+    handle.cleanup();
+    expect(existsSync(join(codexDir, "vigolium-audit-cve-scout.toml"))).toBe(true);
+  }, INSTALL_TIMEOUT_MS);
+});
+
+describe("harnessInstalled", () => {
+  test("false before install, true after, false again after uninstall", async () => {
+    expect(harnessInstalled("claude")).toBe(false);
+    expect(harnessInstalled("codex")).toBe(false);
+
+    await installHarness("claude");
+    await installHarness("codex");
+    expect(harnessInstalled("claude")).toBe(true);
+    expect(harnessInstalled("codex")).toBe(true);
+
+    await uninstallHarness("claude");
+    await uninstallHarness("codex");
+    expect(harnessInstalled("claude")).toBe(false);
+    expect(harnessInstalled("codex")).toBe(false);
   }, INSTALL_TIMEOUT_MS);
 
   test("codex cleanup synchronously removes agents, skills, and AGENTS.md block", async () => {

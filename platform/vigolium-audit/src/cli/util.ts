@@ -1,4 +1,21 @@
 import chalk from "chalk";
+import { homedir } from "os";
+
+/**
+ * Abbreviate a home-directory path to `~/…` for display. Only rewrites paths
+ * that are the home dir itself or sit under it (with a `/` boundary, so a
+ * sibling like `/Users/janet-backup` next to `/Users/jane` isn't mangled);
+ * everything else — `/var/folders/…` temp dirs, relative paths — passes through
+ * unchanged. Purely cosmetic: never use on a path that gets handed to a syscall.
+ * Tilde-prefixed words stay copy-pasteable because shells expand a leading `~/`.
+ */
+export function tildify(p: string): string {
+  const home = homedir();
+  if (home.length === 0) return p;
+  if (p === home) return "~";
+  if (p.startsWith(home + "/")) return "~" + p.slice(home.length);
+  return p;
+}
 
 /**
  * Exit with a user-facing error message. In JSON mode emits a single object on

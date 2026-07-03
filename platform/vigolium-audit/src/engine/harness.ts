@@ -446,6 +446,25 @@ function uninstallHarnessSync(platform: "claude" | "codex"): void {
   unspliceAgentsMdSync(codexAgentsMdPath());
 }
 
+/**
+ * Cheap "is a harness already installed for this platform?" probe, used to
+ * distinguish a persistent `vigolium-audit setup` install from a fresh
+ * ephemeral one. Checks for the sentinel artifact each install produces:
+ *   - claude: `.claude-plugin/plugin.json` under the plugin dir.
+ *   - codex: any `vigolium-audit-*.toml` under the agents dir.
+ */
+export function harnessInstalled(platform: "claude" | "codex"): boolean {
+  if (platform === "claude") {
+    return existsSync(join(claudePluginDir(), ".claude-plugin", "plugin.json"));
+  }
+  const dir = codexAgentsDir();
+  if (!existsSync(dir)) return false;
+  for (const entry of readdirSync(dir)) {
+    if (entry.startsWith("vigolium-audit-") && entry.endsWith(".toml")) return true;
+  }
+  return false;
+}
+
 export interface EphemeralHarnessHandle {
   /** Where the harness was installed for this run. */
   installResult: SetupResult;
@@ -462,16 +481,23 @@ export interface EphemeralHarnessHandle {
  * Concurrent `vigolium-audit run -i` instances will fight over the same install dir
  * (one's cleanup deletes the other's plugin). Theoretical and rare enough we
  * accept it for now; document if it bites users.
+ *
+ * If a persistent install already exists (from `vigolium-audit setup`), we refresh
+ * it in place but skip the exit cleanup so an interactive run never deletes the
+ * user's standing harness — only ephemeral-created installs get torn down.
  */
 export async function registerEphemeralHarness(
   platform: "claude" | "codex",
 ): Promise<EphemeralHarnessHandle> {
+  const preExisting = harnessInstalled(platform);
   const installResult = await installHarness(platform);
   let cleaned = false;
   const cleanup = (): void => {
     if (cleaned) return;
     cleaned = true;
     process.removeListener("exit", hookExit);
+    // Leave a persistent `vigolium-audit setup` install untouched.
+    if (preExisting) return;
     try {
       uninstallHarnessSync(platform);
     } catch {

@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.46-beta] - 2026-07-03
+
+A replay-ergonomics release. `vigolium replay` gains a bulk mode that re-sends every matching stored record through the mutation/diff engine — so an operator (or a coding agent driving vigolium) can fuzz one parameter across a whole host, or funnel all stored traffic through Burp, in a single command with streaming JSONL output.
+
+### Added
+
+- **`vigolium replay` bulk mode** — passing `--all` (or any of `--host`/`--method`/`--status`/`--path`/`--source`/`--search`/`--body`) replays *every* matching stored record instead of a single source, mirroring the `traffic --replay` filters but running each record through the full replay engine. Any `--mutate` is applied to each record that has that insertion point; without one, records are re-sent verbatim. Results stream as JSONL (one stable `replayOutput` per record) so a bad record surfaces an inline `error` without aborting the batch. Throttle with `-c/--concurrency` (default 10) and cap with `-n/--limit` (default 100; `--all` lifts it).
+- **`replay -S/--stateless --db <file>`** — replay can now read baselines from a standalone `.sqlite` or `.jsonl` export with project scoping off, matching the read semantics of `traffic`/`finding`. Every DB touchpoint in the command (record/finding lookup, `--auth-session` merge, bulk query) routes through the shared `openReadDB`/`effectiveProjectUUID` helpers.
+
+### Changed
+
+- **`replay` no longer prints the banner** — added to the banner-suppression list alongside `scan`/`run`/`traffic`, keeping JSONL output clean for piping.
+- **`traffic --replay` examples refreshed** — document stateless-export replay, method/host filtering, and `--all --with-browser`.
+
+### Internal
+
+- The single-source and bulk paths share one call shape via a new `replayRun` struct and its `one()` method; the HTTP client construction (cookie jar + `--proxy` routing), cookie-jar save, header-overlay parsing, and output-writer setup were extracted into reusable helpers (`newReplayClient`, `saveReplayJar`, `parseReplayHeaderFlags`, `openReplayOutputWriter`, `sourceFromDBRecord`). Bulk selection maps directly onto `database.QueryFilters` via `buildReplayBulkFilters`. New coverage in `replay_bulk_test.go`.
+
 ## [v0.1.45-beta] - 2026-07-02
 
 A false-positive-hardening and severity-calibration release. A broad sweep stops markup-reflection, error-signature, IDOR, and differential detectors from self-triggering on echoed input, framework build artifacts, and ambiguous numeric parameters; a batch of low-signal passive detectors drops from Medium to Low/Info; and secret findings now carry a short credential-family label.

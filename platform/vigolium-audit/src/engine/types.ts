@@ -40,6 +40,29 @@ export interface RunOptions {
   /** Alias of `target` (mirrors `vigolium agent audit --source`); folded into `target` at the CLI boundary. Accepts the same path or remote git URL forms. */
   source?: string;
   interactive?: boolean;
+  /**
+   * Interactive runs (`-i`) only: launch the underlying agent handoff command
+   * inside a detached tmux session and stream its pane output to stdout,
+   * instead of exec'ing it attached to the current terminal. The session is
+   * named so the user can `tmux attach` for full interaction. Requires `tmux`
+   * on PATH. Ignored for headless runs.
+   */
+  tmux?: boolean;
+  /**
+   * Interactive runs (`-i`) only: path or command name of the agent binary to
+   * exec (e.g. a wrapper like `cc`/`cw` that pre-loads env). Overrides the
+   * auto-detected `claude`/`codex` binary and the `VIGOLIUM_AUDIT_*_PATH`
+   * env overrides. A leading `~/` is expanded to the home directory; a bare
+   * command name is resolved via PATH by the OS at spawn time.
+   */
+  agentBinary?: string;
+  /**
+   * Interactive claude runs (`-i`) only: value passed straight through to the
+   * claude CLI as `--disallowedTools` (e.g. "AskUserQuestion" so the agent
+   * can't block a headless-style handoff on an interactive question). No-op
+   * for codex, which has no equivalent flag.
+   */
+  disallowedTools?: string;
   fromAudit?: string;
   baseline?: string;
   maxCost?: number;

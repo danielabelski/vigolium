@@ -51,6 +51,13 @@ cmd("3-phase headless surface scan", "vigolium-audit run --mode lite --target ./
 cmd("full 15-phase audit, interactive (auto-installs harness, cleans up on exit)", "vigolium-audit run --mode deep --agent claude -i");
 blank();
 
+section("# Harness install (persistent; run -i also auto-installs ephemerally)");
+cmd("install the claude harness into ~/.config/vigolium-audit/harness-claude", "vigolium-audit setup claude");
+cmd("install both claude + codex harnesses", "vigolium-audit setup");
+cmd("remove one platform's harness", "vigolium-audit uninstall --agent codex");
+cmd("remove all installed harnesses", "vigolium-audit uninstall");
+blank();
+
 section("# Auth overrides (one-shot, restored on exit)");
 cmd("ANTHROPIC_API_KEY for the run", "vigolium-audit run --mode deep --api-key sk-ant-...");
 cmd("CLAUDE_CODE_OAUTH_TOKEN for the run", "vigolium-audit run --mode deep --oauth-token sk-ant-oat01-...");
@@ -137,6 +144,9 @@ const runCmd = cli
   .option("--target <path-or-url>", "Target directory, or a remote git URL (https://github.com/..., https://gitlab.com/..., git@host:owner/repo, git://, ssh://). A URL is cloned with --depth=1 into ./<owner-repo>/ under the current working directory and used as the audit target; an existing same-remote checkout there is reused in place.", { default: "." })
   .option("--source <path-or-url>", "Alias of --target (parity with `vigolium agent audit --source`); accepts the same path or remote git URL forms.")
   .option("-i, --interactive", "Enable Ink TUI (auto-disabled when stdout is not a TTY)")
+  .option("--tmux", "Interactive runs (-i): launch the agent handoff command inside a detached tmux session and stream its output to stdout (attach with `tmux attach -t <session>`). Requires tmux on PATH.")
+  .option("--agent-binary <path>", "Interactive runs (-i): path or command name of the agent binary to exec (e.g. a wrapper like 'cc'/'cw' that pre-loads env). Overrides auto-detection. Leading ~/ is expanded; a bare name is resolved via PATH.")
+  .option("--disallowed-tools <tools>", "Interactive claude runs (-i): pass through to the CLI as --disallowedTools (e.g. \"AskUserQuestion\" to stop the agent blocking on an interactive prompt).")
   .option("--from-audit <id>", "Source audit id for confirm/merge/diff modes")
   .option("--baseline <ref>", "Baseline git ref for diff mode")
   .option("--max-cost <usd>", "Hard cost cap in USD; abort when exceeded")
@@ -189,6 +199,14 @@ runCmdEx("remote target as a git URL (clones into ./<owner-repo>/ under cwd)", "
 runCmdEx("GitLab URL works the same way", "vigolium-audit run --mode deep --target https://gitlab.com/owner/repo");
 runCmdEx("SSH form also accepted", "vigolium-audit run --mode deep --target git@github.com:owner/repo.git");
 runCmdEx("--source is an alias of --target (accepts paths or git URLs)", "vigolium-audit run --mode deep --source ./repo");
+runBlank();
+
+runSection("# Interactive handoff tweaks (-i only)");
+runCmdEx("run the handoff inside a detached tmux session and stream it (attach with `tmux attach`)", "vigolium-audit run --mode deep -i --tmux");
+runCmdEx("use a custom claude wrapper that sets up env (e.g. 'cc'/'cw')", "vigolium-audit run --mode deep -i --agent-binary cc");
+runCmdEx("point at an absolute binary path", "vigolium-audit run --mode deep -i --agent-binary ~/.local/bin/claude");
+runCmdEx("stop the agent blocking on questions (claude)", "vigolium-audit run --mode deep -i --disallowed-tools AskUserQuestion");
+runCmdEx("all three together", "vigolium-audit run --mode deep -i --tmux --agent-binary cw --disallowed-tools AskUserQuestion");
 runBlank();
 
 runSection("# Audit modes (each mode runs a different phase graph)");
@@ -267,10 +285,23 @@ cli
   });
 
 cli
-  .command("uninstall <platform>", "Manually remove leftover vigolium-audit harness state (escape hatch — `vigolium-audit run -i` already auto-cleans)")
-  .action(async (platform: string, opts: { json?: boolean }) => {
+  .command(
+    "setup [platform]",
+    "Install the vigolium-audit harness into the agent config dir (claude → ~/.config/vigolium-audit/harness-claude, codex → ~/.codex/agents). Pass a platform or --agent <platform>; omit to install both. Persistent — removed by `vigolium-audit uninstall`.",
+  )
+  .action(async (platform: string | undefined, opts: { json?: boolean; agent?: string }) => {
+    const { setupCommand } = await import("./cli/setup.js");
+    await setupCommand(platform ?? opts.agent, { json: !!opts.json });
+  });
+
+cli
+  .command(
+    "uninstall [platform]",
+    "Remove installed vigolium-audit harness state. Pass a platform (claude|codex) or --agent <platform>; omit to remove all. (`vigolium-audit run -i` already auto-cleans its own ephemeral install.)",
+  )
+  .action(async (platform: string | undefined, opts: { json?: boolean; agent?: string }) => {
     const { uninstallCommand } = await import("./cli/uninstall.js");
-    await uninstallCommand(platform, { json: !!opts.json });
+    await uninstallCommand(platform ?? opts.agent, { json: !!opts.json });
   });
 
 cli

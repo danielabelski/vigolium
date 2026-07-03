@@ -8,7 +8,12 @@ import { ClaudeCliAdapter } from "../adapters/claude-cli.js";
 import { ClaudeSdkAdapter } from "../adapters/claude-sdk.js";
 import { CodexCliAdapter } from "../adapters/codex-cli.js";
 import { CodexSdkAdapter } from "../adapters/codex-sdk.js";
-import { chooseAdapter } from "../adapters/detect.js";
+import { chooseAdapter, type ResolvedAdapterChoice } from "../adapters/detect.js";
+import {
+  detectClaudeVersionDrift,
+  probeClaudeBinaryVersion,
+  sdkTargetClaudeVersion,
+} from "../adapters/version-check.js";
 import { getContentLoader } from "../content-loader.js";
 import { Orchestrator, type OrchestratorResult } from "../engine/orchestrator.js";
 import { finalizeOutput } from "../engine/redact-artifacts.js";
@@ -300,11 +305,14 @@ export async function runCommand(opts: RunOptions): Promise<void> {
         mode: requestedModes[0]!,
         targetDir,
         noGit,
+        tmux: !!opts.tmux,
         ...compact({
           liveTarget: opts.liveTarget,
           model: opts.model,
           focus: interactiveAuditContext.focus,
           expectedBehaviors: interactiveAuditContext.expectedBehaviors,
+          agentBinary: opts.agentBinary,
+          disallowedTools: opts.disallowedTools,
         }),
       });
     }
@@ -490,6 +498,33 @@ async function pruneCompletedArtifacts(args: {
   }
 }
 
+/**
+ * Warn when the vendored Agent SDK's target claude-code version has drifted far
+ * enough from the installed binary to risk truncating an SDK-driven headless
+ * audit mid-run (see `src/adapters/version-check.ts`). The claude SDK adapter
+ * drives the binary over the Agent SDK's stdio control protocol; interactive
+ * (`-i`) and the `--print` CLI adapter speak the binary's own native protocol,
+ * so only the claude SDK path needs this. Strictly advisory — never blocks.
+ */
+function warnClaudeVersionDrift(choice: ResolvedAdapterChoice, json: boolean): void {
+  const drift = detectClaudeVersionDrift(
+    sdkTargetClaudeVersion(),
+    probeClaudeBinaryVersion(choice.binaryPath ?? ""),
+  );
+  if (!drift) return;
+  if (json) {
+    emitJsonEvent({ kind: "versionDrift", ...drift });
+    return;
+  }
+  console.log(
+    chalk.yellow("[warn]") +
+      `     Agent SDK targets claude-code ${chalk.cyan(drift.sdkTarget)} but the installed ` +
+      `binary is ${chalk.cyan(drift.binary)}. This version gap can cause SDK-driven (headless) ` +
+      `runs to stop mid-audit; upgrade vigolium-audit, or use ${chalk.cyan("-i")} (interactive), ` +
+      `which is unaffected.`,
+  );
+}
+
 async function runHeadless(args: {
   platform: AgentPlatform;
   modes: AuditMode[];
@@ -555,6 +590,8 @@ async function runHeadless(args: {
       : chalk.dim("runtime default");
     console.log(`${statusArrow("Model")} Model:     ${modelLabel}`);
   }
+
+  if (platform === "claude" && choice.flavor === "sdk") warnClaudeVersionDrift(choice, json);
 
   let auditContext: { focus?: string; expectedBehaviors?: string };
   try {
