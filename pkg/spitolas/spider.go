@@ -41,6 +41,17 @@ type SpiderConfig struct {
 	ScopeFilter         func(host, path string) bool
 	ProjectUUID         string
 	Source              string // http_records source tag; "" defaults to "spidering"
+
+	// LoginCredentialAttempts enables trying a small documented list of common
+	// default credentials against a CONFIRMED local login form so the crawl can
+	// proceed authenticated. Single-flighted per host, negative-control gated,
+	// never a wordlist. Off by default; the runner enables it at balanced and deep.
+	LoginCredentialAttempts bool
+
+	// LoginCredentialFullList selects the full documented credential list (deep)
+	// versus the minimal set (balanced: admin:admin, admin:123456). Ignored when
+	// LoginCredentialAttempts is false.
+	LoginCredentialFullList bool
 }
 
 // SpiderResult contains the results of a spidering run.
@@ -77,6 +88,14 @@ type SpiderResult struct {
 	// is the CTA's visible label.
 	LoginCTADriven bool
 	LoginCTAText   string
+
+	// LoginCredsTried / LoginCredsSucceeded report the common-credential login
+	// pass: the number of credential pairs submitted and the number of login
+	// forms where a pair authenticated. LoginCredsURL is the last login form the
+	// pass ran against.
+	LoginCredsTried     int
+	LoginCredsSucceeded int
+	LoginCredsURL       string
 }
 
 // RunSpider executes browser-based spidering against the target URL,
@@ -112,6 +131,8 @@ func RunSpider(ctx context.Context, cfg SpiderConfig, repo RecordSaver) (*Spider
 	}
 	crawlerCfg.UseCDPDetection = !cfg.NoCDP
 	crawlerCfg.FormFillEnabled = !cfg.NoForms
+	crawlerCfg.LoginCredentialAttempts = cfg.LoginCredentialAttempts
+	crawlerCfg.LoginCredentialFullList = cfg.LoginCredentialFullList
 	if cfg.ProxyURL != "" {
 		crawlerCfg.ProxyURL = cfg.ProxyURL
 	}
@@ -153,5 +174,9 @@ func RunSpider(ctx context.Context, cfg SpiderConfig, repo RecordSaver) (*Spider
 		HostAdopted:      result.Stats.HostAdopted,
 		LoginCTADriven:   result.Stats.LoginCTADriven,
 		LoginCTAText:     result.Stats.LoginCTAText,
+
+		LoginCredsTried:     result.Stats.LoginCredsTried,
+		LoginCredsSucceeded: result.Stats.LoginCredsSucceeded,
+		LoginCredsURL:       result.Stats.LoginCredsURL,
 	}, nil
 }

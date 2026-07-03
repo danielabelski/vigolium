@@ -78,31 +78,8 @@ Bulk mode: pass --all (or any of --host/--method/--status/--path/--source/--sear
 and results stream as JSONL (one object per record). Any --mutate is applied to
 every record that has that insertion point; without --mutate each record is re-sent
 verbatim. Throttle with -c/--concurrency and read a standalone export with -S --db.`,
-	Example: `  # Confirm a stored record with a SQLi payload
-  vigolium replay --record-uuid abc12345 -m 'name=id,payload=1 OR 1=1'
-
-  # Replay a curl command verbatim (auto-baseline by re-sending)
-  vigolium replay -i "curl -X POST https://example.com/api/login -d 'u=admin'"
-
-  # Replay a finding's stored evidence with an XSS payload
-  vigolium replay --finding-id 42 -m 'name=q,payload=<svg/onload=alert(1)>'
-
-  # Multi-step auth via persistent cookie jar
-  vigolium replay --session-id login -i curl-login.sh
-  vigolium replay --session-id login --record-uuid <action-uuid>
-
-  # Confirm against a different environment than the baseline
-  vigolium replay --record-uuid abc12345 --target https://staging.example.com \
-                   -m 'name=user,payload=admin' -H 'X-Forwarded-For: 127.0.0.1'
-
-  # BULK: replay ALL stored traffic through Burp (JSONL out, 5 at a time)
-  vigolium replay --all --proxy http://127.0.0.1:8080 -c 5
-
-  # BULK: replay every record from a standalone export (project scoping off)
-  vigolium replay -S --db scan.sqlite --all --proxy http://127.0.0.1:8080 -c 5
-
-  # BULK: fuzz an 'id' param across every matching GET record
-  vigolium replay --method GET --host api.example.com -m 'name=id,payload=1 OR 1=1'`,
+	// Example is set in usage.go (replayExamples) so it renders colored like the
+	// other commands via FormatExamples.
 	RunE: runReplay,
 }
 

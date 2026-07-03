@@ -130,7 +130,7 @@ func isJSONLSource(path string) bool {
 	buf := make([]byte, 16)
 	n, _ := f.Read(buf)
 	head := buf[:n]
-	if bytes.HasPrefix(head, []byte("SQLite format 3")) {
+	if database.HasSQLiteHeader(head) {
 		return false
 	}
 	// First non-whitespace byte: '{' marks a JSON envelope line.

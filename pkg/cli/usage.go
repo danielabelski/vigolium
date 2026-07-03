@@ -47,10 +47,13 @@ func init() {
 	auditCmd.Example = agentAuditExamples
 	agentAutopilotCmd.Example = agentAutopilotExamples
 	agentSwarmCmd.Example = agentSwarmExamples
+	agentTriageCmd.Example = agentTriageExamples
 	agentOliumCmd.Example = oliumExamples
 	oliumCmd.Example = oliumExamples
 	scanURLCmd.Example = scanURLExamples
 	scanRequestCmd.Example = scanRequestExamples
+	replayCmd.Example = replayExamples
+	updateCmd.Example = updateExamples
 	jsCmd.Example = jsExamples
 	importCmd.Example = importExamples
 	initCmd.Example = initExamples
@@ -65,6 +68,7 @@ func init() {
 	extensionsLsCmd.Example = extensionsLsExamples
 	extensionsDocsCmd.Example = extensionsDocsExamples
 	extensionsPresetCmd.Example = extensionsPresetExamples
+	extensionsExampleCmd.Example = extensionsExampleExamples
 	findingCmd.Example = findingExamples
 	findingLoadCmd.Example = findingLoadExamples
 	logCmd.Example = logExamples
@@ -73,6 +77,7 @@ func init() {
 	projectListCmd.Example = projectListExamples
 	projectUseCmd.Example = projectUseExamples
 	projectConfigCmd.Example = projectConfigExamples
+	projectDeleteCmd.Example = projectDeleteExamples
 	authCmd.Example = sessionExamples
 	sessionLsCmd.Example = sessionLsExamples
 	sessionTotpCmd.Example = sessionTotpExamples

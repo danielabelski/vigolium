@@ -646,6 +646,7 @@ func (r *Runner) runSpideringPhase(ctx context.Context, infra *phaseInfra) error
 		}
 		zap.L().Info("Spidering target", zap.String("target", target))
 
+		loginCredsAttempts, loginCredsFull := loginCredsPolicy(r.options.Intensity)
 		cfg := spitolas.SpiderConfig{
 			TargetURL:           target,
 			MaxDepth:            settingsCfg.MaxDepth,
@@ -664,6 +665,11 @@ func (r *Runner) runSpideringPhase(ctx context.Context, infra *phaseInfra) error
 			NoCDP:               settingsCfg.NoCDP,
 			NoForms:             settingsCfg.NoForms,
 			ProxyURL:            r.options.ProxyURL,
+			// Common-credential login attempts against confirmed local login
+			// forms: on at balanced (minimal list) and deep (full list), off at
+			// quick/lite (lockout/authorization risk).
+			LoginCredentialAttempts: loginCredsAttempts,
+			LoginCredentialFullList: loginCredsFull,
 		}
 
 		if infra.scopeMatcher != nil && !infra.scopeMatcher.IsPassAll() {

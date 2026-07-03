@@ -143,6 +143,7 @@ func (r *Runner) runTargetedReSpiderPhase(ctx context.Context, infra *phaseInfra
 			continue
 		}
 
+		loginCredsAttempts, loginCredsFull := loginCredsPolicy(r.options.Intensity)
 		cfg := spitolas.SpiderConfig{
 			TargetURL:           s.url,
 			MaxDepth:            rcfg.Depth(),
@@ -164,6 +165,11 @@ func (r *Runner) runTargetedReSpiderPhase(ctx context.Context, infra *phaseInfra
 			ScopeFilter:         scopeFilter,
 			ProjectUUID:         r.options.ProjectUUID,
 			Source:              "respider",
+			// Common-credential login attempts against confirmed local login
+			// forms: on at balanced (minimal list) and deep (full list), off at
+			// quick/lite (lockout/authorization risk).
+			LoginCredentialAttempts: loginCredsAttempts,
+			LoginCredentialFullList: loginCredsFull,
 		}
 
 		rw := database.NewRecordWriter(r.repository, database.RecordWriterConfig{})

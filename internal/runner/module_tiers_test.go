@@ -25,6 +25,31 @@ func TestIntensityTierCeiling(t *testing.T) {
 	}
 }
 
+func TestLoginCredsIntensityGating(t *testing.T) {
+	cases := []struct {
+		intensity string
+		enabled   bool
+		full      bool
+	}{
+		{"", true, false},         // default → balanced: on, minimal
+		{"balanced", true, false}, // balanced: on, minimal
+		{"standard", true, false},
+		{"deep", true, true}, // deep: on, full
+		{"full", true, true},
+		{"DEEP", true, true}, // case-insensitive
+		{"quick", false, false},
+		{"lite", false, false},
+		{"unknown", true, false}, // unknown → balanced
+	}
+	for _, c := range cases {
+		enabled, full := loginCredsPolicy(c.intensity)
+		if enabled != c.enabled || full != c.full {
+			t.Errorf("loginCredsPolicy(%q) = (%v, %v), want (%v, %v)",
+				c.intensity, enabled, full, c.enabled, c.full)
+		}
+	}
+}
+
 // stubActive is a minimal ActiveModule used to test tier filtering without
 // pulling in the real registry.
 type tierStubActive struct {

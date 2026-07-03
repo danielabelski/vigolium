@@ -26,6 +26,19 @@ func TestNewServerRunnerOptions_LoadsActiveAndPassiveModules(t *testing.T) {
 			"will under-scan every ingested request compared to scan-request.")
 }
 
+// TestNewServerRunnerOptions_PassiveOnly guards the --passive-only mode: active
+// modules must be left empty (so the runner resolves zero active modules and
+// sends no active scan traffic), while every passive module still runs.
+func TestNewServerRunnerOptions_PassiveOnly(t *testing.T) {
+	opts := newServerRunnerOptions(&serverOptions{PassiveOnly: true}, 50, 20, 30, "", false)
+
+	assert.Empty(t, opts.Modules,
+		"Modules must be empty in --passive-only mode so the runner enables 0 active modules")
+	assert.Equal(t, []string{"all"}, opts.PassiveModules,
+		"PassiveModules must remain 'all' in --passive-only mode — passive modules "+
+			"(including secret detection) must still run on every received request")
+}
+
 // TestNewServerRunnerOptions_BasicFields sanity-checks the trivial fields so
 // that a sweeping refactor of the helper is caught by tests.
 func TestNewServerRunnerOptions_BasicFields(t *testing.T) {

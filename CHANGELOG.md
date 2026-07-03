@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.47-beta] - 2026-07-04
+
+A discovery-depth and data-portability release. The spider now fills forms with values derived from the target and the page itself (so register→login flows carry consistent identities), and — at balanced/deep intensity — sprays a short list of common credentials against *confirmed* local login forms to crawl authenticated. Separately, `vigolium import` learns to merge one vigolium `.sqlite` result database into another, `agent audit -S` can bundle its report with the raw scanner output, and `vigolium server` gains a passive-only scan-on-receive mode.
+
+### Added
+
+- **Spider response-aware form filling** — the crawler (`pkg/spitolas`) now derives form values from the target and the response instead of always using fixed placeholders: it recalls a value entered earlier in the same crawl (so a registered identity is reused at login), falls back to target-derived values (`vigolium-crawl@<domain>`, `<label>_crawl`), then to an on-page example (a field's `defaultValue` or a `datalist` option), and only then to the existing smart/fixed defaults. Passwords are never taken from the page (a strong fixed password is kept). Default-on and non-destructive — with no fill context the original behavior is preserved.
+- **Common-credential login spray on confirmed login forms** — at `balanced` intensity the spider tries a minimal list (`admin:admin`, `admin:123456`) and at `deep` the full documented short list (never a wordlist) against a login form, but *only* after confirming the form is a genuine local login (exactly one visible password + submit + in-scope action, not an external IdP) and that a bogus control pair is rejected first. On success the session cookies persist and the crawl continues authenticated. Off at `quick`/`lite` (lockout/authorization risk). Reported via `LoginCredsTried`/`LoginCredsSucceeded` on the spider result.
+- **`vigolium import` merges vigolium SQLite databases** — `import` now accepts another vigolium result database as its source (auto-detected by its SQLite magic header, so `.sqlite`/`.sqlite3`/`.db` or a bare name all work) and folds it into the destination `--db` (or the configured default). A lossless, idempotent SQLite→SQLite merge of HTTP records, findings, scans, agentic scans, and OAST interactions, deduped on natural keys — re-importing the same database is a no-op, and each row keeps its original `project_uuid`. The natural companion to `scan -S --format sqlite`: fan out per-host `.sqlite` files, then merge them back into one queryable DB. `-j` prints a per-table merge summary.
+- **`agent audit --output-dir <dir>`** (stateless-only) — bundles a `-S` run's HTML report (as `<dir>/vigolium-audit-report.html`) *and* a copy of each driver's raw `vigolium-results/` tree into one folder — one driver lands flat, several are namespaced under `<dir>/<driver>/`. A relative `-o` nests under the bundle; an absolute path or `gs://` URL escapes it; `{ts}`/`{project-uuid}` are expanded once so the report and raw copy share a directory. `-S` without `--output-dir` now nudges the operator that raw output stays under `<source>/vigolium-results/`.
+- **`vigolium server --passive-only`** — with `-S/--scan-on-receive`, restricts scanning to passive modules only (no active scan traffic; secret detection still runs) on every ingested request. Warns when combined with `--full-native-scan-on-receive`, which still crawls.
+
+### Changed
+
+- **Example blocks refreshed** — `replay`, `update`, `agent triage`, and `extensions example` now carry inline `--help` examples; the `import` examples document the new SQLite-merge source.
+
+### Internal
+
+- New `form.FillContext` (`pkg/spitolas/internal/form/fillcontext.go`, per-crawl identity memory) threads response-aware values through `getValueForInput`; `DetectedInput` gains `DefaultValue`/`DatalistOptions` harvested by the DOM-detection JS. The login spray lives in `crawler/login_creds.go` (single-flight per host, negative-control gated), driven by new `SpiderConfig.LoginCredentialAttempts`/`LoginCredentialFullList` fields that the runner sets via `loginCredsPolicy(intensity)` for the discovery and re-spider phases.
+- SQLite file detection is centralized in the new `pkg/database/detect.go` (`IsSQLiteFile`/`HasSQLiteHeader`, magic-header based); `dbimport.ImportPath` dispatches to a new `ImportSQLite` (over the existing `database.MergeSQLiteFile`) and surfaces a `MergeStats` on the import `Result`. `runner_modules.go` documents the module-slice sentinel convention (nil/empty → zero modules, `["all"]` → every module) that `--passive-only` and `--no-passive` rely on.
+- Test coverage added: `form/fillcontext_test.go`, `crawler/login_creds_test.go` (+ an `integration`-tagged end-to-end), `database/detect_test.go`, `dbimport/importer_test.go`, `agent_audit_stateless_test.go`, and a `--passive-only` server-options guard.
+
 ## [v0.1.46-beta] - 2026-07-03
 
 A replay-ergonomics release. `vigolium replay` gains a bulk mode that re-sends every matching stored record through the mutation/diff engine — so an operator (or a coding agent driving vigolium) can fuzz one parameter across a whole host, or funnel all stored traffic through Burp, in a single command with streaming JSONL output.

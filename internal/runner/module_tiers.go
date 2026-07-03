@@ -31,6 +31,23 @@ func intensityTierCeiling(intensity string) int {
 	}
 }
 
+// loginCredsPolicy resolves the spider's common-credential login pass for an
+// intensity in one place: enabled off at quick/lite (a fast pass never makes
+// active login attempts), on with the full documented list at deep/full, and on
+// with the minimal set (admin:admin, admin:123456) otherwise — balanced and the
+// empty default. This mirrors intensityTierCeiling's alias split; the two
+// coupled decisions live in a single switch so they can't drift.
+func loginCredsPolicy(intensity string) (enabled, fullList bool) {
+	switch strings.ToLower(strings.TrimSpace(intensity)) {
+	case "quick", "lite":
+		return false, false
+	case "deep", "full":
+		return true, true
+	default: // "", "balanced", "standard"
+		return true, false
+	}
+}
+
 // intensityLabel returns the resolved intensity for logging, tolerating a nil
 // options (e.g. in unit tests that exercise the filters directly).
 func (r *Runner) intensityLabel() string {

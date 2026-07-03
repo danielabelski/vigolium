@@ -214,6 +214,26 @@ type Config struct {
 	// chain and the destination page's own XHRs (default on).
 	LoginCTAPriming bool
 
+	// LoginCredentialAttempts makes the crawler, ONLY after it has confirmed a
+	// local login form (a single password field + an identity field + a submit,
+	// posting to an in-scope host — never an external IdP), try a small, documented
+	// list of common default credentials (admin:admin, admin:123456, …) plus any
+	// identity it registered earlier in the crawl. The goal is discovery: if a pair
+	// authenticates, the browser session stays logged in so the crawl reaches the
+	// now-unlocked area. It is single-flighted per host, negative-control gated (a
+	// random pair must be rejected first, or the whole spray is abandoned), and
+	// never a brute-force wordlist, so it cannot lock accounts. Off by default; the
+	// runner auto-enables it at balanced AND deep intensity (see
+	// LoginCredentialFullList for the list size). No finding is emitted — the
+	// attempts are captured as ordinary traffic.
+	LoginCredentialAttempts bool
+
+	// LoginCredentialFullList selects how many default pairs the login-credential
+	// pass tries. false (balanced) → a minimal set (admin:admin, admin:123456);
+	// true (deep) → the full documented list. Ignored when LoginCredentialAttempts
+	// is off. The reused registered identity is always tried regardless.
+	LoginCredentialFullList bool
+
 	CrawlScope CrawlScope // Custom URL scope filter (nil = default same-domain check)
 
 	// Crawl strategy - determines both state selection and action selection
@@ -356,6 +376,13 @@ func New(targetURL string) (*Config, error) {
 		DismissConsent:   true,
 		LoginCTAPriming:  true,
 		AutoScroll:       true,
+
+		// Common-credential login attempts are off by default; the runner turns
+		// them on at balanced (minimal list) and deep (full list). They only ever
+		// run against a confirmed local login form, so leaving this off for an
+		// ordinary crawl keeps active login attempts explicit.
+		LoginCredentialAttempts: false,
+		LoginCredentialFullList: false,
 	}, nil
 }
 
@@ -640,5 +667,14 @@ func (c *Config) SetNoColor(noColor bool) *Config {
 // Valid values: "chromium" (default), "ungoogled" (Linux only).
 func (c *Config) SetBrowserEngine(engine string) *Config {
 	c.BrowserEngine = engine
+	return c
+}
+
+// SetLoginCredentialAttempts enables or disables common-credential login
+// attempts on confirmed local login forms (see the field doc). fullList selects
+// the full documented list (deep) versus the minimal set (balanced).
+func (c *Config) SetLoginCredentialAttempts(enabled, fullList bool) *Config {
+	c.LoginCredentialAttempts = enabled
+	c.LoginCredentialFullList = fullList
 	return c
 }

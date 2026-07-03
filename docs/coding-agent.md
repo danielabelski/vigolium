@@ -127,6 +127,39 @@ vigolium scan -S --format sqlite -o run --split-by-host -P 4 -T targets.txt  # �
 vigolium finding -S --db ./run-target.example.sqlite --min-severity high
 ```
 
+## Merge external `.sqlite` scans into one DB (`vigolium import`)
+
+The stateless reads above open a foreign `.sqlite` **in place**. To instead
+**fold** those external databases into a single one, `vigolium import` accepts a
+vigolium SQLite database as its source and merges it into the destination DB
+(the `--db` target, or the configured default when `--db` is omitted). The source
+is auto-detected by its SQLite header, so `.sqlite`, `.sqlite3`, `.db`, or a bare
+name all work. It's a lossless, **idempotent** merge — HTTP records, findings,
+scans, agentic scans, and OAST interactions all flow in, deduped on their natural
+keys (records by UUID, findings by `(project_uuid, finding_hash)`), so re-running
+the same import adds nothing. Each row keeps its original `project_uuid`.
+
+```bash
+# Merge one external scan DB into your default database.
+vigolium import other-vigolium-scan.sqlite
+
+# Merge into an explicit destination (--db is the target, not a filter).
+vigolium import --db default-db.sqlite other-vigolium-scan.sqlite
+
+# Collapse a directory of per-host/per-run exports into one combined DB.
+for f in scans/*.sqlite; do vigolium import --db combined.sqlite "$f"; done
+vigolium finding --db combined.sqlite --min-severity high
+
+# -j prints a per-table merge summary for scripting.
+vigolium -j import --db combined.sqlite other-vigolium-scan.sqlite
+```
+
+This is the natural companion to `vigolium scan -S --format sqlite` above: fan out
+scans into standalone per-host `.sqlite` files, then merge them back into one
+queryable database. (`import` also still ingests audit folders, JSONL exports,
+and `.tar.gz`/`.zip` archives — see `vigolium import -h`.) A Postgres destination
+is rejected with a clear error, since the merge is SQLite-to-SQLite.
+
 ## Render one finding/record as Markdown (`--markdown`)
 
 `--markdown` prints the selected findings/records as Markdown (evidence +

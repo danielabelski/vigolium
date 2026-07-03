@@ -102,6 +102,12 @@ type Crawler struct {
 	// crawl that revisits the landing does not re-enter the auth flow repeatedly.
 	loginCTAPrimed bool
 
+	// loginCredHosts single-flights the common-credential login pass per host, so
+	// a login form reachable from many states is only sprayed once. Guarded by
+	// loginCredMu.
+	loginCredMu    sync.Mutex
+	loginCredHosts map[string]bool
+
 	mu      sync.Mutex
 	stats   Stats
 	running bool
@@ -136,6 +142,14 @@ type Stats struct {
 	// LoginCTAText is the CTA's visible label (for logging).
 	LoginCTADriven bool
 	LoginCTAText   string
+
+	// Common-credential login pass (only runs at --intensity deep, against a
+	// confirmed local login form). LoginCredsTried counts credential pairs
+	// submitted across the crawl; LoginCredsSucceeded counts forms where a pair
+	// authenticated; LoginCredsURL is the last login form the pass ran against.
+	LoginCredsTried     int
+	LoginCredsSucceeded int
+	LoginCredsURL       string
 }
 
 // New creates a new crawler.
@@ -166,8 +180,16 @@ func New(cfg *config.Config) (*Crawler, error) {
 		eventableConditions: condition.NewEventableConditionChecker(),
 		writer:              network.NopWriter{}, // Default no-op; override with SetWriter()
 		stats:               Stats{},
+		loginCredHosts:      make(map[string]bool),
 		// NOTE: stateMachine, crawlPath, session initialized in initializeIndexState()
 	}
+
+	// Attach a per-crawl fill context so form values become response-aware:
+	// identity values (email/username/password) stay consistent across a
+	// register→login flow, on-page examples are preferred, and email/username are
+	// derived from the target. The login-credential pass reads back the same
+	// context to reuse an identity registered earlier in the crawl.
+	c.formHandler.SetFillContext(form.NewFillContext(cfg.URL))
 
 	// Convert config conditions
 	for _, cc := range cfg.CrawlConditions {
@@ -517,6 +539,12 @@ func (c *Crawler) initializeIndexState(ctx context.Context) error {
 		zap.L().Debug("Form filling enabled, detecting forms")
 		c.fillFormsIfPresent(page, "")
 	}
+
+	// If the landing itself is a login form, try common credentials (deep
+	// intensity only, confirmed-login-gated) so the crawl can proceed
+	// authenticated. Runs after form-filling so the fixed-identity fill has
+	// already seeded the fill context that this pass reuses.
+	c.attemptLoginCredentials(ctx, page)
 
 	return nil
 }
@@ -1555,6 +1583,12 @@ func (c *Crawler) inspectNewState(ctx context.Context, page *browser.Page, event
 	// HTML never contained. Deduped across the crawl so a recurring frame is
 	// fetched once.
 	c.primeIframeAssets(ctx, page)
+
+	// A login form can surface anywhere mid-crawl (a "Sign in" link, a gated
+	// section). If this newly reached state is a confirmed local login form, try
+	// common credentials once per host (deep intensity only) so the crawl can
+	// continue into the now-unlocked area.
+	c.attemptLoginCredentials(ctx, page)
 
 	// RLCRAWLER PARITY: Register new state with MAB policy
 	if c.mabPolicy != nil {

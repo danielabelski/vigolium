@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,6 +35,155 @@ func TestAuditFlagDefaults(t *testing.T) {
 	output := f.Lookup("output")
 	require.NotNil(t, output, "output flag must exist")
 	assert.Equal(t, "o", output.Shorthand, "output must keep the -o short form")
+
+	outputDir := f.Lookup("output-dir")
+	require.NotNil(t, outputDir, "output-dir flag must exist")
+	assert.Equal(t, "", outputDir.DefValue, "output-dir must default empty (off)")
+	assert.Equal(t, "", outputDir.Shorthand, "output-dir has no short form (-o is taken)")
+}
+
+// TestResolveAuditReportDest walks the report-destination / bundle-dir matrix
+// for --stateless runs: no bundle passes -o through; a bundle defaults the
+// report name, nests a relative -o, and lets an absolute path or gs:// URL win.
+func TestResolveAuditReportDest(t *testing.T) {
+	// No --output-dir: -o passes straight through, no bundle dir.
+	dest, bundle, err := resolveAuditReportDest("", "reports/r.html")
+	require.NoError(t, err)
+	assert.Equal(t, "reports/r.html", dest)
+	assert.Equal(t, "", bundle, "no bundle dir without --output-dir")
+
+	// No --output-dir and no -o: emit falls back to its own default (empty).
+	dest, bundle, err = resolveAuditReportDest("", "")
+	require.NoError(t, err)
+	assert.Equal(t, "", dest)
+	assert.Equal(t, "", bundle)
+
+	// Bundle + empty -o: report defaults to <bundle>/vigolium-audit-report.html.
+	dest, bundle, err = resolveAuditReportDest("out", "")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join("out", auditBundleReportName), dest)
+	assert.Equal(t, "out", bundle)
+
+	// Bundle + relative -o: nested under the bundle.
+	dest, bundle, err = resolveAuditReportDest("out", "custom.html")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join("out", "custom.html"), dest)
+	assert.Equal(t, "out", bundle)
+
+	// Bundle + absolute -o: the explicit path wins verbatim (escapes bundle).
+	abs := filepath.Join(t.TempDir(), "abs.html")
+	dest, bundle, err = resolveAuditReportDest("out", abs)
+	require.NoError(t, err)
+	assert.Equal(t, abs, dest)
+	assert.Equal(t, "out", bundle, "bundle dir still receives the raw copy")
+
+	// Bundle + gs:// -o: uploaded verbatim, bundle still collects raw results.
+	dest, bundle, err = resolveAuditReportDest("out", "gs://proj/reports/r.html")
+	require.NoError(t, err)
+	assert.Equal(t, "gs://proj/reports/r.html", dest)
+	assert.Equal(t, "out", bundle)
+}
+
+// TestResolveAuditReportDest_TimestampShared confirms a {ts} placeholder in
+// --output-dir is expanded once, so the report path and the bundle dir (which
+// receives the raw copy) resolve to the SAME directory.
+func TestResolveAuditReportDest_TimestampShared(t *testing.T) {
+	dest, bundle, err := resolveAuditReportDest("bundle-{ts}", "")
+	require.NoError(t, err)
+	assert.NotContains(t, bundle, "{ts}", "{ts} must be expanded in the bundle dir")
+	assert.NotContains(t, dest, "{ts}", "{ts} must be expanded in the report path")
+	assert.Equal(t, filepath.Join(bundle, auditBundleReportName), dest,
+		"report must sit inside the resolved bundle dir")
+}
+
+// TestBundleAuditRawResults_SingleDriver copies one driver's synced
+// vigolium-results/ tree into <bundle>/vigolium-results (flat, no namespacing).
+func TestBundleAuditRawResults_SingleDriver(t *testing.T) {
+	sess := t.TempDir()
+	seedRawResults(t, sess, "findings/f1.json", `{"id":1}`)
+	plans := []*driverPlan{{name: "audit", sessionDir: sess}}
+
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	n, err := bundleAuditRawResults(bundle, plans)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	got, readErr := os.ReadFile(filepath.Join(bundle, "vigolium-results", "findings", "f1.json"))
+	require.NoError(t, readErr, "raw results must be copied flat under the bundle")
+	assert.Equal(t, `{"id":1}`, string(got))
+}
+
+// TestBundleAuditRawResults_SkipsFailedAndMissing ignores drivers that errored
+// or produced no vigolium-results/ folder.
+func TestBundleAuditRawResults_SkipsFailedAndMissing(t *testing.T) {
+	okSess := t.TempDir()
+	seedRawResults(t, okSess, "report.md", "ok")
+	failSess := t.TempDir()
+	seedRawResults(t, failSess, "report.md", "partial")
+	emptySess := t.TempDir() // no vigolium-results/ at all
+
+	plans := []*driverPlan{
+		{name: "audit", sessionDir: okSess},
+		{name: "piolium", sessionDir: failSess, runErr: errDriverFailed},
+		{name: "extra", sessionDir: emptySess},
+	}
+
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	n, err := bundleAuditRawResults(bundle, plans)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the one successful driver with output is copied")
+
+	// The single survivor lands flat (namespacing only kicks in for >1 copy).
+	_, statErr := os.Stat(filepath.Join(bundle, "vigolium-results", "report.md"))
+	require.NoError(t, statErr)
+}
+
+// TestBundleAuditRawResults_MultiDriverNamespaced namespaces each driver's tree
+// under <bundle>/<driver>/vigolium-results when more than one produced output.
+func TestBundleAuditRawResults_MultiDriverNamespaced(t *testing.T) {
+	auditSess := t.TempDir()
+	seedRawResults(t, auditSess, "a.md", "A")
+	pioliumSess := t.TempDir()
+	seedRawResults(t, pioliumSess, "p.md", "P")
+
+	plans := []*driverPlan{
+		{name: "audit", sessionDir: auditSess},
+		{name: "piolium", sessionDir: pioliumSess},
+	}
+
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	n, err := bundleAuditRawResults(bundle, plans)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	_, aErr := os.Stat(filepath.Join(bundle, "audit", "vigolium-results", "a.md"))
+	require.NoError(t, aErr, "audit tree must be namespaced")
+	_, pErr := os.Stat(filepath.Join(bundle, "piolium", "vigolium-results", "p.md"))
+	require.NoError(t, pErr, "piolium tree must be namespaced")
+}
+
+// TestBundleAuditRawResults_Empty returns (0, nil) with no plans and creates
+// nothing.
+func TestBundleAuditRawResults_Empty(t *testing.T) {
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	n, err := bundleAuditRawResults(bundle, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+	_, statErr := os.Stat(bundle)
+	assert.True(t, os.IsNotExist(statErr), "no bundle dir created when there's nothing to copy")
+}
+
+// errDriverFailed is a sentinel non-nil error for driverPlan.runErr in tests.
+var errDriverFailed = errors.New("driver failed")
+
+// seedRawResults writes one file at <sessionDir>/vigolium-results/<rel> with
+// the given content, creating parent dirs — mimicking the audit harness's
+// synced session copy.
+func seedRawResults(t *testing.T, sessionDir, rel, content string) {
+	t.Helper()
+	dest := filepath.Join(sessionDir, "vigolium-results", rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
+	require.NoError(t, os.WriteFile(dest, []byte(content), 0o644))
 }
 
 // TestAuditAliasSharesFlags verifies the top-level `vigolium audit` alias is

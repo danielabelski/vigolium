@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -99,5 +100,87 @@ func TestImportJSONLOversizedLine(t *testing.T) {
 	}
 	if res.ParseErrors != 0 {
 		t.Errorf("ParseErrors = %d, want 0", res.ParseErrors)
+	}
+}
+
+// newFileDBForTest creates a schema-ready, file-backed SQLite database at path.
+// SQLite merges ATTACH a real source file, so an on-disk (not :memory:) database
+// is required on both sides of the merge.
+func newFileDBForTest(t *testing.T, path string) *database.DB {
+	t.Helper()
+	ctx := context.Background()
+	cfg := config.DefaultDatabaseConfig()
+	cfg.Driver = "sqlite"
+	cfg.SQLite.Path = path
+	db, err := database.NewDB(cfg)
+	if err != nil {
+		t.Fatalf("NewDB(%s): %v", path, err)
+	}
+	if err := db.CreateSchema(ctx); err != nil {
+		t.Fatalf("CreateSchema(%s): %v", path, err)
+	}
+	if err := db.SeedDefaults(ctx); err != nil {
+		t.Fatalf("SeedDefaults(%s): %v", path, err)
+	}
+	return db
+}
+
+// TestImportPathSQLiteMerge exercises the SQLite dispatch: a vigolium .sqlite
+// result database passed to ImportPath must be detected by its magic header and
+// merged (records + findings) into the destination, and a re-import must be a
+// no-op (idempotent dedup on natural keys).
+func TestImportPathSQLiteMerge(t *testing.T) {
+	ctx := context.Background()
+
+	// Source: a file-backed vigolium DB with one record + one finding, closed
+	// before the merge so its WAL is flushed (mirrors the real scan→import flow).
+	srcPath := filepath.Join(t.TempDir(), "external-scan.sqlite")
+	srcDB := newFileDBForTest(t, srcPath)
+	if _, err := srcDB.ExecContext(ctx, `INSERT INTO http_records
+		(uuid, project_uuid, scheme, hostname, port, method, path, url, http_version, request_hash)
+		VALUES ('rec-1', ?, 'https', 'example.com', 443, 'GET', '/', 'https://example.com/', 'HTTP/1.1', 'rh-1')`,
+		database.DefaultProjectUUID); err != nil {
+		t.Fatalf("seed source record: %v", err)
+	}
+	if _, err := srcDB.ExecContext(ctx, `INSERT INTO findings
+		(project_uuid, http_record_uuids, module_id, module_name, severity, finding_hash)
+		VALUES (?, '["rec-1"]', 'xss', 'XSS', 'high', 'fh-1')`,
+		database.DefaultProjectUUID); err != nil {
+		t.Fatalf("seed source finding: %v", err)
+	}
+	if err := srcDB.Close(); err != nil {
+		t.Fatalf("close source: %v", err)
+	}
+
+	// Destination: a separate file-backed vigolium DB (the current/primary one).
+	destDB := newFileDBForTest(t, filepath.Join(t.TempDir(), "dest.sqlite"))
+	t.Cleanup(func() { _ = destDB.Close() })
+	destRepo := database.NewRepository(destDB)
+
+	res, err := ImportPath(ctx, destRepo, srcPath, database.DefaultProjectUUID, Options{})
+	if err != nil {
+		t.Fatalf("ImportPath(sqlite): %v", err)
+	}
+	if res.MergeStats == nil {
+		t.Fatal("expected MergeStats to be set for a SQLite import")
+	}
+	if res.RecordsImported != 1 {
+		t.Errorf("RecordsImported = %d, want 1", res.RecordsImported)
+	}
+	if res.FindingsSaved != 1 {
+		t.Errorf("FindingsSaved = %d, want 1", res.FindingsSaved)
+	}
+
+	// Re-importing the same database merges nothing new.
+	res2, err := ImportPath(ctx, destRepo, srcPath, database.DefaultProjectUUID, Options{})
+	if err != nil {
+		t.Fatalf("ImportPath(sqlite) re-import: %v", err)
+	}
+	if res2.RecordsImported != 0 || res2.FindingsSaved != 0 {
+		t.Errorf("re-import merged new rows: records=%d findings=%d, want 0/0",
+			res2.RecordsImported, res2.FindingsSaved)
+	}
+	if res2.MergeStats == nil || res2.MergeStats.FindingsDeduped != 1 {
+		t.Errorf("re-import should dedup the 1 existing finding, got %+v", res2.MergeStats)
 	}
 }

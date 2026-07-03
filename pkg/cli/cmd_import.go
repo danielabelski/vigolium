@@ -23,14 +23,20 @@ import (
 
 var importCmd = &cobra.Command{
 	Use:   "import <path|gs://...>",
-	Short: "Import scan data from audit output folder, JSONL, or compressed archive",
+	Short: "Import scan data from an audit folder, JSONL, archive, or another vigolium SQLite database",
 	Long: `Import scan data into the database from various sources.
 
 Supported inputs:
   - Audit output folder: contains audit-state.json and findings-draft/
   - JSONL file: exported data with {"type": "...", "data": {...}} envelopes
     Supports http_record and finding types (e.g. from 'vigolium export --format jsonl')
-  - .tar.gz / .tgz / .zip archive containing either of the above
+  - Vigolium SQLite database (.sqlite/.sqlite3/.db, detected by header): merged
+    into the destination database — HTTP records, findings, scans, agentic scans
+    and OAST interactions, deduped on their natural keys (re-importing the same
+    database is a no-op). Each row keeps its original project. The destination is
+    the --db target, e.g. 'vigolium import --db main.sqlite other-scan.sqlite'
+    (or the configured default database when --db is omitted).
+  - .tar.gz / .tgz / .zip archive containing an audit folder or JSONL
   - gs://<project-uuid>/<key> URL to any of the above (downloaded then imported)
 
 Use --upload to push the local source to cloud storage after a successful import,
@@ -230,6 +236,13 @@ func printImportResult(localPath string, r *dbimport.Result) {
 		return
 	}
 
+	// A SQLite-database import is a merge, not a parse — summarize the merged
+	// tables (records/findings/scans/oast) rather than the JSONL/audit shape.
+	if r.MergeStats != nil {
+		printMergeResult(localPath, r.MergeStats)
+		return
+	}
+
 	if globalJSON {
 		out := map[string]interface{}{}
 		if uuid := r.AgenticScanUUID(); uuid != "" {
@@ -297,6 +310,39 @@ func printImportResult(localPath string, r *dbimport.Result) {
 	}
 	for typ, count := range r.SkippedTypes {
 		fmt.Printf("  Skipped %d %q entries\n", count, typ)
+	}
+}
+
+// printMergeResult renders the summary for a SQLite-database import — a
+// lossless SQLite→SQLite merge of another vigolium result database into the
+// current one. JSON when -j, human-readable otherwise.
+func printMergeResult(srcPath string, s *database.MergeStats) {
+	if globalJSON {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+			"merged_from":            srcPath,
+			"records_merged":         s.RecordsMerged,
+			"findings_merged":        s.FindingsMerged,
+			"findings_deduped":       s.FindingsDeduped,
+			"scans_merged":           s.ScansMerged,
+			"agentic_scans_merged":   s.AgenticScansMerged,
+			"projects_merged":        s.ProjectsMerged,
+			"finding_records_merged": s.FindingRecordsMerged,
+			"oast_merged":            s.OASTMerged,
+		})
+		return
+	}
+
+	fmt.Printf("%s Merged SQLite database %s\n", terminal.SuccessSymbol(), terminal.Cyan(srcPath))
+	fmt.Printf("  HTTP records: %d merged\n", s.RecordsMerged)
+	fmt.Printf("  Findings:     %d merged, %d duplicates skipped\n", s.FindingsMerged, s.FindingsDeduped)
+	if s.ScansMerged > 0 || s.AgenticScansMerged > 0 {
+		fmt.Printf("  Scans:        %d native, %d agentic\n", s.ScansMerged, s.AgenticScansMerged)
+	}
+	if s.ProjectsMerged > 0 {
+		fmt.Printf("  Projects:     %d merged\n", s.ProjectsMerged)
+	}
+	if s.OASTMerged > 0 {
+		fmt.Printf("  OAST:         %d interactions merged\n", s.OASTMerged)
 	}
 }
 

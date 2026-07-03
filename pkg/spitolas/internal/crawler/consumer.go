@@ -316,6 +316,10 @@ func (pc *ParallelCrawler) executeActionOnPage(ctx context.Context, page *browse
 		pc.fillFormsIfPresent(targetPage, actionID)
 	}
 
+	// If this page is a confirmed local login form, try common credentials once
+	// per host (deep intensity only) so the crawl can proceed authenticated.
+	pc.attemptLoginCredentials(ctx, targetPage)
+
 	// Execute the action
 	ident := candidate.GetIdentification()
 	if ident == nil {

@@ -33,6 +33,23 @@ type Handler struct {
 	config       *config.Config
 	inputConfigs map[string]*action.FormInput
 	rng          *rand.Rand
+
+	// fillCtx makes value selection response-aware: reuse of identity values
+	// across the crawl and target-derived / on-page-example values. Nil by
+	// default (unit tests, direct construction) — when nil the Handler behaves
+	// exactly as before. The crawler attaches one per crawl.
+	fillCtx *FillContext
+}
+
+// SetFillContext attaches a per-crawl FillContext, enabling response-aware and
+// target-derived value selection. Safe to call once during setup.
+func (h *Handler) SetFillContext(fc *FillContext) {
+	h.fillCtx = fc
+}
+
+// FillContext returns the attached FillContext (nil when none).
+func (h *Handler) FillContext() *FillContext {
+	return h.fillCtx
 }
 
 // identificationKey creates a map key from identification how and value.
@@ -114,7 +131,9 @@ func (h *Handler) DetectForms(page *browser.Page) ([]*Form, error) {
 					step: input.step || '',
 					placeholder: input.placeholder || '',
 					label: getLabel(input),
-					accept: input.accept || ''
+					accept: input.accept || '',
+					defaultValue: input.value || input.getAttribute('value') || '',
+					datalist: (() => { try { const dl = input.list; if (dl && dl.options) return Array.from(dl.options).map(o => o.value).filter(Boolean); } catch (e) {} return []; })()
 				};
 				formData.inputs.push(inputData);
 			}
@@ -253,6 +272,8 @@ func (h *Handler) parseInputData(data map[string]interface{}) *DetectedInput {
 	detected.Placeholder = getString(data, "placeholder")
 	detected.Label = getString(data, "label")
 	detected.Accept = getString(data, "accept")
+	detected.DefaultValue = getString(data, "defaultValue")
+	detected.DatalistOptions = getStringSlice(data, "datalist")
 	detected.Hidden = getBool(data, "hidden")
 	detected.TriggerXPath = getString(data, "triggerXPath")
 
@@ -284,6 +305,8 @@ func (h *Handler) DetectInputs(page *browser.Page) ([]*DetectedInput, error) {
 				placeholder: input.placeholder || '',
 				label: getLabel(input),
 				accept: input.accept || '',
+				defaultValue: input.value || input.getAttribute('value') || '',
+				datalist: (() => { try { const dl = input.list; if (dl && dl.options) return Array.from(dl.options).map(o => o.value).filter(Boolean); } catch (e) {} return []; })(),
 				hidden: hidden,
 				triggerXPath: hidden && input.type === 'file' ? findTriggerXPath(input) : ''
 			};
@@ -499,6 +522,8 @@ func (h *Handler) DetectAll(page *browser.Page) ([]*Form, []*DetectedInput, erro
 				placeholder: input.placeholder || '',
 				label: getLabel(input),
 				accept: input.accept || '',
+				defaultValue: input.value || input.getAttribute('value') || '',
+				datalist: (() => { try { const dl = input.list; if (dl && dl.options) return Array.from(dl.options).map(o => o.value).filter(Boolean); } catch (e) {} return []; })(),
 				hidden: hidden,
 				triggerXPath: hidden && input.type === 'file' ? findTriggerXPath(input) : ''
 			};
@@ -1026,6 +1051,15 @@ func (h *Handler) getValueForInput(input *DetectedInput) string {
 		return val
 	}
 
+	// 2.5 Response-aware value (real crawls only — active when a FillContext is
+	// attached). Reuses an identity value already used this crawl (keeping a
+	// register→login flow consistent), prefers a value the page itself suggests,
+	// and derives email/username from the target. No FillContext → skipped, so
+	// direct/unit construction keeps the original behavior.
+	if v, ok := h.responseAwareValue(input); ok {
+		return v
+	}
+
 	// 3. Strict HTML5 typed inputs (url/tel/number/range/color/date/time) need a
 	// format-valid value: the name-based smart step below returns "a" for an
 	// unmatched field, which these types reject — so the form fails validation
@@ -1269,6 +1303,73 @@ const (
 	FixedPassword = "Server2018!!"
 )
 
+// responseAwareValue resolves a value using the per-crawl FillContext: it reuses
+// an identity value already used this crawl, prefers a concrete value the page
+// itself suggests, and derives email/username from the target. It returns
+// (value, true) when it produced a value and (‑, false) when the caller should
+// fall through to the existing typed/smart/random logic. When no FillContext is
+// attached it always returns (‑, false), preserving the original behavior.
+func (h *Handler) responseAwareValue(input *DetectedInput) (string, bool) {
+	fc := h.fillCtx
+	if fc == nil || input.FormInput == nil {
+		return "", false
+	}
+
+	sem := classifyField(input)
+	if sem == SemUnknown {
+		// Generic field: use a concrete value the page offers (value=/datalist/
+		// example placeholder); otherwise defer to the existing logic.
+		if v := exampleValue(input); v != "" {
+			return v, true
+		}
+		return "", false
+	}
+
+	// Identity field: reuse the value chosen earlier this crawl so a signup and a
+	// later login carry the same identity, else derive and remember one.
+	if v, ok := fc.Recall(sem); ok {
+		return v, true
+	}
+	if v := h.deriveIdentityValue(sem, input); v != "" {
+		fc.Remember(sem, v)
+		return v, true
+	}
+	return "", false
+}
+
+// deriveIdentityValue picks the value for an identity field the first time it is
+// seen: a page-provided example when it fits the semantic, then a target-derived
+// value for email/username, falling back to the original smart value (the fixed
+// credentials / static table) so password strength and behavior are preserved.
+func (h *Handler) deriveIdentityValue(sem FieldSemantic, input *DetectedInput) string {
+	switch sem {
+	case SemPassword:
+		// Never take a password from the page; keep the strong fixed value.
+		return h.getSmartValue(input)
+	case SemEmail:
+		if ex := exampleValue(input); ex != "" && strings.Contains(ex, "@") {
+			return ex
+		}
+		if d := h.fillCtx.Domain(); d != "" {
+			return crawlLocalPart + "@" + d
+		}
+		return h.getSmartValue(input)
+	case SemUsername:
+		if ex := exampleValue(input); ex != "" && !strings.ContainsAny(ex, " @") {
+			return ex
+		}
+		if u := h.fillCtx.UsernameFromDomain(); u != "" {
+			return u
+		}
+		return h.getSmartValue(input)
+	default: // name, phone
+		if ex := exampleValue(input); ex != "" {
+			return ex
+		}
+		return h.getSmartValue(input)
+	}
+}
+
 // getSmartValue generates intelligent values based on input name/id/placeholder/label.
 // Note: email, username, password use FIXED values for consistent register/login during crawl.
 func (h *Handler) getSmartValue(input *DetectedInput) string {
@@ -1278,34 +1379,31 @@ func (h *Handler) getSmartValue(input *DetectedInput) string {
 	label := strings.ToLower(input.Label)
 	targets := []string{name, id, placeholder, label}
 
-	// Email patterns - FIXED for consistent login
-	if containsAny(targets, "email", "mail", "e-mail", "correo") {
+	// Identity patterns - FIXED for consistent login (keyword lists shared with
+	// classifyField so the two never drift).
+	if containsAny(targets, emailFieldKeywords...) {
 		return FixedEmail
 	}
-
-	// Password patterns - FIXED for consistent login
-	if containsAny(targets, "password", "passwd", "pwd", "pass", "secret") {
+	if containsAny(targets, passwordFieldKeywords...) {
 		return FixedPassword
 	}
-
-	// Username patterns - FIXED for consistent login
-	if containsAny(targets, "username", "user_name", "login", "userid", "user_id") {
+	if containsAny(targets, usernameFieldKeywords...) {
 		return FixedUsername
 	}
 
 	// Phone patterns
-	if containsAny(targets, "phone", "tel", "mobile", "cell", "fax", "telefono") {
+	if containsAny(targets, phoneFieldKeywords...) {
 		return "+15551234567"
 	}
 
 	// Name patterns - check specific patterns first
-	if containsAny(targets, "firstname", "first_name", "fname", "given_name", "givenname") {
+	if containsAny(targets, firstNameFieldKeywords...) {
 		return "Crawl"
 	}
-	if containsAny(targets, "lastname", "last_name", "lname", "surname", "family_name", "familyname") {
+	if containsAny(targets, lastNameFieldKeywords...) {
 		return "Tester"
 	}
-	if containsAny(targets, "fullname", "full_name") {
+	if containsAny(targets, fullNameFieldKeywords...) {
 		return "Crawl Tester"
 	}
 	// Generic "name" - avoid matching "username"
@@ -1589,6 +1687,26 @@ func getBool(m map[string]interface{}, key string) bool {
 		}
 	}
 	return false
+}
+
+// getStringSlice extracts a []string from a JS-returned []interface{} of
+// strings (e.g. datalist option values); non-string entries are skipped.
+func getStringSlice(m map[string]interface{}, key string) []string {
+	v, ok := m[key]
+	if !ok {
+		return nil
+	}
+	arr, ok := v.([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, e := range arr {
+		if s, ok := e.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func getInt(m map[string]interface{}, key string) int {

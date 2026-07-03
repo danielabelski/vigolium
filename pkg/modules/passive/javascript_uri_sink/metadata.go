@@ -9,11 +9,11 @@ const (
 )
 
 var (
-	ModuleDesc = `**What it means:** A javascript: protocol URI was found inside a URL-based HTML attribute (href, src, action, or formaction) - a potential XSS sink. It is only exploitable when the URI is built from unvalidated user input. Reported Medium/Firm only when a request parameter value is reflected into the URI; a static, site-authored javascript: URI (no reflected input) is reported Info/Tentative as an observation, and browser no-ops (javascript:void(0)) and framework postback helpers (ASP.NET __doPostBack, document.form.submit()) are not reported at all.
+	ModuleDesc = `**What it means:** A javascript: URI was found in a URL-based HTML attribute (href, src, action, formaction) - a potential XSS sink, exploitable only when built from unvalidated input. Reported Medium/Firm when a request parameter is reflected into the URI; a static URI is Info/Tentative, and browser no-ops (javascript:void(0)) and framework postback helpers (__doPostBack, form.submit()) are not reported.
 
-**How it's exploited:** An attacker crafts a link or form whose URL attribute begins with javascript: (including encoded variants) using reflected input; when the victim clicks or submits, the script runs in their session.
+**How it's exploited:** An attacker crafts a link or form whose URL attribute begins with javascript: (including encoded variants) from reflected input; clicking or submitting runs the script in the victim's session.
 
-**Fix:** Reject or strip javascript: and other non-http schemes, and allow-list only safe protocols like http/https/mailto.`
+**Fix:** Reject non-http schemes and allow-list safe protocols (http/https/mailto).`
 
 	ModuleConfirmation = "Confirmed when a request parameter value is reflected into a javascript: URI in a URL-based HTML attribute (Medium/Firm); a static javascript: URI with no reflected input is an Info observation"
 	ModuleSeverity     = severity.Medium

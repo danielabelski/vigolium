@@ -59,6 +59,10 @@ type serverOptions struct {
 	// as a live filesystem tree (in addition to the database).
 	MirrorFS string
 
+	// PassiveOnly, with -S/--scan-on-receive, restricts scanning to passive
+	// modules only (no active scan traffic; includes secret detection).
+	PassiveOnly bool
+
 	// Catchup scan
 	CatchupThreads int
 	DisableCatchup bool
@@ -131,6 +135,8 @@ func init() {
 		"Continuously scan new HTTP records as they arrive in the database")
 	flags.BoolVar(&globalFullNativeScanOnReceive, "full-native-scan-on-receive", false,
 		"Run the full native scan pipeline (discovery + spidering + dynamic-assessment) continuously on received records, instead of dynamic-assessment only")
+	flags.BoolVar(&serverOpts.PassiveOnly, "passive-only", false,
+		"With -S/--scan-on-receive, run passive modules only (no active scan traffic; includes secret detection)")
 
 	// Catchup scan group
 	flags.IntVar(&serverOpts.CatchupThreads, "catchup-threads", 4,
@@ -161,10 +167,16 @@ func init() {
 
 // newServerRunnerOptions builds the types.Options used by `vigolium server`
 // for its scan-on-receive runner. Extracted so the shape can be unit-tested.
-// Both Modules and PassiveModules MUST be "all" — omitting PassiveModules
-// silently drops all 91 passive modules in server mode (regression guarded
-// by pkg/cli/server_options_test.go).
+// PassiveModules MUST be "all" — omitting it silently drops all passive
+// modules in server mode (regression guarded by pkg/cli/server_options_test.go).
+// Modules is "all" by default; with so.PassiveOnly it is left empty so the
+// runner (internal/runner/runner_modules.go) resolves zero active modules,
+// yielding a passive-only scan that still sends no active traffic.
 func newServerRunnerOptions(so *serverOptions, concurrency, maxPerHost, maxHostError int, proxy string, verbose bool) *types.Options {
+	activeModules := []string{"all"}
+	if so.PassiveOnly {
+		activeModules = nil
+	}
 	return &types.Options{
 		Concurrency:    concurrency,
 		MaxPerHost:     maxPerHost,
@@ -175,7 +187,7 @@ func newServerRunnerOptions(so *serverOptions, concurrency, maxPerHost, maxHostE
 		Verbose:        verbose,
 		Silent:         true,
 		ProxyURL:       proxy,
-		Modules:        []string{"all"},
+		Modules:        activeModules,
 		PassiveModules: []string{"all"},
 	}
 }
@@ -529,6 +541,13 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 	// --full-native-scan-on-receive implies --scan-on-receive
 	if globalFullNativeScanOnReceive {
 		globalScanOnReceive = true
+	}
+
+	// --passive-only zeroes active modules, but --full-native-scan-on-receive
+	// still runs discovery + spidering, which actively crawl (send requests).
+	// Warn but allow: passive modules run on the crawled + ingested traffic.
+	if serverOpts.PassiveOnly && globalFullNativeScanOnReceive {
+		zap.L().Warn("--passive-only zeroes active scan modules, but --full-native-scan-on-receive still crawls (discovery + spidering send requests); for zero active traffic use --scan-on-receive without --full-native-scan-on-receive")
 	}
 
 	// Create runner options (concurrency comes from global -c/--concurrency flag)

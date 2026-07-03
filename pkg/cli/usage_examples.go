@@ -157,6 +157,8 @@ var serverExamples = FormatExamples(
 	"",
 	"# Auto-scan ingested traffic as it arrives",
 	"vigolium server --scan-on-receive",
+	"# Passive modules only (no active traffic; includes secret detection)",
+	"vigolium server --scan-on-receive --passive-only",
 	"# Scan on receive with specific modules and concurrency",
 	"vigolium server --scan-on-receive -m xss-reflected,sqli-error -c 50",
 	"# Scan on receive with more catchup workers",
@@ -171,7 +173,7 @@ var serverExamples = FormatExamples(
 	"",
 	"# Mirror ingested traffic + findings to a live filesystem tree",
 	"# (<dir>/traffic + <dir>/findings, readable with ls/grep/jq as records arrive)",
-	"vigolium server --mirror-fs sample -A",
+	"vigolium server -A --mirror-fs output-dir",
 	"# Same, but store records in a custom database file",
 	"vigolium server --db custom.sqlite --mirror-fs sample -A",
 	"",
@@ -832,6 +834,10 @@ var agentAuditExamples = FormatExamples(
 	"# Stateless run with a custom report path ({ts}=timestamp; gs:// also works)",
 	"vigolium audit --source ~/src/your-app -S -o reports/my-app-{ts}.html",
 	"",
+	"# Stateless run bundled into one folder: HTML report + a copy of the raw",
+	"# vigolium-results/ tree (source-tree copy still kept). {ts} also works.",
+	"vigolium audit --source ~/src/your-app -S --output-dir audit-out-{ts}",
+	"",
 	"# Keep raw results in the source tree (default), or clean them afterward",
 	"vigolium audit --source ~/src/your-app             # keeps <source>/vigolium-results/",
 	"vigolium audit --source ~/src/your-app --clean-raw # removes it after the run",
@@ -1068,6 +1074,12 @@ var storageRmExamples = FormatExamples(
 )
 
 var importExamples = FormatExamples(
+	"# Merge another vigolium SQLite scan DB into your default database",
+	"vigolium import other-vigolium-scan.sqlite",
+	"# Merge into an explicit destination database (--db is the target)",
+	"vigolium import --db default-db.sqlite other-vigolium-scan.sqlite",
+	"# Combine many external scan DBs into one (idempotent — re-runs are no-ops)",
+	"for f in scans/*.sqlite; do vigolium import --db combined.sqlite \"$f\"; done",
 	"# Import a folder produced by vigolium-audit",
 	"vigolium import ./audit-output/",
 	"# Import a folder and also archive it to cloud storage afterwards",
@@ -1155,4 +1167,73 @@ var projectExamples = FormatExamples(
 	"# Add/remove access later",
 	"vigolium project allow <uuid> @newdomain.com user@example.com",
 	"vigolium project remove-access <uuid> @olddomain.com",
+)
+
+var projectDeleteExamples = FormatExamples(
+	"# Delete a project and everything tied to it (prompts for confirmation)",
+	"vigolium project delete 9b2f-...",
+	"# Skip the confirmation prompt",
+	"vigolium project delete 9b2f-... -F",
+	"# Delete the project's data but keep its config directory on disk",
+	"vigolium project delete 9b2f-... --keep-config -F",
+	"# 'rm' and 'remove' are aliases",
+	"vigolium project rm 9b2f-...",
+)
+
+var replayExamples = FormatExamples(
+	"# Confirm a stored record with a SQLi payload",
+	"vigolium replay --record-uuid abc12345 -m 'name=id,payload=1 OR 1=1'",
+	"# Replay a curl command verbatim (auto-baseline by re-sending)",
+	`vigolium replay -i "curl -X POST https://example.com/api/login -d 'u=admin'"`,
+	"# Replay a finding's stored evidence with an XSS payload",
+	"vigolium replay --finding-id 42 -m 'name=q,payload=<svg/onload=alert(1)>'",
+	"",
+	"# Multi-step auth via a persistent cookie jar",
+	"vigolium replay --session-id login -i curl-login.sh",
+	"vigolium replay --session-id login --record-uuid <action-uuid>",
+	"# Confirm against a different environment than the baseline",
+	"vigolium replay --record-uuid abc12345 --target https://staging.example.com \\",
+	"                 -m 'name=user,payload=admin' -H 'X-Forwarded-For: 127.0.0.1'",
+	"",
+	"# BULK: replay ALL stored traffic through Burp (JSONL out, 5 at a time)",
+	"vigolium replay --all --proxy http://127.0.0.1:8080 -c 5",
+	"# BULK: replay every record from a standalone export (project scoping off)",
+	"vigolium replay -S --db scan.sqlite --all --proxy http://127.0.0.1:8080 -c 5",
+	"# BULK: fuzz an 'id' param across every matching GET record",
+	"vigolium replay --method GET --host api.example.com -m 'name=id,payload=1 OR 1=1'",
+)
+
+var agentTriageExamples = FormatExamples(
+	"# Triage a specific finding by ID",
+	"vigolium agent triage 42",
+	"# Open the finding picker (TUI) and triage the selected one",
+	"vigolium agent triage",
+	"# Preview the rendered prompt without calling the agent or touching the DB",
+	"vigolium agent triage 42 --dry-run",
+	"# Show the rendered prompt on stderr while triaging",
+	"vigolium agent triage 42 --show-prompt",
+	"# Cap the triage run's wall-clock time",
+	"vigolium agent triage 42 --max-duration 2m",
+)
+
+var extensionsExampleExamples = FormatExamples(
+	"# Print every example extension (all supported formats)",
+	"vigolium extensions example",
+	"# Print only the catalog index (keys + titles)",
+	"vigolium extensions example --list",
+	"# Filter examples by key, language, type, or title",
+	"vigolium extensions example active",
+	"# Print a single example by its catalog key",
+	"vigolium extensions example js-active-insertion",
+	"# Restrict to one language",
+	"vigolium extensions example --lang yaml",
+)
+
+var updateExamples = FormatExamples(
+	"# Update the binary and refresh nuclei templates",
+	"vigolium update",
+	"# Only refresh nuclei templates (skip the binary reinstall)",
+	"vigolium update --skip-binary",
+	"# Only reinstall the binary (skip templates)",
+	"vigolium update --skip-templates",
 )
