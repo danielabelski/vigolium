@@ -2,6 +2,8 @@ package mcp_server_probe
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
@@ -55,6 +57,13 @@ type mcpEndpoint struct {
 	resources  []mcpinfra.Resource
 	prompts    []mcpinfra.Prompt
 	callables  []toolCallEvidence
+	// skipped names tools that were NOT invoked because their name suggests a
+	// state-changing/destructive operation — surfaced so an operator can verify
+	// callability by hand rather than have the scanner trigger side effects.
+	skipped []string
+	// secretLeaks records "<tool> -> <secret kind>" where a tool's output leaked
+	// a high-confidence credential.
+	secretLeaks []string
 }
 
 type toolCallEvidence struct {
@@ -203,9 +212,22 @@ func (m *Module) enumerateAndInvoke(
 	}
 	for i := 0; i < maxTools; i++ {
 		tool := ep.tools[i]
+		// Safety guard: never invoke a tool whose name suggests a state-changing
+		// or destructive operation. Probing callability must not delete/send/exec
+		// anything on an unauthenticated server.
+		if looksStateChanging(tool.Name) {
+			ep.skipped = append(ep.skipped, tool.Name)
+			continue
+		}
 		args := mcpinfra.GenerateSampleArgs(tool.InputSchema)
 		callResult, _, err := client.CallTool(100+i, tool.Name, args)
 		if err != nil || callResult == nil {
+			continue
+		}
+		// A tool that returns an application-level error (isError) was reachable
+		// but did NOT successfully execute — it must not escalate the finding to
+		// "callable/invocable". Only a non-error result proves the call ran.
+		if callResult.IsError {
 			continue
 		}
 		var respText string
@@ -219,7 +241,66 @@ func (m *Module) enumerateAndInvoke(
 			toolName: tool.Name,
 			response: truncate(respText, 200),
 		})
+		// A tool that returns a live credential in its output is a direct data
+		// leak — scan the (unauthenticated) response for high-confidence secrets.
+		for _, kind := range scanSecrets(respText) {
+			ep.secretLeaks = append(ep.secretLeaks, fmt.Sprintf("%s -> %s", tool.Name, kind))
+		}
 	}
+}
+
+// secretPatterns are high-precision, structurally-prefixed credential formats —
+// chosen so a benign tool output can't false-positive on a generic token shape.
+var secretPatterns = []struct {
+	kind string
+	re   *regexp.Regexp
+}{
+	{"AWS access key id", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
+	{"private key", regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----`)},
+	{"GitHub token", regexp.MustCompile(`\bghp_[0-9A-Za-z]{36}\b`)},
+	{"GitHub fine-grained PAT", regexp.MustCompile(`\bgithub_pat_[0-9A-Za-z_]{60,}`)},
+	{"Slack token", regexp.MustCompile(`\bxox[baprs]-[0-9A-Za-z-]{10,}`)},
+	{"Google API key", regexp.MustCompile(`\bAIza[0-9A-Za-z_\-]{35}\b`)},
+	{"Stripe secret key", regexp.MustCompile(`\bsk_live_[0-9A-Za-z]{24,}`)},
+	{"JWT", regexp.MustCompile(`\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}`)},
+}
+
+// scanSecrets returns the distinct kinds of high-confidence secret found in s.
+func scanSecrets(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var kinds []string
+	seen := map[string]bool{}
+	for _, p := range secretPatterns {
+		if !seen[p.kind] && p.re.MatchString(s) {
+			seen[p.kind] = true
+			kinds = append(kinds, p.kind)
+		}
+	}
+	return kinds
+}
+
+// stateChangingVerbs are substrings in a tool name that indicate a
+// side-effecting operation the probe must not trigger blindly.
+var stateChangingVerbs = []string{
+	"delete", "remove", "destroy", "drop", "purge", "wipe", "clear",
+	"create", "insert", "add", "write", "update", "edit", "modify", "patch",
+	"send", "email", "post", "publish", "upload", "deploy", "push",
+	"exec", "run", "eval", "shell", "command",
+	"shutdown", "restart", "reboot", "reset", "kill", "stop", "terminate",
+	"grant", "revoke", "install", "uninstall", "rename", "move",
+	"pay", "transfer", "charge", "refund", "order", "checkout",
+}
+
+func looksStateChanging(name string) bool {
+	n := strings.ToLower(name)
+	for _, v := range stateChangingVerbs {
+		if strings.Contains(n, v) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildResults creates ResultEvent findings from discovered endpoints.
@@ -231,8 +312,10 @@ func (m *Module) buildResults(ctx *httpmsg.HttpRequestResponse, endpoints []mcpE
 	var evidence []string
 	var toolNames []string
 	var callableNames []string
+	var secretLeaks []string
 
 	for _, ep := range endpoints {
+		secretLeaks = append(secretLeaks, ep.secretLeaks...)
 		evidence = append(evidence, fmt.Sprintf("Endpoint: %s (transport: %s)", ep.path, ep.transport))
 		if ep.serverInfo != nil {
 			evidence = append(evidence, fmt.Sprintf("Server: %s %s", ep.serverInfo.Name, ep.serverInfo.Version))
@@ -268,6 +351,9 @@ func (m *Module) buildResults(ctx *httpmsg.HttpRequestResponse, endpoints []mcpE
 		for _, c := range ep.callables {
 			callableNames = append(callableNames, fmt.Sprintf("Callable: %s -> %s", c.toolName, c.response))
 		}
+		if len(ep.skipped) > 0 {
+			evidence = append(evidence, fmt.Sprintf("Not invoked (name suggests state change, verify manually): %s", strings.Join(ep.skipped, ", ")))
+		}
 	}
 
 	confidence := severity.Firm
@@ -290,7 +376,7 @@ func (m *Module) buildResults(ctx *httpmsg.HttpRequestResponse, endpoints []mcpE
 		urlx.Host, len(endpoints), len(toolNames), len(callableNames),
 	)
 
-	return []*output.ResultEvent{
+	results := []*output.ResultEvent{
 		{
 			Host:             urlx.Host,
 			URL:              baseURL,
@@ -310,6 +396,28 @@ func (m *Module) buildResults(ctx *httpmsg.HttpRequestResponse, endpoints []mcpE
 			},
 		},
 	}
+
+	// A tool that returned a live credential in its (unauthenticated) output is
+	// a distinct, higher-signal data-leak finding.
+	if len(secretLeaks) > 0 {
+		results = append(results, &output.ResultEvent{
+			Host:             urlx.Host,
+			URL:              baseURL,
+			Matched:          baseURL,
+			MatcherStatus:    true,
+			ExtractedResults: secretLeaks,
+			Info: output.Info{
+				Name:        "MCP Tool Output Leaks Secret",
+				Description: fmt.Sprintf("MCP server at %s returned high-confidence credential(s) in tool output when called without authentication: %s.", urlx.Host, strings.Join(secretLeaks, "; ")),
+				Severity:    severity.High,
+				Confidence:  severity.Firm,
+				Tags:        []string{"mcp", "secret-leak", "info-disclosure"},
+				Reference:   []string{"https://modelcontextprotocol.io/specification/2025-11-25/server/tools"},
+			},
+		})
+	}
+
+	return results
 }
 
 func truncate(s string, maxLen int) string {

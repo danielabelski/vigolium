@@ -87,6 +87,7 @@ func init() {
 	flags.BoolVar(&scanURLNoPassive, "no-passive", false, "Skip passive modules")
 	flags.StringSliceVarP(&globalTargets, "target", "t", nil, "Target URL to scan (repeatable; alternative to the positional URL argument)")
 	registerScanModuleFlags(flags)
+	registerModuleSelectionFlags(flags)
 	registerHTTPClientFlags(flags)
 	registerPhaseFlags(flags)
 	registerLightweightScanIOFlags(flags)
@@ -111,13 +112,15 @@ func hasFileOutputFormat() bool {
 // needsRunnerScan reports whether the request must run through the full
 // native-scan Runner rather than the lightweight in-memory direct path. That is
 // required whenever a phase is enabled, results are persisted/exported to a file
-// (-o), the run is stateless (-S), phases are skipped (--skip), or a file output
-// format is requested — none of which the direct path implements.
+// (-o), the run is stateless (-S), phases are skipped (--skip), findings are
+// printed as Markdown (--print-finding, which renders from the DB), or a file
+// output format is requested — none of which the direct path implements.
 func needsRunnerScan() bool {
 	return hasPhaseFlags() ||
 		globalStateless ||
 		scanOpts.Output != "" ||
 		len(globalSkipPhases) > 0 ||
+		scanPrintFinding ||
 		hasFileOutputFormat()
 }
 
@@ -134,6 +137,9 @@ func runScanURLCmd(_ *cobra.Command, args []string) error {
 	defer syncLogger()
 
 	if err := resetFailOnGate(); err != nil {
+		return err
+	}
+	if err := validateModuleSelectionFlags(scanURLNoPassive); err != nil {
 		return err
 	}
 
@@ -304,26 +310,25 @@ func setupScanHTTPStack() (*http.Requester, *services.Services, func(), error) {
 
 // getFilteredModules returns active and passive modules based on CLI flags.
 func getFilteredModules(moduleIDs []string, noPassive bool) ([]modules.ActiveModule, []modules.PassiveModule) {
-	var active []modules.ActiveModule
-	var passive []modules.PassiveModule
-
-	// Resolve fuzzy patterns to exact IDs
+	// Default selection from -m/--module-tag: resolved exact IDs apply to both
+	// registries (["all"] and any exact ID already flow through unchanged; only an
+	// empty result needs normalizing to "all").
 	resolved := modules.ResolveModulePatterns(moduleIDs)
-	isAll := len(resolved) == 0 || (len(resolved) == 1 && resolved[0] == "all")
-
-	if !isAll {
-		active = modules.GetActiveModulesByIDs(resolved)
-		if !noPassive {
-			passive = modules.GetPassiveModulesByIDs(resolved)
-		}
-	} else {
-		active = modules.GetActiveModules()
-		if !noPassive {
-			passive = modules.GetPassiveModules()
-		}
+	activeIDs := resolved
+	passiveIDs := resolved
+	if len(resolved) == 0 {
+		activeIDs = []string{"all"}
+		passiveIDs = []string{"all"}
 	}
 
-	return active, passive
+	// Layer --module-id / --passive-only / --no-passive on top.
+	applyModuleSelectionOverrides(&activeIDs, &passiveIDs, noPassive)
+
+	// Note: this direct single-request path deliberately does not apply the config
+	// enabled_modules allowlist or the intensity-tier ceiling — those narrow the
+	// pipeline path in the runner's getModulesToExecute; a direct scan-url/-request
+	// runs the resolved sentinel selection as-is.
+	return selectModulesByIDs(activeIDs, passiveIDs)
 }
 
 // colorStreamingModuleType returns the module-type colored for the streaming
@@ -604,14 +609,10 @@ func buildPhaseOptions(target string) *types.Options {
 	// Target
 	opts.Targets = []string{target}
 
-	// Modules
-	opts.Modules = resolveModules()
+	// Modules — active from -m/--module-tag, passive = all, then --module-id /
+	// --passive-only / --no-passive overrides.
+	opts.Modules, opts.PassiveModules = resolveModuleSelection(scanURLNoPassive)
 	opts.NoTechFilter = globalNoTechFilter
-
-	// Passive modules
-	if scanURLNoPassive {
-		opts.PassiveModules = nil
-	}
 
 	// Global CLI flags
 	opts.ScanUUID = globalScanUUID
@@ -842,6 +843,7 @@ func runRunnerScan(rr *httpmsg.HttpRequestResponse, target string) (err error) {
 		hosts := summaryScopeHosts(context.Background(), repo, settings, opts.Targets, opts.ProjectUUID, opts.ScanUUID)
 		printScanCompletionSummary(repo, opts.ProjectUUID, hosts, time.Since(scanStart))
 	}
+	maybePrintScanFindings(context.Background(), db, opts.ProjectUUID, opts.ScanUUID)
 	evaluateFailOnGate(repo, opts.ProjectUUID, opts.ScanUUID, opts.Silent)
 
 	return nil

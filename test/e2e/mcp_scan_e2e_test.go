@@ -426,7 +426,10 @@ func TestMCPServerProbe_SSETransport(t *testing.T) {
 }
 
 func TestMCPServerProbe_SampleGeneration(t *testing.T) {
-	// Verify tools/call sends appropriate sample data by checking what the server receives
+	// Verify tools/call sends appropriate sample data by checking what the server
+	// receives. The tool name must be read-only: the probe's safety guard skips
+	// any tool whose name suggests a state-changing operation (e.g. "send_email"),
+	// so a name like that would never be invoked and no sample args would be sent.
 	var receivedCalls []map[string]any
 
 	mux := http.NewServeMux()
@@ -457,8 +460,8 @@ func TestMCPServerProbe_SampleGeneration(t *testing.T) {
 			writeJSONRPCResult(w, req.ID, map[string]any{
 				"tools": []map[string]any{
 					{
-						"name":        "send_email",
-						"description": "Send an email",
+						"name":        "preview_message",
+						"description": "Render a message preview",
 						"inputSchema": map[string]any{
 							"type": "object",
 							"properties": map[string]any{

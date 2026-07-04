@@ -100,6 +100,30 @@ func DefaultUserAgent() string {
 	return resolveUserAgent(selector, ver)
 }
 
+// effectiveUserAgentSelector returns the User-Agent selector that is actually in
+// effect for outgoing requests: the VIGOLIUM_DEFAULT_UA environment variable
+// when set, otherwise the configured scanning_strategy.http.user_agent value.
+// The result is the raw selector keyword ("preset"/"random"/""/literal), not a
+// resolved User-Agent — callers compare it against UserAgentPreset to decide
+// whether the operator has opted away from the honest self-identifying default.
+func effectiveUserAgentSelector() string {
+	uaMu.RLock()
+	sel := uaOverride
+	uaMu.RUnlock()
+	if env, ok := os.LookupEnv(DefaultUserAgentEnvVar); ok {
+		sel = env
+	}
+	return strings.TrimSpace(sel)
+}
+
+// UserAgentIsHonestPreset reports whether the effective User-Agent selector is
+// the self-identifying "preset" default. When true the operator has not opted
+// into stealth (random/custom), so browser-harvested User-Agents should not be
+// silently pinned onto downstream requests.
+func UserAgentIsHonestPreset() bool {
+	return strings.EqualFold(effectiveUserAgentSelector(), UserAgentPreset)
+}
+
 // resolveUserAgent maps a selector value to a concrete User-Agent string.
 func resolveUserAgent(selector, ver string) string {
 	selector = strings.TrimSpace(selector)

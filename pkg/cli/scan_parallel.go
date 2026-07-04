@@ -365,9 +365,15 @@ func runStatelessTargetsParallel(cmd *cobra.Command, settings *config.Settings, 
 
 	if !scanOpts.Silent {
 		budget := parallel * scanOpts.Concurrency
-		fmt.Fprintf(os.Stderr, "\n%s %s scanning %s targets, %s at a time\n",
+		// "Parallel scanning …" only when more than one runs at a time; at -P 1
+		// the fan-out serializes, so call it a plain sequential scan.
+		scanKind := terminal.BoldHiBlue("Parallel") + " scanning"
+		if parallel <= 1 {
+			scanKind = terminal.BoldHiBlue("Scanning")
+		}
+		fmt.Fprintf(os.Stderr, "\n%s %s %s targets, %s at a time\n",
 			terminal.Purple(terminal.SymbolTarget),
-			terminal.BoldHiBlue("Parallel"),
+			scanKind,
 			terminal.HiCyan(fmt.Sprintf("%d", len(targets))),
 			terminal.HiCyan(fmt.Sprintf("%d", parallel)))
 		if budget > parallelSocketWarnThreshold {

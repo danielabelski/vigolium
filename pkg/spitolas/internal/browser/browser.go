@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
@@ -337,6 +338,44 @@ func (b *Browser) SetCurrentPage(page *Page) {
 // Used for browser-level operations like traffic capture.
 func (b *Browser) RodBrowser() *rod.Browser {
 	return b.rodBrowser
+}
+
+// UserAgent returns the User-Agent the browser presents to sites — the real
+// Chrome UA with "HeadlessChrome" rewritten to "Chrome" (see NewPage). Empty
+// until the first page is created. Callers harvest this after a crawl so
+// downstream phases can pin the exact UA the WAF issued its clearance cookie to.
+func (b *Browser) UserAgent() string {
+	return b.uaOverride
+}
+
+// HarvestCookies returns the browser's current cookie jar as net/http cookies.
+// Called at the end of a crawl to carry the session (including any WAF/bot
+// clearance cookies the real browser earned) forward into later scan phases.
+// Uses the timeout-bounded browser handle so a wedged browser can't hang the
+// harvest.
+func (b *Browser) HarvestCookies() ([]*http.Cookie, error) {
+	if b.rodBrowser == nil {
+		return nil, fmt.Errorf("no browser available")
+	}
+	raw, err := b.boundedBrowser().GetCookies()
+	if err != nil {
+		return nil, err
+	}
+	cookies := make([]*http.Cookie, 0, len(raw))
+	for _, c := range raw {
+		if c == nil || c.Name == "" {
+			continue
+		}
+		cookies = append(cookies, &http.Cookie{
+			Name:     c.Name,
+			Value:    c.Value,
+			Domain:   c.Domain,
+			Path:     c.Path,
+			Secure:   c.Secure,
+			HttpOnly: c.HTTPOnly,
+		})
+	}
+	return cookies, nil
 }
 
 // closePageWithTimeout attempts to close a page with timeout and retry logic.

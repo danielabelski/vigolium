@@ -270,9 +270,50 @@ func (h *HostRateLimiter) AcquireWithTimeout(host string) error {
 // deadline unblock a waiting acquire promptly, instead of stranding the
 // goroutine until acquireTimeout elapses.
 func (h *HostRateLimiter) AcquireWithTimeoutContext(ctx context.Context, host string) error {
+	// Fast path: an unsaturated host is by far the common case, and this is the
+	// single hottest path in the scanner (every outgoing request). Try a
+	// non-blocking acquire first so we avoid heap-allocating a timeout context
+	// and arming a runtime timer when a slot is immediately available.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if h.tryAcquire(host) {
+		return nil
+	}
+
+	// Slow path: the host is saturated — block up to acquireTimeout (derived
+	// from ctx so a scan shutdown can unblock the wait promptly).
 	acquireCtx, cancel := context.WithTimeout(ctx, h.acquireTimeout)
 	defer cancel()
 	return h.Acquire(acquireCtx, host)
+}
+
+// tryAcquire attempts a non-blocking slot acquisition. It returns true only if a
+// slot was obtained immediately, and never blocks — callers use it to skip the
+// timeout-context/timer setup on the uncontended hot path. The blocking retry
+// (with the same touch/inflight bookkeeping) lives in Acquire.
+func (h *HostRateLimiter) tryAcquire(host string) bool {
+	shard := h.shardFor(host)
+	entry := h.getOrCreateEntry(shard, host)
+
+	if entry.tokens != nil {
+		select {
+		case <-entry.tokens:
+			entry.inflight.Add(1)
+			entry.touch()
+			return true
+		default:
+			return false
+		}
+	}
+
+	select {
+	case entry.sem <- struct{}{}:
+		entry.touch()
+		return true
+	default:
+		return false
+	}
 }
 
 // Release releases a slot for the given host.

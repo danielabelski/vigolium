@@ -58,8 +58,8 @@ func TestContentClassAllows(t *testing.T) {
 func TestContentClassRegistry(t *testing.T) {
 	r := NewContentClassRegistry()
 	r.Set("Example.com", ContentClassJSON)
-	r.Set("", ContentClassHTML)                // no-op
-	r.Set("other.com", ContentClassUnknown)    // no-op (unknown)
+	r.Set("", ContentClassHTML)             // no-op
+	r.Set("other.com", ContentClassUnknown) // no-op (unknown)
 	if got := r.Get("example.com"); got != ContentClassJSON {
 		t.Errorf("Get(example.com) = %q, want json (case-insensitive)", got)
 	}

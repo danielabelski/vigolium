@@ -8,7 +8,17 @@ import (
 )
 
 func main() {
-	if !hasFlag("--json", "-j") && (len(os.Args) < 2 || os.Args[1] != "version") && !isSubcommand("config") && !isSubcommand("agent") && !isSubcommand("traffic") && !isSubcommand("finding") && !isSubcommand("findings") && !isSubcommand("db") && !isSubcommand("scan") && !isSubcommand("run") && !isSubcommand("r") && !isSubcommand("replay") && !isSubcommand("import") && !isSubcommand("log") && !isSubcommand("olium") && !isSubcommand("ol") {
+	// The startup banner goes to stdout, so suppress it whenever stdout is data
+	// the caller consumes: --json/-j output, --silent runs ("all output except
+	// findings"), and the read/scan commands that stream results to stdout. The
+	// scanning commands (scan/run and the lightweight scan-url/scan-request) print
+	// their own config summary to stderr instead, keeping stdout clean for
+	// --print-finding's Markdown and file/JSON output.
+	if !hasFlag("--json", "-j") && !hasFlag("--silent") && !isSubcommand(
+		"version", "config", "agent", "traffic", "finding", "findings", "db",
+		"export", "scan", "scan-url", "scan-request", "run", "r", "replay",
+		"import", "log", "olium", "ol",
+	) {
 		fmt.Print(cli.GetBanner())
 	}
 	cli.Execute()
@@ -26,7 +36,16 @@ func hasFlag(flags ...string) bool {
 	return false
 }
 
-// isSubcommand returns true if the first argument matches the given command name.
-func isSubcommand(name string) bool {
-	return len(os.Args) >= 2 && os.Args[1] == name
+// isSubcommand returns true if the first argument matches any of the given
+// command names.
+func isSubcommand(names ...string) bool {
+	if len(os.Args) < 2 {
+		return false
+	}
+	for _, name := range names {
+		if os.Args[1] == name {
+			return true
+		}
+	}
+	return false
 }

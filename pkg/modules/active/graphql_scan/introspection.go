@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+
+	"github.com/vigolium/vigolium/pkg/graphqlx"
 )
 
 // graphqlPaths are common GraphQL endpoint locations to probe.
@@ -22,13 +24,10 @@ var graphqlPaths = []string{
 const typenameQuery = `{"query":"{ __typename }"}`
 
 // introspectionQuery is the full introspection query to enumerate the schema.
-const introspectionQuery = `{"query":"{ __schema { types { name fields { name args { name type { name kind ofType { name } } } } } } }"}`
-
-// batchQuery tests if the endpoint supports query batching.
-const batchQuery = `[{"query":"{ __typename }"},{"query":"{ __typename }"},{"query":"{ __typename }"}]`
-
-// aliasBatchQuery tests if the endpoint supports alias-based batching (alternative to array batching).
-const aliasBatchQuery = `{"query":"{ a1: __typename a2: __typename a3: __typename }"}`
+// It uses the shared canonical query (queryType/mutationType names, deep ofType
+// chains, inputFields, enumValues) so both the SQLi field-picker below and the
+// operations expander can build valid documents from one fetch.
+var introspectionQuery = graphqlx.IntrospectionBody()
 
 // genericFieldNames are common GraphQL field names to try when introspection is disabled.
 var genericFieldNames = []string{
@@ -128,24 +127,4 @@ func hasIntrospection(body string) bool {
 	return strings.Contains(body, "__schema") &&
 		strings.Contains(body, "types") &&
 		strings.Contains(body, "fields")
-}
-
-// isAliasBatchResponse checks if the response contains multiple aliased results.
-func isAliasBatchResponse(body string) bool {
-	return strings.Contains(body, `"a1"`) &&
-		strings.Contains(body, `"a2"`) &&
-		strings.Contains(body, `"a3"`)
-}
-
-// isBatchResponse checks if the response is an array of results.
-func isBatchResponse(body string) bool {
-	body = strings.TrimSpace(body)
-	if !strings.HasPrefix(body, "[") {
-		return false
-	}
-	var arr []json.RawMessage
-	if err := json.Unmarshal([]byte(body), &arr); err != nil {
-		return false
-	}
-	return len(arr) >= 3
 }

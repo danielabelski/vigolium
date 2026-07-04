@@ -17,6 +17,7 @@ func resetLightweightIOGlobals() {
 	globalStateless = false
 	globalSkipPhases = nil
 	globalFormat = "console"
+	scanPrintFinding = false
 	scanPhaseDiscover = false
 	scanPhaseSpider = false
 	scanPhaseExternalHarvest = false
@@ -37,6 +38,7 @@ func TestRegisterLightweightScanIOFlags(t *testing.T) {
 	require.NotNil(t, fs.Lookup("output"), "-o/--output must be registered")
 	require.NotNil(t, fs.Lookup("stateless"), "-S/--stateless must be registered")
 	require.NotNil(t, fs.Lookup("skip"), "--skip must be registered")
+	require.NotNil(t, fs.Lookup("print-finding"), "--print-finding must be registered")
 	assert.Equal(t, "o", fs.Lookup("output").Shorthand)
 	assert.Equal(t, "S", fs.Lookup("stateless").Shorthand)
 
@@ -83,6 +85,7 @@ func TestNeedsRunnerScan(t *testing.T) {
 		"--output":           func() { scanOpts.Output = "out.jsonl" },
 		"--stateless":        func() { globalStateless = true },
 		"--skip":             func() { globalSkipPhases = []string{"known-issue-scan"} },
+		"--print-finding":    func() { scanPrintFinding = true },
 		"--format jsonl":     func() { globalFormat = "jsonl" },
 		"--discover (phase)": func() { scanPhaseDiscover = true },
 		"--spider (phase)":   func() { scanPhaseSpider = true },

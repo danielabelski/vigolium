@@ -126,12 +126,22 @@ func removeXMLDeclaration(content string) string {
 	return content
 }
 
-// replaceIDValue replaces the ID attribute value in XML (case-insensitive to match extractIDAttribute).
+// idAttrPattern captures an ID attribute and its quoted value, case-insensitive
+// to match extractIDAttribute. Compiled once at package init; replaceIDValue
+// filters on the captured value instead of baking oldValue into a per-call
+// compiled pattern.
+var idAttrPattern = regexp.MustCompile(`(?i)(\bID\s*=\s*["'])([^"']*)(["'])`)
+
+// replaceIDValue replaces occurrences of ID="oldValue" with ID="newValue"
+// (case-insensitive on the attribute name, exact match on the value).
 func replaceIDValue(content, oldValue, newValue string) string {
-	// Use case-insensitive regex to replace ID="oldValue" with ID="newValue"
-	// Must match case-insensitivity of extractIDAttribute regex
-	pattern := regexp.MustCompile(fmt.Sprintf(`(?i)(\bID\s*=\s*["'])%s(["'])`, regexp.QuoteMeta(oldValue)))
-	return pattern.ReplaceAllString(content, "${1}"+newValue+"${2}")
+	return idAttrPattern.ReplaceAllStringFunc(content, func(m string) string {
+		sub := idAttrPattern.FindStringSubmatch(m)
+		if len(sub) == 4 && sub[2] == oldValue {
+			return sub[1] + newValue + sub[3]
+		}
+		return m
+	})
 }
 
 func randomString(length int) string {

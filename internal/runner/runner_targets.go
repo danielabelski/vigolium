@@ -361,6 +361,9 @@ func (r *Runner) buildDeparosConfig(additionalTargets []string) source.DeparosDi
 		Concurrency:   discoveryConcurrency,
 		MaxDuration:   r.options.DiscoverMaxDuration,
 		EnableModules: r.options.Modules,
+		// Browser-harvested sessions from the spidering phase, so content
+		// discovery crawls each host with its WAF/bot-cleared session.
+		BrowserSessions: r.browserSessions,
 		// Defaults that match deparos defaults
 		RecursionEnabled:     true,
 		RecursionDepth:       5,

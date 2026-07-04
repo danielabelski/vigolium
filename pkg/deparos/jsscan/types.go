@@ -84,11 +84,38 @@ type DomFlow struct {
 	Line    int    `json:"line"`
 }
 
+// BeautifiedCode is the unminified + bundle-unpacked document jsscan produces
+// under the --beautify flag (webcrack, no eval-based deobfuscation).
+//
+// When Format != "none" the script was a detected bundle (webpack, browserify,
+// ...) and Content is a single module-annotated document — each section headed
+// by its recovered path (e.g. ./src/api.js) — with ModulePaths listing those
+// paths. When not a bundle, Content is the plain unminified source and
+// ModuleCount is 0. Changed reports whether the document differs from the input
+// (false means beautification was a no-op and callers should skip persisting it).
+type BeautifiedCode struct {
+	Filename    string   `json:"filename"`
+	Format      string   `json:"format"`
+	ModuleCount int      `json:"moduleCount"`
+	ModulePaths []string `json:"modulePaths"`
+	Changed     bool     `json:"changed"`
+	Content     string   `json:"content"`
+}
+
+// ScanOptions tunes a single scan invocation.
+type ScanOptions struct {
+	// Beautify enables the unminify + bundle-unpack pass (jsscan --beautify),
+	// populating ScanResult.Beautified. Off by default: it runs a heavier
+	// webcrack pass, so only the passive js-beautify module opts in.
+	Beautify bool
+}
+
 // ScanResult contains the complete output from a jsscan analysis.
 type ScanResult struct {
 	Requests     []ExtractedRequest `json:"requests"`
 	Code         *CodeRecord        `json:"code,omitempty"`
 	DomFlows     []DomFlow          `json:"dom_flows,omitempty"`
+	Beautified   *BeautifiedCode    `json:"beautified,omitempty"`
 	ScanDuration time.Duration      `json:"scan_duration"`
 	BytesScanned int                `json:"bytes_scanned"`
 }
@@ -106,6 +133,12 @@ func (r *ScanResult) HasCode() bool {
 // HasDomFlows returns true if any DOM-XSS taint flows were reported.
 func (r *ScanResult) HasDomFlows() bool {
 	return len(r.DomFlows) > 0
+}
+
+// HasBeautified returns true if a beautified document was produced and it
+// actually differs from the input (a no-op beautification is not reported).
+func (r *ScanResult) HasBeautified() bool {
+	return r.Beautified != nil && r.Beautified.Changed && r.Beautified.Content != ""
 }
 
 // Config configures the jsscan scanner behavior.

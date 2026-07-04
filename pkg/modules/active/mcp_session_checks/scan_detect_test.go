@@ -53,6 +53,40 @@ func vulnSessionHandler() http.HandlerFunc {
 	}
 }
 
+// fixationSessionHandler models a genuine fixation primitive: it issues strong
+// random session ids, ENFORCES a session for tools/list (rejects anonymous), but
+// accepts and echoes a client-supplied Mcp-Session-Id on initialize. This is the
+// only shape that should produce a fixation finding — a wide-open server (which
+// requires no session at all) must not.
+func fixationSessionHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		switch rpcMethod(raw) {
+		case "initialize":
+			if sid := r.Header.Get("Mcp-Session-Id"); sid != "" {
+				w.Header().Set("Mcp-Session-Id", sid) // accept attacker-supplied id
+			} else {
+				buf := make([]byte, 32)
+				_, _ = rand.Read(buf)
+				w.Header().Set("Mcp-Session-Id", hex.EncodeToString(buf)) // strong => not weak
+			}
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","serverInfo":{"name":"demo","version":"1"}}}`)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			// Enforce a session: reject anonymous, accept any non-empty id.
+			if r.Header.Get("Mcp-Session-Id") == "" {
+				_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"session required"}}`)
+				return
+			}
+			_, _ = io.WriteString(w, toolsListResult)
+		default:
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`)
+		}
+	}
+}
+
 // strictSessionHandler is well behaved: strong random session ids, requires a
 // session for tools/list, and ignores client-supplied session ids on init.
 func strictSessionHandler() http.HandlerFunc {
@@ -100,7 +134,32 @@ func TestScanPerHost_DetectsSessionWeaknesses(t *testing.T) {
 	}
 	assert.True(t, names["MCP Anonymous Tool Enumeration (No Session Required)"], "anonymous tools/list should be flagged")
 	assert.True(t, names["MCP Session ID Weakness"], "short low-entropy session id should be flagged")
-	assert.True(t, names["MCP Session Fixation (Attacker-Supplied Mcp-Session-Id)"], "fixation should be flagged")
+	// On a wide-open server (tools/list works with no session at all), "fixation"
+	// is not a distinct vulnerability — the anonymous-access finding already
+	// captures it. It must NOT be reported here (regression guard for the former
+	// false positive where our injected id merely persisted client-side).
+	assert.False(t, names["MCP Session Fixation (Attacker-Supplied Mcp-Session-Id)"], "fixation must not be flagged on a sessionless/open server")
+}
+
+// TestScanPerHost_DetectsFixation flags fixation only on a server that enforces
+// sessions yet accepts an attacker-supplied one.
+func TestScanPerHost_DetectsFixation(t *testing.T) {
+	srv := httptest.NewServer(fixationSessionHandler())
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/mcp")
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+
+	names := map[string]bool{}
+	for _, e := range res {
+		names[e.Info.Name] = true
+	}
+	assert.True(t, names["MCP Session Fixation (Attacker-Supplied Mcp-Session-Id)"], "genuine fixation should be flagged")
+	assert.False(t, names["MCP Anonymous Tool Enumeration (No Session Required)"], "session-enforcing server must not be flagged for anonymous access")
+	assert.False(t, names["MCP Session ID Weakness"], "strong random session ids must not be flagged weak")
 }
 
 // TestScanPerHost_StrictServerNoFinding ensures a server with strong session

@@ -65,6 +65,19 @@ func (m *Module) ScanPerHost(
 		return nil, err
 	}
 
+	client := mcpinfra.NewClient(ctx, httpClient, urlx.Path)
+
+	// Baseline / negative control: does a *singleton* tools/list (no initialize,
+	// no session) already return tools? If so, the server simply doesn't gate
+	// tools/list at all — the batch "smuggling" below isn't a bypass of anything,
+	// it's just an open server (which mcp_session_checks reports as anonymous
+	// access). Only a server that refuses the singleton but honours the batched
+	// call has an actual batch-specific auth weakness, so we require the singleton
+	// path to be gated before flagging the batch.
+	if r, serr := client.ListTools(); serr == nil && r != nil && len(r.Tools) > 0 {
+		return nil, nil
+	}
+
 	// Build a batch with initialize + tools/list, NO session header.
 	batch := []json.RawMessage{
 		mcpinfra.BuildInitializeRequest(),
@@ -75,7 +88,6 @@ func (m *Module) ScanPerHost(
 		return nil, err
 	}
 
-	client := mcpinfra.NewClient(ctx, httpClient, urlx.Path)
 	respBody, _, err := client.PostRaw(body)
 	if err != nil || respBody == "" {
 		return nil, nil

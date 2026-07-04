@@ -11,8 +11,8 @@ type Options struct {
 
 	TargetsFilePaths []string // target-list files (-T/--target-file, repeatable); lines from all are merged
 	InputFileMode    string   // json, jsonb, list
-	Stream          bool
-	Stdin           bool
+	Stream           bool
+	Stdin            bool
 	// Time to wait between each input read operation before closing the stream
 
 	InputReadTimeout time.Duration
@@ -164,6 +164,13 @@ type Options struct {
 	SpideringNoCDP         bool
 	SpideringNoForms       bool
 
+	// CarryBrowserSession carries the spidering browser's WAF/bot-cleared session
+	// (cookies, and — only when a non-default User-Agent is configured — the
+	// browser UA) forward into content discovery and dynamic assessment, scoped
+	// to the same host. On by default whenever spidering runs; the
+	// --no-carry-browser-session flag sets it false.
+	CarryBrowserSession bool
+
 	// Known Issue Scan options
 	KnownIssueScanEnabled      bool
 	KnownIssueScanTags         []string
@@ -279,6 +286,7 @@ func DefaultOptions() *Options {
 		ClusterRequests:      true,
 		ShutdownTimeout:      30 * time.Second,
 		Parallel:             1,
+		CarryBrowserSession:  true,
 	}
 }
 func (options *Options) ShouldUseHostError() bool {

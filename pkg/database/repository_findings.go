@@ -55,12 +55,7 @@ func (r *Repository) SaveFinding(ctx context.Context, event *output.ResultEvent,
 // finding can't drop the rest — preserving the error isolation of per-finding
 // SaveFinding while keeping the fast path a single transaction.
 func (r *Repository) SaveFindingsBatch(ctx context.Context, writes []FindingWrite) error {
-	type prepared struct {
-		finding     *Finding
-		recordUUIDs []string
-		inserted    bool
-	}
-	items := make([]prepared, 0, len(writes))
+	findings := make([]*Finding, 0, len(writes))
 	for i := range writes {
 		w := &writes[i]
 		if w.Event == nil {
@@ -75,47 +70,12 @@ func (r *Repository) SaveFindingsBatch(ctx context.Context, writes []FindingWrit
 			zap.L().Warn("SaveFindingsBatch: skipping unconvertible finding", zap.Error(err))
 			continue
 		}
-		items = append(items, prepared{finding: f, recordUUIDs: w.HTTPRecordUUIDs})
+		findings = append(findings, f)
 	}
-	if len(items) == 0 {
+	if len(findings) == 0 {
 		return nil
 	}
-
-	err := r.db.RunInTx(ctx, &sql.TxOptions{}, func(ctx context.Context, tx bun.Tx) error {
-		for i := range items {
-			inserted, err := r.saveFindingIDB(ctx, tx, items[i].finding, items[i].recordUUIDs)
-			if err != nil {
-				return err
-			}
-			items[i].inserted = inserted
-		}
-		return nil
-	})
-	if err == nil {
-		// Fire hooks only after the transaction commits, so a mirror never sees a
-		// finding that was rolled back.
-		for i := range items {
-			if items[i].inserted {
-				r.emitFindingSaved(items[i].finding)
-			}
-		}
-		return nil
-	}
-
-	// Transaction failed — retry each finding on its own so a single bad finding
-	// doesn't sink the whole batch.
-	zap.L().Warn("SaveFindingsBatch: transaction failed, retrying findings individually", zap.Error(err))
-	var firstErr error
-	for i := range items {
-		inserted, e := r.saveFindingIDB(ctx, r.db, items[i].finding, items[i].recordUUIDs)
-		if inserted {
-			r.emitFindingSaved(items[i].finding)
-		}
-		if e != nil && firstErr == nil {
-			firstErr = e
-		}
-	}
-	return firstErr
+	return firstResultErr(r.saveFindingsBatchCore(ctx, findings))
 }
 
 // saveFindingIDB inserts a single finding using the given bun.IDB, which may be
@@ -166,6 +126,93 @@ func (r *Repository) SaveFindingDirect(ctx context.Context, finding *Finding) er
 	}
 	if inserted {
 		r.emitFindingSaved(finding)
+	}
+	return nil
+}
+
+// FindingSaveResult reports the outcome of persisting one finding in a batched
+// direct save, aligned by index with the input slice passed to
+// SaveFindingsDirectBatch.
+type FindingSaveResult struct {
+	Inserted bool  // a new finding row was written (false on a dedup-append to an existing finding)
+	Err      error // non-nil if this finding failed to save
+}
+
+// SaveFindingsDirectBatch persists a batch of pre-built findings in a single
+// transaction — the batch analogue of SaveFindingDirect, used by bulk importers
+// to coalesce what would otherwise be one transaction (and fsync) per finding.
+// The returned slice is aligned with the input; the top-level error is the first
+// per-finding error, if any.
+func (r *Repository) SaveFindingsDirectBatch(ctx context.Context, findings []*Finding) ([]FindingSaveResult, error) {
+	for _, f := range findings {
+		if f != nil {
+			f.ProjectUUID = defaultProjectUUID(f.ProjectUUID)
+		}
+	}
+	results := r.saveFindingsBatchCore(ctx, findings)
+	return results, firstResultErr(results)
+}
+
+// saveFindingsBatchCore persists pre-built findings in one transaction, retrying
+// each finding individually if the transaction fails so one bad finding can't
+// drop the rest, and firing OnFindingSaved hooks only after commit so a mirror
+// never sees a rolled-back finding. nil entries are tolerated (zero-value
+// result). The returned slice is aligned with the input. This is the shared
+// engine behind SaveFindingsBatch (which adapts []FindingWrite) and
+// SaveFindingsDirectBatch (pre-built []*Finding); callers own input conversion
+// and ProjectUUID defaulting.
+func (r *Repository) saveFindingsBatchCore(ctx context.Context, findings []*Finding) []FindingSaveResult {
+	results := make([]FindingSaveResult, len(findings))
+	if len(findings) == 0 {
+		return results
+	}
+
+	err := r.db.RunInTx(ctx, &sql.TxOptions{}, func(ctx context.Context, tx bun.Tx) error {
+		for i, f := range findings {
+			if f == nil {
+				continue
+			}
+			inserted, err := r.saveFindingIDB(ctx, tx, f, f.HTTPRecordUUIDs)
+			if err != nil {
+				return err
+			}
+			results[i].Inserted = inserted
+		}
+		return nil
+	})
+	if err == nil {
+		for i, f := range findings {
+			if results[i].Inserted {
+				r.emitFindingSaved(f)
+			}
+		}
+		return results
+	}
+
+	zap.L().Warn("saveFindingsBatchCore: transaction failed, retrying findings individually", zap.Error(err))
+	for i, f := range findings {
+		results[i] = FindingSaveResult{}
+		if f == nil {
+			continue
+		}
+		inserted, e := r.saveFindingIDB(ctx, r.db, f, f.HTTPRecordUUIDs)
+		results[i].Inserted = inserted
+		results[i].Err = e
+		if inserted {
+			r.emitFindingSaved(f)
+		}
+	}
+	return results
+}
+
+// firstResultErr returns the first non-nil per-finding error in a batch result,
+// collapsing the aligned results into the single-error contract used by callers
+// (e.g. SaveFindingsBatch) that don't need per-finding outcomes.
+func firstResultErr(results []FindingSaveResult) error {
+	for i := range results {
+		if results[i].Err != nil {
+			return results[i].Err
+		}
 	}
 	return nil
 }

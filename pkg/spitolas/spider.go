@@ -5,6 +5,7 @@ package spitolas
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
@@ -96,6 +97,14 @@ type SpiderResult struct {
 	LoginCredsTried     int
 	LoginCredsSucceeded int
 	LoginCredsURL       string
+
+	// HarvestedCookies is the browser's cookie jar at end of crawl and
+	// BrowserUserAgent the UA it presented. The runner carries these forward into
+	// content discovery and dynamic assessment so those phases inherit the
+	// WAF/bot-cleared session the real browser established. Empty when the crawl
+	// harvested nothing (e.g. the browser wedged before teardown).
+	HarvestedCookies []*http.Cookie
+	BrowserUserAgent string
 }
 
 // RunSpider executes browser-based spidering against the target URL,
@@ -178,5 +187,8 @@ func RunSpider(ctx context.Context, cfg SpiderConfig, repo RecordSaver) (*Spider
 		LoginCredsTried:     result.Stats.LoginCredsTried,
 		LoginCredsSucceeded: result.Stats.LoginCredsSucceeded,
 		LoginCredsURL:       result.Stats.LoginCredsURL,
+
+		HarvestedCookies: result.HarvestedCookies,
+		BrowserUserAgent: result.BrowserUserAgent,
 	}, nil
 }

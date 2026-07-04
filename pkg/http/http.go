@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
@@ -62,6 +63,54 @@ type Requester struct {
 	// to outgoing requests. Set per scan task via WithContext so cancellation
 	// reaches modules that call Execute (not ExecuteContext). nil → Background.
 	defaultCtx context.Context
+	// carried holds browser-harvested per-host sessions (cookies + optional
+	// pinned User-Agent) carried forward from the spidering phase. It is a
+	// pointer to an atomic-published store so WithContext's shallow copy shares
+	// one instance. Always non-nil after NewRequester.
+	carried *carriedSessionStore
+}
+
+// carriedSessionStore holds per-host CarriedSessions. Sessions are written once
+// (after spidering, before scanning concurrency starts) and read on every
+// outgoing request, so the map is published via an atomic.Pointer: reads on the
+// hot path are a single lock-free load, and the common no-spider case (nil map)
+// short-circuits without touching a lock. It is a pointer field on Requester so
+// WithContext's shallow copy shares one store (and never copies the atomic).
+type carriedSessionStore struct {
+	m atomic.Pointer[map[string]httpmsg.CarriedSession]
+}
+
+func (s *carriedSessionStore) set(sessions map[string]httpmsg.CarriedSession) {
+	s.m.Store(&sessions)
+}
+
+func (s *carriedSessionStore) load() map[string]httpmsg.CarriedSession {
+	if p := s.m.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// SetCarriedSessions installs browser-harvested per-host sessions on the
+// requester. Keys are normalized to bare lowercase hostnames; a request is
+// matched against them by host so a session only ever reaches the host it was
+// harvested from. Cookies are merged into (never over) a request's existing
+// Cookie header, and a non-empty UserAgent is pinned — both applied before the
+// operator's -H custom headers so an explicit -H Cookie/User-Agent still wins.
+// Safe to call once during scan setup; a nil/empty map is a no-op.
+func (r *Requester) SetCarriedSessions(sessions map[string]httpmsg.CarriedSession) {
+	if r == nil || r.carried == nil || len(sessions) == 0 {
+		return
+	}
+	normalized := make(map[string]httpmsg.CarriedSession, len(sessions))
+	for host, sess := range sessions {
+		key := httpmsg.NormalizeHost(host)
+		if key == "" {
+			continue
+		}
+		normalized[key] = sess
+	}
+	r.carried.set(normalized)
 }
 
 // WithContext returns a shallow copy of the Requester whose context-less Execute
@@ -246,6 +295,7 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 		rawClientNoRedir: rawClientNoRedir,
 		services:         services,
 		customHeaders:    parseHeaders(options.Headers),
+		carried:          &carriedSessionStore{},
 	}
 
 	if options.ClusterRequests {
@@ -255,6 +305,34 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 	}
 
 	return r, nil
+}
+
+// applyCarriedSession merges the browser-harvested session for the request's
+// host into the outgoing request: a pinned User-Agent (only when one was
+// carried) and the harvested cookies merged into any existing Cookie header.
+// A no-op when no session was harvested or none matches this host.
+func (r *Requester) applyCarriedSession(req *retryablehttp.Request) {
+	if r.carried == nil {
+		return
+	}
+	// Fast-out before deriving the host key: most scans don't --spider, so the
+	// map is nil and this costs a single lock-free load on the request hot path.
+	sessions := r.carried.load()
+	if len(sessions) == 0 {
+		return
+	}
+	// req.Hostname() is already port-stripped, so the lookup key only needs
+	// case-folding to match the NormalizeHost-normalized map keys.
+	sess, ok := sessions[strings.ToLower(req.Hostname())]
+	if !ok {
+		return
+	}
+	if sess.UserAgent != "" {
+		req.Header.Set("User-Agent", sess.UserAgent)
+	}
+	if sess.CookieHeader != "" {
+		req.Header.Set("Cookie", httpmsg.MergeCookieHeaders(req.Header.Get("Cookie"), sess.CookieHeader))
+	}
 }
 
 // parseHeaders parses header strings in "Name: Value" format.
@@ -433,6 +511,15 @@ func (r *Requester) doRequest(ctx context.Context, input *httpmsg.HttpRequestRes
 			req.Header.Set("Host", h)
 		}
 	}
+
+	// Apply a browser-harvested session for this request's host (cookies + an
+	// optional pinned User-Agent) so content-discovery and dynamic-assessment
+	// inherit the WAF/bot-cleared session the spidering browser established.
+	// Applied BEFORE custom headers so an explicit -H Cookie/User-Agent still
+	// wins; cookies are merged into (never over) any Cookie already on the
+	// request, and the session only applies to the exact host it was harvested
+	// from.
+	r.applyCarriedSession(req)
 
 	// Apply custom headers (after defaults to allow override)
 	for name, value := range r.customHeaders {

@@ -2,7 +2,9 @@ package database
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	neturl "net/url"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"go.uber.org/zap"
 )
 
@@ -441,6 +444,57 @@ func (r *Repository) UpdateRecordAnnotations(ctx context.Context, uuid string, r
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		return fmt.Errorf("UpdateRecordAnnotations: no record found with uuid %s", uuid)
+	}
+	return nil
+}
+
+// OverwriteRecordResponseBody replaces the stored raw response of the record
+// with the given UUID and recomputes its derived fields (response_hash,
+// response_norm_hash, response_words, response_content_length), keeping them
+// consistent with dedup/resume/fingerprinting that key off those columns.
+//
+// rawResponse must be a complete HTTP response (status line + headers + body).
+// Used by the passive js-beautify module to overwrite a minified JS body with
+// its beautified form in place. The derivation mirrors Record.FromRequestResponse
+// so a rewritten record hashes identically to one ingested with the new body.
+// (Distinct from UpdateRecordResponse, which is the replay feature's full
+// response-field swap.)
+func (r *Repository) OverwriteRecordResponseBody(ctx context.Context, uuid string, rawResponse []byte) error {
+	if uuid == "" || len(rawResponse) == 0 {
+		return fmt.Errorf("OverwriteRecordResponseBody: empty uuid or response")
+	}
+
+	// Path + URL are needed for the reflected-URL-robust normalized body hash.
+	recs, err := r.getRecordsByUUIDs(ctx, []string{uuid}, "uuid", "path", "url")
+	if err != nil {
+		return fmt.Errorf("OverwriteRecordResponseBody: load record: %w", err)
+	}
+	if len(recs) == 0 {
+		return fmt.Errorf("OverwriteRecordResponseBody: no record found with uuid %s", uuid)
+	}
+	rec := recs[0]
+
+	resp := httpmsg.NewHttpResponse(rawResponse)
+	body := resp.Body()
+
+	respHash := sha256.Sum256(rawResponse)
+	normHash := modkit.NormalizedBodyHash(string(body), rec.Path, rec.URL)
+	words := countResponseWords(body, resp.Headers())
+
+	result, err := r.db.NewUpdate().
+		Model((*HTTPRecord)(nil)).
+		Where("uuid = ?", uuid).
+		Set("raw_response = ?", rawResponse).
+		Set("response_hash = ?", hex.EncodeToString(respHash[:])).
+		Set("response_norm_hash = ?", normHash).
+		Set("response_words = ?", words).
+		Set("response_content_length = ?", int64(len(body))).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("OverwriteRecordResponseBody: update failed: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return fmt.Errorf("OverwriteRecordResponseBody: no record found with uuid %s", uuid)
 	}
 	return nil
 }

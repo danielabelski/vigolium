@@ -215,6 +215,26 @@ func ImportArchive(ctx context.Context, repo *database.Repository, archivePath, 
 	return merged, nil
 }
 
+// tallyFindingSaves counts saved (newly-inserted) vs skipped (dedup-append or
+// errored) findings from an aligned SaveFindingsDirectBatch result, tallying the
+// severity of each non-errored finding into sev. Shared by the audit and JSONL
+// import paths.
+func tallyFindingSaves(findings []*database.Finding, results []database.FindingSaveResult, sev map[string]int) (saved, skipped int) {
+	for i, f := range findings {
+		if results[i].Err != nil {
+			skipped++
+			continue
+		}
+		if results[i].Inserted {
+			saved++
+		} else {
+			skipped++
+		}
+		sev[f.Severity]++
+	}
+	return saved, skipped
+}
+
 // ImportAudit imports an audit output folder. When opts.AgenticScanUUID is
 // set, the existing scan row is loaded (and project-validated by the caller)
 // and findings are attached to it instead of a new row being created.
@@ -256,20 +276,9 @@ func ImportAudit(ctx context.Context, repo *database.Repository, folderPath, pro
 	}
 	findings := audit.BuildFindingsWithSource(parsed.RawFindings, auditID, agenticScan.UUID, projectUUID, parsed.RepoName, src)
 
-	saved, skipped := 0, 0
 	sevCounts := map[string]int{}
-	for _, f := range findings {
-		if err := repo.SaveFindingDirect(ctx, f); err != nil {
-			skipped++
-			continue
-		}
-		if f.ID == 0 {
-			skipped++
-		} else {
-			saved++
-		}
-		sevCounts[f.Severity]++
-	}
+	results, _ := repo.SaveFindingsDirectBatch(ctx, findings)
+	saved, skipped := tallyFindingSaves(findings, results, sevCounts)
 
 	// For new scans we set the full finding count; for attached scans we
 	// increment so prior findings on that row aren't clobbered.
@@ -431,19 +440,8 @@ func ImportJSONL(ctx context.Context, repo *database.Repository, r io.Reader, pr
 		res.RecordsImported += len(uuids)
 	}
 
-	saved, skipped := 0, 0
-	for _, f := range findings {
-		if err := repo.SaveFindingDirect(ctx, f); err != nil {
-			skipped++
-			continue
-		}
-		if f.ID == 0 {
-			skipped++
-		} else {
-			saved++
-		}
-		res.SeverityCounts[f.Severity]++
-	}
+	results, _ := repo.SaveFindingsDirectBatch(ctx, findings)
+	saved, skipped := tallyFindingSaves(findings, results, res.SeverityCounts)
 	res.FindingsTotal = len(findings)
 	res.FindingsSaved = saved
 	res.FindingsSkipped = skipped
@@ -491,10 +489,28 @@ func mergeResult(dst, src *Result) {
 	for k, v := range src.SkippedTypes {
 		dst.SkippedTypes[k] += v
 	}
+	if src.MergeStats != nil {
+		if dst.MergeStats == nil {
+			dst.MergeStats = &database.MergeStats{}
+		}
+		dst.MergeStats.Add(src.MergeStats)
+	}
 	if src.SessionDir != "" {
 		dst.SessionDir = src.SessionDir
 	}
 	if src.StorageURL != "" {
 		dst.StorageURL = src.StorageURL
 	}
+}
+
+// MergeResults folds several import Results into one aggregate: counts, the
+// severity/skipped maps and MergeStats are summed, while the last non-nil
+// AgenticScan and session/storage references win (see mergeResult). nil entries
+// are ignored. Used to summarize a multi-source import as a single Result.
+func MergeResults(results []*Result) *Result {
+	agg := newResult()
+	for _, r := range results {
+		mergeResult(agg, r)
+	}
+	return agg
 }

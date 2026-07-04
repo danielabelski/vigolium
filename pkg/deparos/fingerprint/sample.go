@@ -34,6 +34,22 @@ func NewSampleFromRC(rc *responsechain.ResponseChain) (*Sample, error) {
 		return nil, fmt.Errorf("invalid ResponseChain")
 	}
 
+	// The sample is a pure (and expensive: HTML parse + full-body hashing)
+	// function of the chain's current state, and the same chain is sampled by
+	// both soft-404 analysis and fingerprint storage. Memoize on the chain so
+	// the second consumer reuses the first's work.
+	v, err := rc.CachedFingerprint(func() (any, error) {
+		return computeSampleFromRC(rc)
+	})
+	if err != nil {
+		return nil, err
+	}
+	s, _ := v.(*Sample)
+	return s, nil
+}
+
+// computeSampleFromRC performs the actual (uncached) sample extraction.
+func computeSampleFromRC(rc *responsechain.ResponseChain) (*Sample, error) {
 	resp := rc.Response()
 	body := rc.BodyBytes()
 

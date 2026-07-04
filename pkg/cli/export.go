@@ -74,6 +74,10 @@ func init() {
 		"Filter findings by severity (comma-separated: critical,high,medium,low,info)")
 	exportCmd.Flags().StringSliceVar(&topExportScanUUIDs, "scan-uuid", nil,
 		"Agentic scan UUID(s) whose session directories to include in --format bundle (repeatable)")
+	exportCmd.Flags().BoolVarP(&globalStateless, "stateless", "S", false,
+		"Read from --db (a standalone .sqlite or .jsonl export) instead of your project DB; never writes to it")
+	exportCmd.Flags().StringVar(&globalGlobDB, "glob-db", "",
+		"Export across a glob of result files merged into one temporary DB (e.g. --glob-db 'scans/*.sqlite'); implies -S")
 }
 
 // shouldExport returns true if the given data type should be included in the export.
@@ -174,7 +178,7 @@ func runExportCmd(cmd *cobra.Command, args []string) error {
 }
 
 func runExportWithGenerator(formatLabel, defaultTitle string, generate func([]any, string, output.HTMLReportMeta) error) error {
-	db, err := getDB()
+	db, err := openExportDB()
 	if err != nil {
 		return err
 	}
@@ -310,7 +314,7 @@ func runExportJSONL() error {
 	var db *database.DB
 	if needsDB {
 		var err error
-		db, err = getDB()
+		db, err = openExportDB()
 		if err != nil {
 			return err
 		}
@@ -384,7 +388,7 @@ func runExportMarkdown() error {
 // filesystem tree (the `fs` format). Honors --search, --severity, --limit, and
 // --omit-response; defaults the base to "vigolium" in the cwd when no -o is set.
 func runExportFS() error {
-	db, err := getDB()
+	db, err := openExportDB()
 	if err != nil {
 		return err
 	}

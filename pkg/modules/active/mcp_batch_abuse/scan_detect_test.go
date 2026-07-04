@@ -81,6 +81,40 @@ func TestScanPerHost_StrictServerNoFinding(t *testing.T) {
 	assert.Empty(t, res, "a batch-rejecting server must not be flagged")
 }
 
+// openBatchHandler is a fully-open server: it returns tools for a *singleton*
+// tools/list (no session) as well as inside a batch. The batch "smuggling" is
+// therefore not a bypass of anything — the server simply has no session gate.
+func openBatchHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if isBatch(raw) {
+			_, _ = io.WriteString(w, `[`+
+				`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","serverInfo":{"name":"demo","version":"1"}}},`+
+				`{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo"}]}}`+
+				`]`)
+			return
+		}
+		// Singleton tools/list also returns tools without a session.
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo"}]}}`)
+	}
+}
+
+// TestScanPerHost_OpenServerNoFinding is the regression for the singleton
+// baseline: a server that answers a bare tools/list without a session must not
+// be flagged as a batch auth bypass (it's just an open server).
+func TestScanPerHost_OpenServerNoFinding(t *testing.T) {
+	srv := httptest.NewServer(openBatchHandler())
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/mcp")
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an open server (singleton tools/list works) must not be flagged as a batch bypass")
+}
+
 // TestCanProcess_RequiresResponse verifies the detection gate needs a captured
 // response.
 func TestCanProcess_RequiresResponse(t *testing.T) {

@@ -109,31 +109,41 @@ func (m *Module) ScanPerHost(
 		}
 	}
 
+	// issuesSessions is true when the server handed us at least one Mcp-Session-Id
+	// during sampling. A server that never issues a session header can't be
+	// vulnerable to *session* fixation (there is no session to fixate), and our
+	// client would otherwise still report the injected candidate SID simply
+	// because the server never replaced it — the original false-positive source.
+	issuesSessions := len(samples) > 0
+
 	// 2. Anonymous tools/list attempt.
+	anonymousWorks := false
 	{
 		client := mcpinfra.NewClient(ctx, httpClient, urlx.Path)
-		// Skip initialize -- talk straight to tools/list.
-		body, _, err := client.PostRaw(mcpinfra.BuildToolsListRequest())
-		if err == nil {
-			if r, perr := mcpinfra.ParseToolsListResponse(body); perr == nil && r != nil && len(r.Tools) > 0 {
-				findings = append(findings, &output.ResultEvent{
-					URL:              urlx.String(),
-					Matched:          urlx.String(),
-					ExtractedResults: []string{fmt.Sprintf("%d tools enumerable without session", len(r.Tools))},
-					Info: output.Info{
-						Name:        "MCP Anonymous Tool Enumeration (No Session Required)",
-						Description: "tools/list succeeded without performing initialize or supplying Mcp-Session-Id - the server does not require a session.",
-						Severity:    severity.Medium,
-						Confidence:  severity.Certain,
-						Tags:        []string{"mcp", "auth-bypass", "session"},
-					},
-				})
-			}
+		// Skip initialize -- talk straight to tools/list (fresh client, no session).
+		if r, err := client.ListTools(); err == nil && r != nil && len(r.Tools) > 0 {
+			anonymousWorks = true
+			findings = append(findings, &output.ResultEvent{
+				URL:              urlx.String(),
+				Matched:          urlx.String(),
+				ExtractedResults: []string{fmt.Sprintf("%d tools enumerable without session", len(r.Tools))},
+				Info: output.Info{
+					Name:        "MCP Anonymous Tool Enumeration (No Session Required)",
+					Description: "tools/list succeeded without performing initialize or supplying Mcp-Session-Id - the server does not require a session.",
+					Severity:    severity.Medium,
+					Confidence:  severity.Certain,
+					Tags:        []string{"mcp", "auth-bypass", "session"},
+				},
+			})
 		}
 	}
 
 	// 3. Session fixation: provide our own Mcp-Session-Id header during initialize.
-	{
+	// Only meaningful when the server (a) actually issues session IDs and (b)
+	// enforces them — i.e. anonymous tools/list was refused above. Without both
+	// preconditions a "success" here is just a sessionless/open server, not a
+	// fixation primitive, so we skip to avoid the false positive.
+	if issuesSessions && !anonymousWorks {
 		client := mcpinfra.NewClient(ctx, httpClient, urlx.Path)
 		client.SetSessionID(fixationCandidate)
 		if _, err := client.Initialize(); err == nil {

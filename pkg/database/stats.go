@@ -270,16 +270,19 @@ func (db *DB) getPerformanceStats(ctx context.Context, stats *DatabaseStats, fil
 	stats.Performance.MinResponseTime = result.Min
 	stats.Performance.MaxResponseTime = result.Max
 
-	// Single-pass percentile calculation using ROW_NUMBER window function
+	// Single-pass percentile calculation: rank the with-response set once with a
+	// ROW_NUMBER window and pluck all three percentile rows in one query, instead
+	// of three separate `ORDER BY ... LIMIT 1 OFFSET n` full sorts of the same
+	// (unindexed) column.
 	withResp := stats.Records.WithResponse
 	if withResp > 0 {
-		p50Idx := withResp / 2
-		p95Idx := withResp * 95 / 100
-		p99Idx := withResp * 99 / 100
-
-		stats.Performance.P50ResponseTime = db.responseTimeAt(ctx, filters, int(p50Idx))
-		stats.Performance.P95ResponseTime = db.responseTimeAt(ctx, filters, int(p95Idx))
-		stats.Performance.P99ResponseTime = db.responseTimeAt(ctx, filters, int(p99Idx))
+		p50, p95, p99, err := db.responseTimePercentiles(ctx, filters, int(withResp))
+		if err != nil {
+			return err
+		}
+		stats.Performance.P50ResponseTime = p50
+		stats.Performance.P95ResponseTime = p95
+		stats.Performance.P99ResponseTime = p99
 	}
 
 	return nil
@@ -403,22 +406,43 @@ func (db *DB) countScopedFindings(ctx context.Context, filters QueryFilters) (in
 		Count(ctx)
 }
 
-func (db *DB) responseTimeAt(ctx context.Context, filters QueryFilters, offset int) int64 {
-	if offset < 1 {
-		offset = 1
+// responseTimePercentiles computes P50/P95/P99 of response_time_ms over the
+// scoped with-response set in a single query. It ranks rows once with
+// ROW_NUMBER() (1-based ascending) inside a CTE, then selects the three ranked
+// rows, avoiding the three independent full sorts the previous OFFSET approach
+// incurred on the unindexed column. The rank indices mirror the old 1-based
+// offsets (clamped to >= 1).
+func (db *DB) responseTimePercentiles(ctx context.Context, filters QueryFilters, withResp int) (p50, p95, p99 int64, err error) {
+	rank := func(pct int) int {
+		idx := withResp * pct / 100
+		if idx < 1 {
+			idx = 1
+		}
+		return idx
 	}
-	var value int64
-	err := db.scopedRecordsQuery(filters).
-		Column("response_time_ms").
-		Where("has_response = ?", true).
-		Order("response_time_ms ASC").
-		Limit(1).
-		Offset(offset-1).
-		Scan(ctx, &value)
+	p50Rank, p95Rank, p99Rank := rank(50), rank(95), rank(99)
+
+	ordered := db.scopedRecordsQuery(filters).
+		ColumnExpr("response_time_ms AS rt").
+		ColumnExpr("ROW_NUMBER() OVER (ORDER BY response_time_ms ASC) AS rn").
+		Where("has_response = ?", true)
+
+	var res struct {
+		P50 int64
+		P95 int64
+		P99 int64
+	}
+	err = db.NewSelect().
+		With("pctl_ordered", ordered).
+		TableExpr("pctl_ordered").
+		ColumnExpr("COALESCE(MAX(CASE WHEN rn = ? THEN rt END), 0) AS p50", p50Rank).
+		ColumnExpr("COALESCE(MAX(CASE WHEN rn = ? THEN rt END), 0) AS p95", p95Rank).
+		ColumnExpr("COALESCE(MAX(CASE WHEN rn = ? THEN rt END), 0) AS p99", p99Rank).
+		Scan(ctx, &res)
 	if err != nil {
-		return 0
+		return 0, 0, 0, err
 	}
-	return value
+	return res.P50, res.P95, res.P99, nil
 }
 
 // FormatStats formats statistics as a human-readable string

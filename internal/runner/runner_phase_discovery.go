@@ -14,6 +14,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/core"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/deparos/discovery"
+	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/input/source"
 	"github.com/vigolium/vigolium/pkg/modules"
 	"github.com/vigolium/vigolium/pkg/output"
@@ -632,6 +633,20 @@ func (r *Runner) runSpideringPhase(ctx context.Context, infra *phaseInfra) error
 	var totalStates, totalActions, totalRecords int
 	var ssoHosts []string
 	var skippedTargets int
+
+	// Carry the browser's WAF/bot-cleared session (cookies + optionally its UA)
+	// forward into discovery and scanning. On by default; scoped per-host below.
+	// The UA is only pinned when the operator opted away from the honest "preset"
+	// default (a custom/random UA or VIGOLIUM_DEFAULT_UA) — otherwise the honest
+	// self-identifying UA is left untouched. Clearance cookies stay valid because
+	// downstream requests keep the same UA the WAF issued them to.
+	carrySession := r.options.CarryBrowserSession
+	carryUA := !httpmsg.UserAgentIsHonestPreset()
+	var harvested map[string]httpmsg.CarriedSession
+	if carrySession {
+		harvested = make(map[string]httpmsg.CarriedSession)
+	}
+
 	for i, target := range targets {
 		// Overall ceiling exhausted — skip the remaining targets rather than
 		// launching crawls against an already-expired context.
@@ -698,6 +713,25 @@ func (r *Runner) runSpideringPhase(ctx context.Context, infra *phaseInfra) error
 		totalActions += result.ActionsExecuted
 		totalRecords += result.RecordsSaved
 
+		if carrySession && len(result.HarvestedCookies) > 0 {
+			// Scope the session to the host the crawl actually settled on: the
+			// adopted/landing host when the start URL relocated off-host, else the
+			// target host.
+			sessionHost := httpmsg.HostnameFromURL(target)
+			if result.HostAdopted && result.LandingURL != "" {
+				if adopted := httpmsg.HostnameFromURL(result.LandingURL); adopted != "" {
+					sessionHost = adopted
+				}
+			}
+			if cookieHeader := httpmsg.FlattenCookiesForHost(sessionHost, result.HarvestedCookies); cookieHeader != "" {
+				sess := httpmsg.CarriedSession{CookieHeader: cookieHeader}
+				if carryUA {
+					sess.UserAgent = result.BrowserUserAgent
+				}
+				harvested[sessionHost] = sess
+			}
+		}
+
 		zap.L().Info("Spidering completed for target",
 			zap.String("target", target),
 			zap.Int("states", result.StatesDiscovered),
@@ -751,6 +785,32 @@ func (r *Runner) runSpideringPhase(ctx context.Context, infra *phaseInfra) error
 				terminal.Gray(target),
 				terminal.Orange(result.LandingURL)))
 		}
+	}
+
+	// Carry the harvested per-host sessions forward: store them for the Discovery
+	// phase (buildDeparosConfig reads r.browserSessions) and inject them into the
+	// shared scan requester used by discovery ingestion and dynamic assessment.
+	// The requester is shared across all phases (executeNativePhase threads one
+	// infra), so a single injection reaches every downstream request.
+	if len(harvested) > 0 {
+		r.browserSessions = harvested
+		if infra.httpRequester != nil {
+			infra.httpRequester.SetCarriedSessions(harvested)
+		}
+		hosts := make([]string, 0, len(harvested))
+		for h := range harvested {
+			hosts = append(hosts, h)
+		}
+		zap.L().Info("Spidering: carried browser session forward",
+			zap.Strings("hosts", hosts), zap.Bool("pin_user_agent", carryUA))
+		uaNote := ""
+		if carryUA {
+			uaNote = " and pinned its User-Agent"
+		}
+		r.printPhaseDetail(fmt.Sprintf("%s Carried the browser's cleared session (cookies%s) forward to discovery and scanning for %s.",
+			terminal.Purple(terminal.SymbolArrow),
+			uaNote,
+			terminal.Orange(strings.Join(hosts, ", "))))
 	}
 
 	// Record the outcome for the Discovery phase's low-yield auto-fuzz decision.

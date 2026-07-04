@@ -18,7 +18,8 @@ import (
 )
 
 // Imperative phrasings that often signal prompt-injection content embedded in
-// what should be a benign description string.
+// what should be a benign description string. Bounded `.{0,N}` spans keep the
+// multi-word patterns from matching across unrelated sentences.
 var imperativePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bignore\s+(all\s+)?previous\s+(instructions|messages|prompts)\b`),
 	regexp.MustCompile(`(?i)\bdisregard\s+(all\s+)?previous\b`),
@@ -28,11 +29,26 @@ var imperativePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bdo\s+not\s+follow\s+the\s+system\s+prompt\b`),
 	regexp.MustCompile(`(?i)\b(reveal|leak|expose)\s+(your\s+)?(system\s+prompt|instructions|api\s+key)\b`),
 	regexp.MustCompile(`(?i)\bnew\s+system\s+prompt\b`),
+	// Hidden-instruction tags used to smuggle directives past a human reviewer.
+	regexp.MustCompile(`(?i)<\s*(important|system|secret|instructions?|admin|assistant)\s*>`),
+	regexp.MustCompile(`(?i)\[\s*(important|system|secret|instructions?)\s*\]`),
+	// "Do this before/first" tool-sequencing manipulation.
+	regexp.MustCompile(`(?i)\bbefore\s+(using|calling)\s+this\s+tool\b`),
+	regexp.MustCompile(`(?i)\balways\s+(call|run|use|invoke)\b.{0,40}\bfirst\b`),
+	// Suppress-disclosure / do-not-tell-the-user directives.
+	regexp.MustCompile(`(?i)\bdo\s+not\s+(tell|inform|reveal\s+to|mention\s+to)\s+the\s+user\b`),
+	// Sensitive-file read directives (classic MCP tool-poisoning exfil).
+	regexp.MustCompile(`(?i)\bread\b.{0,20}(\.env\b|id_rsa\b|~?/?\.(ssh|aws|cursor|npmrc|netrc|bashrc)\b)`),
+	// Data-exfiltration sink phrasing.
+	regexp.MustCompile(`(?i)\b(send|exfiltrate|upload|post|leak)\b.{0,40}\b(to\s+https?://|attacker|webhook|external\s+server)\b`),
+	// Role-confusion / hidden-true-task phrasing.
+	regexp.MustCompile(`(?i)\byour\s+(real|true|actual|secret)\s+(task|goal|instruction|objective)\b`),
+	regexp.MustCompile(`(?i)^\s*(system|assistant)\s*:\s`),
 }
 
-// Base64 candidate; we only flag if decoded content looks like ASCII
-// instructions of meaningful length.
-var base64Re = regexp.MustCompile(`[A-Za-z0-9+/=]{40,}`)
+// Base64 candidate; the alphabet includes URL-safe `-_` so URL-safe blobs are
+// caught too. We only flag if decoded content looks like ASCII instructions.
+var base64Re = regexp.MustCompile(`[A-Za-z0-9+/=_-]{40,}`)
 
 type Module struct {
 	modkit.BasePassiveModule
@@ -133,10 +149,39 @@ func classifyDescription(s string) string {
 	if hasBidiControls(s) {
 		return "bidi-control unicode characters"
 	}
+	if hasConfusableHomoglyphs(s) {
+		return "confusable homoglyph unicode (Cyrillic look-alikes in Latin text)"
+	}
 	if reason := suspiciousBase64(s); reason != "" {
 		return reason
 	}
 	return ""
+}
+
+// cyrillicHomoglyphs are Cyrillic letters that render identically to common
+// Latin letters and have effectively no legitimate use inside an English,
+// machine-readable tool description — so their presence amid Latin text is a
+// strong obfuscation signal (e.g. "ignоre" with a Cyrillic о).
+var cyrillicHomoglyphs = map[rune]bool{
+	0x0430: true, 0x0435: true, 0x043E: true, 0x0440: true, 0x0441: true, 0x0443: true, 0x0445: true, // а е о р с у х
+	0x0410: true, 0x0415: true, 0x041E: true, 0x0420: true, 0x0421: true, 0x0423: true, 0x0425: true, // А Е О Р С У Х
+	0x0456: true, 0x0458: true, 0x0405: true, 0x0408: true, // і ј Ѕ Ј
+}
+
+// hasConfusableHomoglyphs reports whether Cyrillic look-alike letters are mixed
+// into predominantly-Latin text. Requiring Latin to dominate avoids flagging a
+// description legitimately written in Cyrillic.
+func hasConfusableHomoglyphs(s string) bool {
+	latin, confusable := 0, 0
+	for _, r := range s {
+		if r < 0x0250 && unicode.IsLetter(r) {
+			latin++
+		}
+		if cyrillicHomoglyphs[r] {
+			confusable++
+		}
+	}
+	return confusable > 0 && latin >= confusable*3
 }
 
 func hasZeroWidth(s string) bool {
@@ -161,8 +206,8 @@ func hasBidiControls(s string) bool {
 
 func suspiciousBase64(s string) string {
 	for _, m := range base64Re.FindAllString(s, -1) {
-		raw, err := base64.StdEncoding.DecodeString(m)
-		if err != nil {
+		raw, ok := decodeBase64Any(m)
+		if !ok {
 			continue
 		}
 		decoded := string(raw)
@@ -176,6 +221,20 @@ func suspiciousBase64(s string) string {
 		}
 	}
 	return ""
+}
+
+// decodeBase64Any tries the standard and URL-safe base64 alphabets (padded and
+// raw) so a payload can't dodge detection by choosing a different variant.
+func decodeBase64Any(m string) ([]byte, bool) {
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		if raw, err := enc.DecodeString(m); err == nil {
+			return raw, true
+		}
+	}
+	return nil, false
 }
 
 func looksLikeAsciiText(s string) bool {
@@ -232,6 +291,26 @@ func descriptionsFromResult(raw json.RawMessage) []description {
 		return nil
 	}
 
+	// jsonStr properly unquotes/unescapes a raw JSON string field. This matters:
+	// a `​` in the wire JSON becomes a real zero-width char here (the old
+	// strings.Trim left it as literal backslash-u text, hiding the payload).
+	jsonStr := func(raw json.RawMessage) string {
+		if len(raw) == 0 {
+			return ""
+		}
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return ""
+		}
+		return s
+	}
+
+	add := func(kind, name, text string) {
+		if strings.TrimSpace(text) != "" {
+			out = append(out, description{kind: kind, name: name, text: text})
+		}
+	}
+
 	walk := func(field, kind string) {
 		v, ok := asObj[field]
 		if !ok {
@@ -242,18 +321,78 @@ func descriptionsFromResult(raw json.RawMessage) []description {
 			return
 		}
 		for _, it := range items {
-			name := strings.Trim(string(it["name"]), `"`)
-			desc := strings.Trim(string(it["description"]), `"`)
-			if desc == "" {
-				continue
+			name := jsonStr(it["name"])
+			// The name itself can carry zero-width/homoglyph obfuscation.
+			add(kind+"-name", name, name)
+			add(kind, name, jsonStr(it["description"]))
+			// Nested inputSchema property descriptions (tools) and per-argument
+			// descriptions (prompts) are equally rendered into LLM context.
+			for _, d := range collectSchemaDescriptions(it["inputSchema"], 0) {
+				add(kind+"-schema", name, d)
 			}
-			out = append(out, description{kind: kind, name: name, text: desc})
+			for _, d := range collectArgumentDescriptions(it["arguments"]) {
+				add(kind+"-arg", name, d)
+			}
 		}
 	}
 	walk("tools", "tool")
 	walk("prompts", "prompt")
 	walk("resources", "resource")
 	walk("resourceTemplates", "resourceTemplate")
+
+	// The initialize result's `instructions` string is injected into the client
+	// context verbatim — a prime tool-poisoning carrier.
+	add("instructions", "initialize", jsonStr(asObj["instructions"]))
+	return out
+}
+
+// collectSchemaDescriptions walks a JSON-Schema object (bounded depth) and
+// returns every `description` string found on it or its nested properties/items.
+func collectSchemaDescriptions(raw json.RawMessage, depth int) []string {
+	if len(raw) == 0 || depth > 4 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	var out []string
+	if d, ok := obj["description"]; ok {
+		var s string
+		if json.Unmarshal(d, &s) == nil && strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	if props, ok := obj["properties"]; ok {
+		var pm map[string]json.RawMessage
+		if json.Unmarshal(props, &pm) == nil {
+			for _, p := range pm {
+				out = append(out, collectSchemaDescriptions(p, depth+1)...)
+			}
+		}
+	}
+	if items, ok := obj["items"]; ok {
+		out = append(out, collectSchemaDescriptions(items, depth+1)...)
+	}
+	return out
+}
+
+// collectArgumentDescriptions returns the `description` of each prompt argument.
+func collectArgumentDescriptions(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	var out []string
+	for _, it := range items {
+		var s string
+		if json.Unmarshal(it["description"], &s) == nil && strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
 	return out
 }
 

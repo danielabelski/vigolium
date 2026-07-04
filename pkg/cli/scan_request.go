@@ -35,6 +35,7 @@ func init() {
 	flags.StringVarP(&scanReqTarget, "target", "t", "", "Override target URL (scheme://host)")
 	flags.BoolVar(&scanURLNoPassive, "no-passive", false, "Skip passive modules")
 	registerScanModuleFlags(flags)
+	registerModuleSelectionFlags(flags)
 	registerHTTPClientFlags(flags)
 	registerPhaseFlags(flags)
 	registerLightweightScanIOFlags(flags)
@@ -44,6 +45,9 @@ func runScanRequestCmd(_ *cobra.Command, _ []string) error {
 	defer syncLogger()
 
 	if err := resetFailOnGate(); err != nil {
+		return err
+	}
+	if err := validateModuleSelectionFlags(scanURLNoPassive); err != nil {
 		return err
 	}
 

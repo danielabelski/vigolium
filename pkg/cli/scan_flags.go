@@ -6,6 +6,12 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// scanNoCarryBrowserSession backs the --no-carry-browser-session flag. Carrying
+// the spidering browser's cleared session forward is on by default
+// (Options.CarryBrowserSession), so this negative flag inverts it into the
+// option during scan setup.
+var scanNoCarryBrowserSession bool
+
 func registerNativeScanFlags(flags *pflag.FlagSet, includeAuth bool) {
 	// Target-Format group
 	flags.BoolVar(&scanOpts.FormatUseRequiredOnly, "required-only", false, "Parse only required fields from input format (ignore optional)")
@@ -15,6 +21,7 @@ func registerNativeScanFlags(flags *pflag.FlagSet, includeAuth bool) {
 	flags.StringVarP(&scanOpts.Output, "output", "o", "", "Write findings to specified output file")
 	flags.StringVar(&scanFailOn, "fail-on", "", "Exit non-zero if a finding at or above this severity is present (info|low|medium|high|critical) — for CI/agent gating. Scoped to this scan; --soft-fail overrides; with -P it is evaluated per child.")
 	flags.BoolVar(&scanOpts.ShowStats, "stats", false, "Show live progress stats during scanning")
+	flags.BoolVar(&scanPrintFinding, "print-finding", false, "After the scan, print each finding to stdout as Markdown (description + matched evidence + request/response), like `vigolium finding --markdown`. Pairs well with -S and --silent for a quick scan.")
 	flags.BoolVar(&scanOpts.IncludeResponseInOutput, "include-response", false, "Include full HTTP response body in output")
 	flags.BoolVar(&scanOpts.OmitResponse, "omit-response", false, "Omit raw HTTP request/response bytes from output file (keeps metadata, smaller files)")
 	flags.StringVar(&scanReportSharedURL, "report-url", "",
@@ -45,6 +52,7 @@ func registerNativeScanFlags(flags *pflag.FlagSet, includeAuth bool) {
 	flags.BoolVar(&scanOpts.SpideringHeaded, "headed", false, "Show the browser window during spidering (sugar for --headless=false; wins when both are set)")
 	flags.BoolVar(&scanOpts.SpideringNoCDP, "no-cdp", false, "Disable Chrome DevTools Protocol event listener detection")
 	flags.BoolVar(&scanOpts.SpideringNoForms, "no-forms", false, "Disable automatic form detection and filling during spidering")
+	flags.BoolVar(&scanNoCarryBrowserSession, "no-carry-browser-session", false, "Do not carry the spidering browser's cleared session (cookies + UA) into discovery/scanning (on by default when --spider runs; scoped to the same host, respects -H)")
 
 	// External intelligence harvesting flags
 	flags.BoolVar(&scanOpts.ExternalHarvestEnabled, "external-harvest", false, "Enable external intelligence gathering phase (Wayback, CT logs, etc.)")

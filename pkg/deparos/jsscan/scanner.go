@@ -85,6 +85,13 @@ func (s *Scanner) releaseTmpFile(path string) {
 //
 // Thread-safe for concurrent calls.
 func (s *Scanner) Scan(ctx context.Context, content []byte) (*ScanResult, error) {
+	return s.ScanWithOptions(ctx, content, ScanOptions{})
+}
+
+// ScanWithOptions analyzes the provided JavaScript content with the given
+// options (e.g. Beautify). Scan is the zero-options convenience wrapper.
+// Thread-safe for concurrent calls.
+func (s *Scanner) ScanWithOptions(ctx context.Context, content []byte, opts ScanOptions) (*ScanResult, error) {
 	if len(content) == 0 {
 		return &ScanResult{
 			Requests:     []ExtractedRequest{},
@@ -110,18 +117,13 @@ func (s *Scanner) Scan(ctx context.Context, content []byte) (*ScanResult, error)
 		return nil, fmt.Errorf("write temp file: %w", err)
 	}
 
-	requests, code, domFlows, err := s.executeJsscan(ctx, binary.Path, tmpPath)
+	result, err := s.executeJsscan(ctx, binary.Path, tmpPath, opts)
 	if err != nil {
 		return nil, err
 	}
-
-	return &ScanResult{
-		Requests:     requests,
-		Code:         code,
-		DomFlows:     domFlows,
-		ScanDuration: time.Since(startTime),
-		BytesScanned: len(content),
-	}, nil
+	result.ScanDuration = time.Since(startTime)
+	result.BytesScanned = len(content)
+	return result, nil
 }
 
 // ScanFile scans a file directly without copying to temp file.
@@ -139,18 +141,13 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string) (*ScanResult, e
 		return nil, err
 	}
 
-	requests, code, domFlows, err := s.executeJsscan(ctx, binary.Path, filePath)
+	result, err := s.executeJsscan(ctx, binary.Path, filePath, ScanOptions{})
 	if err != nil {
 		return nil, err
 	}
-
-	return &ScanResult{
-		Requests:     requests,
-		Code:         code,
-		DomFlows:     domFlows,
-		ScanDuration: time.Since(startTime),
-		BytesScanned: int(info.Size()),
-	}, nil
+	result.ScanDuration = time.Since(startTime)
+	result.BytesScanned = int(info.Size())
+	return result, nil
 }
 
 // ScanReader scans content from an io.Reader.
@@ -192,11 +189,16 @@ func (s *Scanner) getBinary() (*CachedBinary, error) {
 
 // executeJsscan runs the jsscan binary and parses output.
 // Uses pooled buffers for stdout/stderr to reduce GC pressure.
-func (s *Scanner) executeJsscan(ctx context.Context, binaryPath, inputPath string) ([]ExtractedRequest, *CodeRecord, []DomFlow, error) {
+func (s *Scanner) executeJsscan(ctx context.Context, binaryPath, inputPath string, opts ScanOptions) (*ScanResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, MaxScanTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binaryPath, inputPath)
+	args := make([]string, 0, 2)
+	if opts.Beautify {
+		args = append(args, "--beautify")
+	}
+	args = append(args, inputPath)
+	cmd := exec.CommandContext(ctx, binaryPath, args...)
 
 	stdout := s.bufPool.Get().(*bytes.Buffer)
 	stderr := s.bufPool.Get().(*bytes.Buffer)
@@ -211,16 +213,16 @@ func (s *Scanner) executeJsscan(ctx context.Context, binaryPath, inputPath strin
 	err := cmd.Run()
 
 	if ctx.Err() != nil {
-		return nil, nil, nil, ctx.Err()
+		return nil, ctx.Err()
 	}
 
 	if err != nil {
 		if stdout.Len() == 0 {
-			return nil, nil, nil, fmt.Errorf("%w: %w, stderr: %s", ErrScanFailed, err, stderr.String())
+			return nil, fmt.Errorf("%w: %w, stderr: %s", ErrScanFailed, err, stderr.String())
 		}
 	}
 
-	return parseJsscanOutput(stdout.Bytes())
+	return parseJsscanOutput(stdout.Bytes()), nil
 }
 
 // rawRecord is used to detect the type field before full parsing.
@@ -228,17 +230,15 @@ type rawRecord struct {
 	Type string `json:"type"`
 }
 
-// parseJsscanOutput parses the JSONL output from jsscan.
-// jsscan outputs one JSON object per line (JSONL format).
-// Supports three record types: 'extractedRequest', 'code', and 'domFlow'.
-func parseJsscanOutput(output []byte) ([]ExtractedRequest, *CodeRecord, []DomFlow, error) {
+// parseJsscanOutput parses the JSONL output from jsscan into a ScanResult.
+// jsscan outputs one JSON object per line (JSONL format). Supports record types:
+// 'extractedRequest', 'code', 'domFlow', and (under --beautify) 'beautified'.
+// ScanDuration/BytesScanned are filled in by the caller.
+func parseJsscanOutput(output []byte) *ScanResult {
+	result := &ScanResult{Requests: []ExtractedRequest{}}
 	if len(output) == 0 {
-		return []ExtractedRequest{}, nil, nil, nil
+		return result
 	}
-
-	var requests []ExtractedRequest
-	var code *CodeRecord
-	var domFlows []DomFlow
 
 	lines := bytes.Split(output, []byte("\n"))
 	for _, line := range lines {
@@ -258,23 +258,29 @@ func parseJsscanOutput(output []byte) ([]ExtractedRequest, *CodeRecord, []DomFlo
 			if err := json.Unmarshal(line, &req); err != nil {
 				continue
 			}
-			requests = append(requests, req)
+			result.Requests = append(result.Requests, req)
 		case "code":
 			var c CodeRecord
 			if err := json.Unmarshal(line, &c); err != nil {
 				continue
 			}
-			code = &c
+			result.Code = &c
 		case "domFlow":
 			var f DomFlow
 			if err := json.Unmarshal(line, &f); err != nil {
 				continue
 			}
-			domFlows = append(domFlows, f)
+			result.DomFlows = append(result.DomFlows, f)
+		case "beautified":
+			var b BeautifiedCode
+			if err := json.Unmarshal(line, &b); err != nil {
+				continue
+			}
+			result.Beautified = &b
 		}
 	}
 
-	return requests, code, domFlows, nil
+	return result
 }
 
 // Checksum returns the checksum of the cached/extracted jsscan binary.

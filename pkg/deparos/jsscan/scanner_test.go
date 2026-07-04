@@ -12,11 +12,8 @@ import (
 )
 
 func TestParseJsscanOutput_EmptyOutput(t *testing.T) {
-	requests, code, _, err := parseJsscanOutput([]byte{})
-
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte{})
+	requests, code := res.Requests, res.Code
 	if len(requests) != 0 {
 		t.Errorf("expected 0 requests, got %d", len(requests))
 	}
@@ -29,11 +26,8 @@ func TestParseJsscanOutput_ExtractedRequests(t *testing.T) {
 	output := `{"type":"extractedRequest","url":"/api/users","method":"GET","params":"","body":"","headers":null,"cookies":null}
 {"type":"extractedRequest","url":"/api/posts","method":"POST","params":"","body":"{\"title\":\"test\"}","headers":["Content-Type: application/json"],"cookies":null}`
 
-	requests, code, _, err := parseJsscanOutput([]byte(output))
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte(output))
+	requests, code := res.Requests, res.Code
 
 	if len(requests) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(requests))
@@ -67,11 +61,8 @@ func TestParseJsscanOutput_ExtractedRequests(t *testing.T) {
 func TestParseJsscanOutput_CodeRecord(t *testing.T) {
 	output := `{"type":"code","filename":"bundle.js","content":"function test() { return 1; }"}`
 
-	requests, code, _, err := parseJsscanOutput([]byte(output))
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte(output))
+	requests, code := res.Requests, res.Code
 
 	if len(requests) != 0 {
 		t.Errorf("expected 0 requests, got %d", len(requests))
@@ -93,10 +84,8 @@ func TestParseJsscanOutput_DomFlows(t *testing.T) {
 {"type":"domFlow","source":"location.hash","sink":"innerHTML","snippet":"el.innerHTML = x","line":12}
 {"type":"domFlow","source":"document.cookie","sink":"eval","snippet":"eval(c)","line":34}`
 
-	requests, _, domFlows, err := parseJsscanOutput([]byte(output))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte(output))
+	requests, domFlows := res.Requests, res.DomFlows
 	if len(requests) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(requests))
 	}
@@ -116,11 +105,8 @@ func TestParseJsscanOutput_MixedRecords(t *testing.T) {
 {"type":"code","filename":"app.js","content":"const API = '/api/v1';"}
 {"type":"extractedRequest","url":"/api/v2","method":"POST","params":"","body":"","headers":null,"cookies":null}`
 
-	requests, code, _, err := parseJsscanOutput([]byte(output))
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte(output))
+	requests, code := res.Requests, res.Code
 
 	if len(requests) != 2 {
 		t.Errorf("expected 2 requests, got %d", len(requests))
@@ -133,16 +119,56 @@ func TestParseJsscanOutput_MixedRecords(t *testing.T) {
 	}
 }
 
+func TestParseJsscanOutput_Beautified(t *testing.T) {
+	output := `{"type":"extractedRequest","url":"/api","method":"GET","params":"","body":"","headers":null,"cookies":null}
+{"type":"code","filename":"bundle.js","content":"x"}
+{"type":"beautified","filename":"bundle.js","format":"webpack","moduleCount":2,"modulePaths":["./100.js","./200.js"],"changed":true,"content":"// ===== ./100.js =====\nconst a = 1;"}`
+
+	res := parseJsscanOutput([]byte(output))
+	requests, code, beautified := res.Requests, res.Code, res.Beautified
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+	if code == nil {
+		t.Fatal("expected non-nil code")
+	}
+	if beautified == nil {
+		t.Fatal("expected non-nil beautified")
+	}
+	if beautified.Format != "webpack" {
+		t.Errorf("beautified.Format = %q, want webpack", beautified.Format)
+	}
+	if beautified.ModuleCount != 2 {
+		t.Errorf("beautified.ModuleCount = %d, want 2", beautified.ModuleCount)
+	}
+	if len(beautified.ModulePaths) != 2 || beautified.ModulePaths[0] != "./100.js" {
+		t.Errorf("beautified.ModulePaths = %v", beautified.ModulePaths)
+	}
+	if !beautified.Changed {
+		t.Error("expected beautified.Changed = true")
+	}
+	if !strings.Contains(beautified.Content, "./100.js") {
+		t.Errorf("beautified.Content = %q", beautified.Content)
+	}
+
+	// A no-op beautification (changed=false) must not be reported by HasBeautified.
+	noop := &ScanResult{Beautified: &BeautifiedCode{Format: "none", Changed: false, Content: "x"}}
+	if noop.HasBeautified() {
+		t.Error("HasBeautified() should be false when Changed=false")
+	}
+	noop.Beautified = beautified
+	if !noop.HasBeautified() {
+		t.Error("HasBeautified() should be true for a changed beautified doc")
+	}
+}
+
 func TestParseJsscanOutput_InvalidJSON(t *testing.T) {
 	output := `{"type":"extractedRequest","url":"/api/valid","method":"GET","params":"","body":"","headers":null,"cookies":null}
 this is not valid json
 {"type":"extractedRequest","url":"/api/also-valid","method":"POST","params":"","body":"","headers":null,"cookies":null}`
 
-	requests, _, _, err := parseJsscanOutput([]byte(output))
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte(output))
+	requests := res.Requests
 
 	// Invalid lines should be skipped
 	if len(requests) != 2 {
@@ -157,11 +183,8 @@ func TestParseJsscanOutput_EmptyLines(t *testing.T) {
 {"type":"extractedRequest","url":"/api/test2","method":"GET","params":"","body":"","headers":null,"cookies":null}
 `
 
-	requests, _, _, err := parseJsscanOutput([]byte(output))
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte(output))
+	requests := res.Requests
 
 	if len(requests) != 2 {
 		t.Errorf("expected 2 requests, got %d", len(requests))
@@ -173,11 +196,8 @@ func TestParseJsscanOutput_UnknownType(t *testing.T) {
 {"type":"unknownType","foo":"bar"}
 {"type":"extractedRequest","url":"/api/test2","method":"GET","params":"","body":"","headers":null,"cookies":null}`
 
-	requests, _, _, err := parseJsscanOutput([]byte(output))
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte(output))
+	requests := res.Requests
 
 	// Unknown types should be ignored
 	if len(requests) != 2 {
@@ -190,11 +210,8 @@ func TestParseJsscanOutput_MalformedRequest(t *testing.T) {
 {"type":"extractedRequest","url":123}
 {"type":"extractedRequest","url":"/api/also-valid","method":"POST","params":"","body":"","headers":null,"cookies":null}`
 
-	requests, _, _, err := parseJsscanOutput([]byte(output))
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte(output))
+	requests := res.Requests
 
 	// Malformed records should be skipped (url should be string, not number)
 	if len(requests) != 2 {
@@ -205,11 +222,8 @@ func TestParseJsscanOutput_MalformedRequest(t *testing.T) {
 func TestParseJsscanOutput_SpecialCharacters(t *testing.T) {
 	output := `{"type":"extractedRequest","url":"/api/search?q=hello%20world","method":"GET","params":"q=hello world","body":"","headers":["X-Custom: value with \"quotes\""],"cookies":null}`
 
-	requests, _, _, err := parseJsscanOutput([]byte(output))
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte(output))
+	requests := res.Requests
 
 	if len(requests) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(requests))
@@ -223,11 +237,8 @@ func TestParseJsscanOutput_SpecialCharacters(t *testing.T) {
 func TestParseJsscanOutput_CompleteRequest(t *testing.T) {
 	output := `{"type":"extractedRequest","url":"https://api.example.com/users","method":"POST","params":"page=1","body":"{\"name\":\"test\",\"email\":\"test@example.com\"}","headers":["Content-Type: application/json","Authorization: Bearer token123"],"cookies":["session=abc123","csrf=xyz789"]}`
 
-	requests, _, _, err := parseJsscanOutput([]byte(output))
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	res := parseJsscanOutput([]byte(output))
+	requests := res.Requests
 
 	if len(requests) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(requests))
@@ -489,6 +500,146 @@ func TestScanner_ScanFile(t *testing.T) {
 
 	if result.BytesScanned != len(content) {
 		t.Errorf("BytesScanned = %d, want %d", result.BytesScanned, len(content))
+	}
+}
+
+func TestScanner_Beautify(t *testing.T) {
+	if !isEmbeddedBinaryValid() {
+		t.Skip("skipping: no valid jsscan binary available")
+	}
+
+	scanner, err := NewScanner(nil)
+	if err != nil {
+		t.Fatalf("NewScanner failed: %v", err)
+	}
+
+	// A minified webpack-5-style bundle with several modules. Kept over the
+	// ~500-byte "worth beautifying" gate so the beautify pass engages.
+	bundle := []byte(`(()=>{"use strict";var e={100:(e,t,r)=>{const n=r(200);` +
+		`t.listUsers=function(){return fetch(n.base+"/users",{method:"GET"}).then(x=>x.json())};` +
+		`t.createUser=function(u){return fetch(n.base+"/users",{method:"POST",body:JSON.stringify(u)})};` +
+		`t.deleteUser=function(id){return fetch(n.base+"/users/"+id,{method:"DELETE"})}},` +
+		`200:(e,t)=>{t.base="/api/v3";t.timeout=3e4;t.retries=2;t.headers={"X-Api":"1","Accept":"application/json"}},` +
+		`300:(e,t,r)=>{const n=r(200);t.listPosts=function(p){return fetch(n.base+"/posts?page="+p)};` +
+		`t.render=function(items){return items&&items.map(x=>({id:x.id,title:x.title,ok:!!x.ok}))}}},t={};` +
+		`function r(n){var a=t[n];if(void 0!==a)return a.exports;var o=t[n]={exports:{}};` +
+		`return e[n](o,o.exports,r),o.exports}r.n=e=>e;var n=r(100),s=r(300);console.log(n,s)})();`)
+
+	// Without Beautify: no beautified record.
+	plain, err := scanner.Scan(context.Background(), bundle)
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+	if plain.HasBeautified() {
+		t.Error("did not expect a beautified record without ScanOptions.Beautify")
+	}
+
+	// With Beautify: webpack bundle unpacked into modules.
+	res, err := scanner.ScanWithOptions(context.Background(), bundle, ScanOptions{Beautify: true})
+	if err != nil {
+		t.Fatalf("ScanWithOptions failed: %v", err)
+	}
+	if !res.HasBeautified() {
+		t.Fatal("expected a beautified record")
+	}
+	b := res.Beautified
+	if b.Format != "webpack" {
+		t.Errorf("Format = %q, want webpack", b.Format)
+	}
+	if b.ModuleCount < 2 {
+		t.Errorf("ModuleCount = %d, want >= 2", b.ModuleCount)
+	}
+	if !strings.Contains(b.Content, "fetch") {
+		t.Errorf("beautified content missing expected code; got %q", b.Content)
+	}
+	// The content should be multi-line (unminified), unlike the single-line input.
+	if strings.Count(b.Content, "\n") < 3 {
+		t.Errorf("beautified content does not look unminified: %q", b.Content)
+	}
+}
+
+func TestScanner_Beautify_Browserify(t *testing.T) {
+	if !isEmbeddedBinaryValid() {
+		t.Skip("skipping: no valid jsscan binary available")
+	}
+	scanner, err := NewScanner(nil)
+	if err != nil {
+		t.Fatalf("NewScanner failed: %v", err)
+	}
+
+	bundle := []byte(`(function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;` +
+		`if(!f&&c)return c(i,!0);if(u)return u(i,!0);throw new Error("Cannot find module '"+i+"'")}var p=n[i]={exports:{}};` +
+		`e[i][0].call(p.exports,function(r){return o(e[i][1][r]||r)},p,p.exports,r,e,n,t)}return n[i].exports}` +
+		`for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()` +
+		`({1:[function(require,module,exports){var api=require(2);module.exports=function(id){return api.getUser("/api/users/"+id)}},{"2":2}],` +
+		`2:[function(require,module,exports){module.exports={getUser:function(url){return fetch(url,{method:"GET"})}}},{}]},{},[1]);`)
+
+	res, err := scanner.ScanWithOptions(context.Background(), bundle, ScanOptions{Beautify: true})
+	if err != nil {
+		t.Fatalf("ScanWithOptions failed: %v", err)
+	}
+	if !res.HasBeautified() {
+		t.Fatal("expected a beautified record for browserify bundle")
+	}
+	if res.Beautified.Format != "browserify" {
+		t.Errorf("Format = %q, want browserify", res.Beautified.Format)
+	}
+	if res.Beautified.ModuleCount < 2 {
+		t.Errorf("ModuleCount = %d, want >= 2", res.Beautified.ModuleCount)
+	}
+}
+
+func TestScanner_Beautify_NonBundle(t *testing.T) {
+	if !isEmbeddedBinaryValid() {
+		t.Skip("skipping: no valid jsscan binary available")
+	}
+	scanner, err := NewScanner(nil)
+	if err != nil {
+		t.Fatalf("NewScanner failed: %v", err)
+	}
+
+	// A long minified single line that is NOT a bundle — should unminify with
+	// format "none" and zero modules.
+	plain := []byte(`function a(x){return x*2}function b(y){return y+1}var c=[];for(var i=0;i<50;i++){c.push(a(i)+b(i))}` +
+		`var d=c.filter(function(v){return v>10}).map(function(v){return v-1}).reduce(function(p,q){return p+q},0);` +
+		`console.log(d);var e=function(t){return t?"yes":"no"};window.result=e(d>100);` +
+		`var f={g:function(){return 1},h:function(){return 2},i:function(){return 3}};console.log(f.g()+f.h()+f.i());` +
+		`function scale(list,factor){return list.map(function(v){return v*factor})}var g=scale(c,3);console.log(g.length);`)
+
+	res, err := scanner.ScanWithOptions(context.Background(), plain, ScanOptions{Beautify: true})
+	if err != nil {
+		t.Fatalf("ScanWithOptions failed: %v", err)
+	}
+	if !res.HasBeautified() {
+		t.Fatal("expected a beautified record for long minified script")
+	}
+	if res.Beautified.Format != "none" {
+		t.Errorf("Format = %q, want none", res.Beautified.Format)
+	}
+	if res.Beautified.ModuleCount != 0 {
+		t.Errorf("ModuleCount = %d, want 0", res.Beautified.ModuleCount)
+	}
+	if strings.Count(res.Beautified.Content, "\n") < 5 {
+		t.Errorf("expected unminified multi-line content, got %q", res.Beautified.Content)
+	}
+}
+
+func TestScanner_Beautify_TinyNoop(t *testing.T) {
+	if !isEmbeddedBinaryValid() {
+		t.Skip("skipping: no valid jsscan binary available")
+	}
+	scanner, err := NewScanner(nil)
+	if err != nil {
+		t.Fatalf("NewScanner failed: %v", err)
+	}
+
+	// Below the worth-beautifying gate — no beautified record is produced.
+	res, err := scanner.ScanWithOptions(context.Background(), []byte(`var api="/api/x";fetch(api);`), ScanOptions{Beautify: true})
+	if err != nil {
+		t.Fatalf("ScanWithOptions failed: %v", err)
+	}
+	if res.HasBeautified() {
+		t.Error("did not expect a beautified record for a tiny script")
 	}
 }
 

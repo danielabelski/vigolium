@@ -38,6 +38,15 @@ var knownTechTags = map[string]struct{}{
 	"wordpress": {},
 	"drupal":    {},
 	"joomla":    {},
+	"aem":       {}, // Adobe Experience Manager (Sling/CRX/Granite)
+	"adobe":     {}, // published alongside "aem" by aem_fingerprint
+	// SaaS platforms (published by the *_fingerprint passive modules)
+	"salesforce": {}, // Salesforce Experience Cloud / Lightning
+	"lightning":  {}, // published alongside "salesforce"
+	"aura":       {}, // Salesforce Aura framework
+	"servicenow": {}, // ServiceNow ITSM
+	"powerpages": {}, // Microsoft Power Pages / Power Apps portals
+	"dataverse":  {}, // published alongside "powerpages"
 	// API protocols
 	"graphql": {},
 	// Java application servers (publishes alongside "java")

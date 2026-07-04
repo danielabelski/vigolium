@@ -608,7 +608,7 @@ JSSCAN_RES_BINS=jsscan-darwin-amd64 jsscan-darwin-arm64 jsscan-linux-amd64 jssca
 # Build jsscan from source and copy binaries
 update-jsscan:
 	@echo "$(PREFIX) Building jsscan from source..."
-	cd platform/jsscan && bun install --linker isolated && bun run build:bin
+	cd platform/jsscan && bun install --linker isolated --ignore-scripts && bun run build:bin
 	@echo "$(PREFIX) Copying jsscan binaries to $(JSSCAN_DST_DIR)..."
 	@mkdir -p $(JSSCAN_DST_DIR)
 	@cp -R $(JSSCAN_SRC_DIR)/* $(JSSCAN_DST_DIR)/
@@ -626,7 +626,7 @@ ensure-jsscan:
 	done; \
 	if [ $$needs_build -eq 1 ]; then \
 		echo "$(PREFIX) jsscan binaries missing or invalid, building from source..."; \
-		cd platform/jsscan && bun install --linker isolated && bun run build:bin; \
+		cd platform/jsscan && bun install --linker isolated --ignore-scripts && bun run build:bin; \
 		cd ../..; \
 		mkdir -p $(JSSCAN_RES_DST_DIR); \
 		cp $(JSSCAN_SRC_DIR)/* $(JSSCAN_RES_DST_DIR)/; \

@@ -86,9 +86,12 @@ func (c *Cache) MarkFailed(value string, err error, ignoreTimeout bool) {
 		_ = c.failedTargets.Set(value, newItem)
 		return
 	}
+	// The entry is already in the cache and errors is an atomic on the shared
+	// *cacheItem, so incrementing in place is visible without re-Setting. The
+	// GetIFPresent above already refreshed ARC recency; the redundant Set only
+	// took the cache's write lock for nothing on this hot path.
 	existingCacheItemValue := existingCacheItem.(*cacheItem)
 	existingCacheItemValue.errors.Add(1)
-	_ = c.failedTargets.Set(value, existingCacheItemValue)
 }
 
 // MarkSuccess resets the error counter for a host on successful request.
@@ -101,13 +104,15 @@ func (c *Cache) MarkSuccess(value string) {
 
 	existingCacheItemValue := existingCacheItem.(*cacheItem)
 
-	// Don't reset if already quarantined
-	if existingCacheItemValue.errors.Load() >= int32(c.MaxHostError) {
+	// Nothing to do when already at zero (the common case on a healthy host) or
+	// already quarantined (don't un-quarantine on a stray success). Otherwise
+	// reset in place — the atomic on the shared *cacheItem needs no re-Set into
+	// the cache.
+	cur := existingCacheItemValue.errors.Load()
+	if cur == 0 || cur >= int32(c.MaxHostError) {
 		return
 	}
-
 	existingCacheItemValue.errors.Store(0)
-	_ = c.failedTargets.Set(value, existingCacheItemValue)
 }
 
 // QuarantinedCount returns the number of hosts that have been marked as

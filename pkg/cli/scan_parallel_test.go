@@ -233,6 +233,18 @@ func TestPerTargetConsolePath(t *testing.T) {
 	assert.Equal(t, "noext.console.log", perTargetConsolePath("noext"))
 }
 
+// hasDeferredOutputFormat is the gate for writing a sequential per-target
+// .console.log: any non-console (file-based) format makes the captured log
+// worthwhile; a plain console format does not (the console already IS output).
+func TestHasDeferredOutputFormat(t *testing.T) {
+	assert.False(t, hasDeferredOutputFormat(nil))
+	assert.False(t, hasDeferredOutputFormat([]string{"console"}))
+	assert.True(t, hasDeferredOutputFormat([]string{"sqlite", "html"}))
+	assert.True(t, hasDeferredOutputFormat([]string{"console", "html"}))
+	assert.True(t, hasDeferredOutputFormat([]string{"jsonl"}))
+	assert.True(t, hasDeferredOutputFormat([]string{"fs"}))
+}
+
 // parseMapFlagValue turns pflag's "[k=v,k2=v2]" String() form back into
 // individual tokens; an empty map yields no tokens.
 func TestParseMapFlagValue(t *testing.T) {

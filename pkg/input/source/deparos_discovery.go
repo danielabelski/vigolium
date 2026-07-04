@@ -82,9 +82,15 @@ type DeparosDiscoveryConfig struct {
 	JSBundleNames []string
 
 	// Engine
-	CaseSensitivity         string // "auto_detect" | "sensitive" | "insensitive"
-	EngineTimeout           time.Duration
-	CustomHeaders           map[string]string
+	CaseSensitivity string // "auto_detect" | "sensitive" | "insensitive"
+	EngineTimeout   time.Duration
+	CustomHeaders   map[string]string
+	// BrowserSessions carries WAF/bot-cleared sessions harvested by the spidering
+	// browser, keyed by lowercased hostname. buildDeparosConfig injects the
+	// session matching each target host (Cookie + optional pinned User-Agent) into
+	// that target's request headers so content discovery crawls with the same
+	// cleared session — set-if-absent, so a configured header always wins.
+	BrowserSessions         map[string]httpmsg.CarriedSession
 	EnableCookieJar         bool
 	ProxyURL                string // HTTP proxy URL for discovery requests
 	MaxConsecutiveErrors    int
@@ -400,6 +406,61 @@ func (d *DeparosDiscoverySource) runDiscovery() {
 }
 
 // buildDeparosConfig builds a deparos Config from the DeparosDiscoveryConfig fields.
+// buildDiscoveryHeaders returns the request headers for a discovery target: the
+// configured custom headers, plus — when the spidering browser harvested a
+// session for this target's host — that session's Cookie and (when carried) its
+// User-Agent. Session values are added set-if-absent (case-insensitive) so a
+// header the operator already configured always wins. Returns nil when there is
+// nothing to send.
+func (d *DeparosDiscoverySource) buildDiscoveryHeaders(target string) map[string]string {
+	headers := make(map[string]string, len(d.cfg.CustomHeaders)+2)
+	for k, v := range d.cfg.CustomHeaders {
+		headers[k] = v
+	}
+	// A whole-Cookie set-if-absent (not a merge): the deparos crawler's existing
+	// Cookie is a static operator config header for the whole crawl, so if one is
+	// configured we honor it verbatim. This intentionally differs from the
+	// scanner requester, which merges carried cookies into a request's own
+	// dynamic Cookie header (see http.applyCarriedSession).
+	if sess, ok := d.sessionForTarget(target); ok {
+		if sess.CookieHeader != "" && !hasHeaderCI(headers, "Cookie") {
+			headers["Cookie"] = sess.CookieHeader
+		}
+		if sess.UserAgent != "" && !hasHeaderCI(headers, "User-Agent") {
+			headers["User-Agent"] = sess.UserAgent
+		}
+	}
+	if len(headers) == 0 {
+		return nil
+	}
+	return headers
+}
+
+// sessionForTarget looks up the browser-harvested session whose host matches the
+// target URL's host (same-host only), so a session is never sent to a host it
+// was not harvested from.
+func (d *DeparosDiscoverySource) sessionForTarget(target string) (httpmsg.CarriedSession, bool) {
+	if len(d.cfg.BrowserSessions) == 0 {
+		return httpmsg.CarriedSession{}, false
+	}
+	host := httpmsg.HostnameFromURL(target)
+	if host == "" {
+		return httpmsg.CarriedSession{}, false
+	}
+	sess, ok := d.cfg.BrowserSessions[host]
+	return sess, ok
+}
+
+// hasHeaderCI reports whether m already contains name under any case.
+func hasHeaderCI(m map[string]string, name string) bool {
+	for k := range m {
+		if strings.EqualFold(k, name) {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *DeparosDiscoverySource) buildDeparosConfig(target string) *deparosconfig.Config {
 	cfg := deparosconfig.NewDefaultConfig()
 	cfg.Target.StartURL = target
@@ -489,9 +550,7 @@ func (d *DeparosDiscoverySource) buildDeparosConfig(target string) *deparosconfi
 	if d.cfg.EngineTimeout > 0 {
 		cfg.Engine.Timeout = d.cfg.EngineTimeout
 	}
-	if len(d.cfg.CustomHeaders) > 0 {
-		cfg.Engine.CustomHeaders = d.cfg.CustomHeaders
-	}
+	cfg.Engine.CustomHeaders = d.buildDiscoveryHeaders(target)
 	cfg.Engine.EnableCookieJar = d.cfg.EnableCookieJar
 	if d.cfg.ProxyURL != "" {
 		cfg.Engine.ProxyURL = d.cfg.ProxyURL

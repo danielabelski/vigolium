@@ -7,6 +7,7 @@ import {
   generate,
   type Transform,
 } from './ast-utils';
+import { beautifyBundle, looksWorthBeautifying, type BeautifyResult } from './beautify';
 import concatToPlus from './deobfuscate/concat-to-plus';
 import controlFlowObject from './deobfuscate/control-flow-object';
 import mergeStrings from './deobfuscate/merge-strings';
@@ -34,6 +35,7 @@ export interface JsscanResult {
   code: string;
   extractedRequests: ExtractedRequest[];
   domFlows: DomFlow[];
+  beautified?: BeautifyResult;
 }
 
 export interface Options {
@@ -41,11 +43,19 @@ export interface Options {
    * @param progress Progress in percent (0-100)
    */
   onProgress?: (progress: number) => void;
+  /**
+   * When true, also unminify and (if a bundle) unpack the script into a single
+   * readable, module-annotated document via webcrack. Off by default so the
+   * discovery pipeline's per-script scans stay fast; enabled by the passive
+   * js-beautify module. See ./beautify.
+   */
+  beautify?: boolean;
 }
 
 function mergeOptions(options: Options): asserts options is Required<Options> {
   const mergedOptions: Required<Options> = {
     onProgress: () => { },
+    beautify: false,
     ...options,
   };
   Object.assign(options, mergedOptions);
@@ -177,9 +187,22 @@ export async function jsscan(
     }
   }
 
+  // Optional unminify + bundle-unpack pass (webcrack). Runs on the original
+  // (bookmarklet-normalized) source, independent of the request-extraction AST.
+  // Isolated in try/catch: a failure here must never drop the extracted requests.
+  let beautified: BeautifyResult | undefined;
+  if (options.beautify && looksWorthBeautifying(code)) {
+    try {
+      beautified = await beautifyBundle(code);
+    } catch (err) {
+      debug('jsscan:beautify')('beautify failed', err);
+    }
+  }
+
   return {
     code: outputCode,
     extractedRequests: allRequests,
     domFlows,
+    beautified,
   };
 }

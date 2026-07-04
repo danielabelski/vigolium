@@ -9,6 +9,10 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 )
 
+// uploadLinkPattern matches href/src links pointing at an uploaded file in an
+// HTML upload response. Compiled once at package init rather than per response.
+var uploadLinkPattern = regexp.MustCompile(`(?i)(?:href|src)=["']([^"']*(?:upload|file)[^"']*)["']`)
+
 // commonUploadDirs are paths where uploaded files are commonly stored.
 var commonUploadDirs = []string{
 	"/uploads/",
@@ -117,8 +121,7 @@ func extractUploadPath(body string) string {
 	}
 
 	// Try HTML response - look for links to uploaded files
-	linkPattern := regexp.MustCompile(`(?i)(?:href|src)=["']([^"']*(?:upload|file)[^"']*)["']`)
-	if matches := linkPattern.FindStringSubmatch(body); len(matches) > 1 {
+	if matches := uploadLinkPattern.FindStringSubmatch(body); len(matches) > 1 {
 		return matches[1]
 	}
 

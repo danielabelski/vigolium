@@ -3,6 +3,7 @@ package scope
 import (
 	"net/url"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/publicsuffix"
 )
@@ -32,6 +33,13 @@ type Config struct {
 type Checker struct {
 	config           Config
 	targetMainDomain string // eTLD+1 of target (e.g., example.com)
+
+	// hostScope memoizes isHostInScope by raw host. IsInScope runs per
+	// discovered link/JS-URL/form-action/redirect, almost always for the same
+	// handful of hosts, so caching avoids recomputing the eTLD+1 public-suffix
+	// lookup (and the lowercase/strip-port) on every call. A scope run touches
+	// a bounded host set, so unbounded growth isn't a concern.
+	hostScope sync.Map // host(string) → bool
 }
 
 // NewChecker creates a new scope checker with the given configuration.
@@ -65,22 +73,34 @@ func (s *Checker) IsInScope(u *url.URL) bool {
 		return false
 	}
 
-	// Check exclude patterns
-	if s.matchesExcludePattern(u.String()) {
+	// Check exclude patterns (only serialize the URL when there are patterns).
+	if len(s.config.ExcludePatterns) > 0 && s.matchesExcludePattern(u.String()) {
 		return false
 	}
 
 	return true
 }
 
-// isHostInScope checks if the host matches the target.
+// isHostInScope checks if the host matches the target, memoizing the decision on
+// the normalized (lowercased, port-stripped) host so the eTLD+1 lookup runs at
+// most once per distinct host and case/port variants collapse to one entry.
 func (s *Checker) isHostInScope(host string) bool {
 	if s.config.TargetHost == "" {
 		return true // No target host configured, allow all
 	}
 
-	hostLower := strings.ToLower(stripPort(host))
+	key := strings.ToLower(stripPort(host))
+	if v, ok := s.hostScope.Load(key); ok {
+		return v.(bool)
+	}
+	result := s.computeHostInScope(key)
+	s.hostScope.Store(key, result)
+	return result
+}
 
+// computeHostInScope performs the actual (uncached) host scope decision on an
+// already-normalized (lowercased, port-stripped) host.
+func (s *Checker) computeHostInScope(hostLower string) bool {
 	switch s.config.Mode {
 	case ModeAny:
 		return true

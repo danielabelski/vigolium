@@ -143,22 +143,13 @@ func (o *ObservedProvider) addUnsafeWithFrequency(filename []byte, frequency int
 	// Add new item with specified frequency
 	o.frequencies[nameStr] = frequency
 
-	// Insert into sorted slice
-	o.insertSorted([]byte(nameStr))
-}
-
-// insertSorted inserts an item into the filenames slice maintaining sorted order.
-// CALLER MUST HOLD o.mu LOCK.
-func (o *ObservedProvider) insertSorted(item []byte) {
-	// Binary search for insertion point
-	pos := sort.Search(len(o.filenames), func(i int) bool {
-		return bytes.Compare(o.filenames[i], item) >= 0
-	})
-
-	// Insert at position
-	o.filenames = append(o.filenames, nil)
-	copy(o.filenames[pos+1:], o.filenames[pos:])
-	o.filenames[pos] = item
+	// Defer sorting to the next reader instead of doing an O(n) sorted-slice
+	// insert here. extractWordsFromResponse adds one token at a time, so an
+	// in-place sorted insert made a content-rich response O(n²) as the observed
+	// set filled toward maxItems. rebuildFilenames() (already called by every
+	// reader: Next/GetAllItems/SnapshotBytes/HashContent) reconstructs the
+	// sorted slice lazily and exactly once per batch of adds.
+	o.needsRebuild = true
 }
 
 // evictLowFrequency removes the lowest-frequency items to make room for new ones.

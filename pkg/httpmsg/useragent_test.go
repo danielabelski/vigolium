@@ -31,6 +31,52 @@ func inRandomPool(ua string) bool {
 	return false
 }
 
+func TestUserAgentIsHonestPreset(t *testing.T) {
+	t.Run("preset default is honest", func(t *testing.T) {
+		reset(t)
+		if !UserAgentIsHonestPreset() {
+			t.Error("expected preset default to be reported honest")
+		}
+	})
+
+	t.Run("random selector is not honest", func(t *testing.T) {
+		reset(t)
+		SetDefaultUserAgent(UserAgentRandom)
+		if UserAgentIsHonestPreset() {
+			t.Error("random selector should not be honest preset")
+		}
+	})
+
+	t.Run("literal selector is not honest", func(t *testing.T) {
+		reset(t)
+		SetDefaultUserAgent("Mozilla/5.0 (custom)")
+		if UserAgentIsHonestPreset() {
+			t.Error("custom literal should not be honest preset")
+		}
+	})
+
+	t.Run("env random overrides preset config", func(t *testing.T) {
+		reset(t)
+		// config stays preset, env forces random → effective selector is random.
+		t.Setenv(DefaultUserAgentEnvVar, "random")
+		if UserAgentIsHonestPreset() {
+			t.Error("VIGOLIUM_DEFAULT_UA=random should override preset config")
+		}
+		if got := effectiveUserAgentSelector(); got != "random" {
+			t.Errorf("effectiveUserAgentSelector = %q, want random", got)
+		}
+	})
+
+	t.Run("env preset overrides random config", func(t *testing.T) {
+		reset(t)
+		SetDefaultUserAgent(UserAgentRandom)
+		t.Setenv(DefaultUserAgentEnvVar, "preset")
+		if !UserAgentIsHonestPreset() {
+			t.Error("VIGOLIUM_DEFAULT_UA=preset should override random config")
+		}
+	})
+}
+
 func TestDefaultUserAgent_PresetIsDefault(t *testing.T) {
 	reset(t)
 	SetBuildVersion("v9.9.9")

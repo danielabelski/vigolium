@@ -365,6 +365,11 @@ function parseWebpackBundle(ast: ParseResult<t.File>): void {
         extractFromPushPattern(node);
         return;
       }
+
+      // Pattern 6: Webpack 3/4 bare IIFE with a modules array/object argument —
+      // (function(modules){...})([...]). Distinct from Pattern 5 (the same call
+      // wrapped in `return`) and Pattern 2/isWebpackIIFE (modules object in body).
+      if (tryExtractFromBootstrapCall(node)) return;
     },
 
     // Pattern 4: UnaryExpression IIFE - !function(e){...}({...})
@@ -409,34 +414,41 @@ function parseWebpackBundle(ast: ParseResult<t.File>): void {
     // return (function(modules) { ... })([/* 0 */..., /* 1 */...])
     ReturnStatement(path) {
       const node = path.node;
-      if (!node.argument || !t.isCallExpression(node.argument)) return;
-
-      const call = node.argument;
-      // Check if callee is a FunctionExpression (the webpack bootstrap)
-      if (!t.isFunctionExpression(call.callee)) return;
-
-      // Check if first param is named 'modules'
-      const fn = call.callee;
-      if (fn.params.length === 0) return;
-      const firstParam = fn.params[0];
-      if (!t.isIdentifier(firstParam)) return;
-
-      // Accept common webpack module param names: modules, e, n, etc.
-      const paramName = firstParam.name;
-      const isWebpackBootstrap = paramName === 'modules' || /^[a-z]$/.test(paramName);
-
-      if (isWebpackBootstrap && call.arguments.length >= 1) {
-        const arg = call.arguments[0];
-        if (t.isArrayExpression(arg) && looksLikeWebpackModulesArray(arg)) {
-          extractModulesFromArray(arg);
-        } else if (t.isObjectExpression(arg) && looksLikeWebpackModulesObject(arg)) {
-          extractModulesFromObject(arg);
-        }
+      if (node.argument && t.isCallExpression(node.argument)) {
+        tryExtractFromBootstrapCall(node.argument);
       }
     },
 
     noScope: true,
   });
+}
+
+/**
+ * Recognizes a webpack 3/4 bootstrap invocation — (function(modules){...})(<modules>)
+ * — where the first param is a webpack-style bootstrap name and the first argument
+ * is the module array or object, and extracts the modules. Returns true on a match.
+ * Shared by the bare-IIFE (Pattern 6) and return-wrapped (Pattern 5) call sites.
+ */
+function tryExtractFromBootstrapCall(call: t.CallExpression): boolean {
+  if (!t.isFunctionExpression(call.callee)) return false;
+  const fn = call.callee;
+  if (fn.params.length === 0 || !t.isIdentifier(fn.params[0])) return false;
+
+  // Accept common webpack module param names: modules, e, n, etc.
+  const paramName = fn.params[0].name;
+  const isWebpackBootstrap = paramName === 'modules' || /^[a-z]$/.test(paramName);
+  if (!isWebpackBootstrap || call.arguments.length === 0) return false;
+
+  const arg = call.arguments[0];
+  if (t.isArrayExpression(arg) && looksLikeWebpackModulesArray(arg)) {
+    extractModulesFromArray(arg);
+    return true;
+  }
+  if (t.isObjectExpression(arg) && looksLikeWebpackModulesObject(arg)) {
+    extractModulesFromObject(arg);
+    return true;
+  }
+  return false;
 }
 
 /**

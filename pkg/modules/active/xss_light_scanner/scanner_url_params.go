@@ -193,8 +193,12 @@ func (m *URLParamsModule) scanURLParameters(
 		return nil, err
 	}
 
-	// Create insertion points
-	points, err := httpmsg.CreateAllInsertionPoints(ctx.Request().Raw(), true)
+	// Create insertion points. Go through the executor's per-request LRU
+	// (keyed on request ID) instead of CreateAllInsertionPoints, which would
+	// re-run AnalyzeRequest and re-copy the whole request buffer — the module's
+	// primary entry already enumerated the identical (raw, includeNested=true)
+	// set, so this hits a warm cache.
+	points, err := scanCtx.GetInsertionPoints(ctx.Request().Raw(), ctx.Request().ID(), true)
 	if err != nil {
 		return nil, err
 	}

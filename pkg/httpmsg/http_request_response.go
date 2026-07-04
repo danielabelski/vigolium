@@ -234,8 +234,11 @@ func (h *HttpRequestResponse) MarshalJSON() ([]byte, error) {
 	type responsePayload struct {
 		StatusCode int          `json:"status_code"`
 		Headers    []HttpHeader `json:"headers"`
-		Body       string       `json:"body,omitempty"`
 		Raw        string       `json:"raw"`
+		// Note: the body is intentionally not serialized separately — Raw already
+		// contains it verbatim, and UnmarshalJSON reconstructs the response from
+		// Raw alone. Emitting a redundant "body" field meant a second full
+		// JSON-escape pass over the body and ~doubled the serialized body size.
 	}
 	type envelope struct {
 		URL      string           `json:"url"`
@@ -256,7 +259,6 @@ func (h *HttpRequestResponse) MarshalJSON() ([]byte, error) {
 		env.Response = &responsePayload{
 			StatusCode: h.response.StatusCode(),
 			Headers:    h.response.Headers(),
-			Body:       h.response.BodyToString(),
 			Raw:        string(h.response.Raw()),
 		}
 	}
@@ -321,7 +323,6 @@ func (h *HttpRequestResponse) UnmarshalJSON(data []byte) error {
 		var respData struct {
 			StatusCode int          `json:"status_code"`
 			Headers    []HttpHeader `json:"headers"`
-			Body       string       `json:"body"`
 			Raw        string       `json:"raw"`
 		}
 		if err := json.Unmarshal(respBin, &respData); err != nil {

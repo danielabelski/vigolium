@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -521,7 +522,16 @@ func (pc *ParallelCrawler) workDistributor(ctx context.Context) {
 					return
 				}
 
-				// Wait a bit before checking again
+				// Work may become pollable once an in-flight consumer commits its
+				// results. PollAny is non-blocking, so back off briefly instead of
+				// hot-spinning — a tight loop here would peg a core and, worse,
+				// contend the crawler/candidates mutexes that the working
+				// consumers need to make progress.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(2 * time.Millisecond):
+				}
 				continue
 			}
 

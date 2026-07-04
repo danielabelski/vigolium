@@ -149,6 +149,7 @@ func init() {
 	f.BoolVar(&trafficBurp, "burp", false, "Display in Burp Suite-style format (colored request/response)")
 	f.BoolVar(&trafficMarkdown, "markdown", false, "Render the matched records as Markdown (request/response in fenced http blocks) to stdout")
 	f.BoolVarP(&globalStateless, "stateless", "S", false, "Read from --db (a .jsonl export or standalone .sqlite) with project scoping off; never writes to your project DB")
+	f.StringVar(&globalGlobDB, "glob-db", "", "Read across a glob of result files merged into one temporary DB (e.g. --glob-db 'scans/*.sqlite'); implies -S")
 	f.StringSliceVar(&trafficColumns, "columns", nil, "Columns to show (comma-separated, e.g. HOST,METHOD,PATH,STATUS)")
 	f.StringSliceVar(&trafficExclude, "exclude-columns", nil, "Columns to hide (comma-separated)")
 	registerAgentJSONFlags(f)

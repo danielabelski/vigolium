@@ -245,8 +245,7 @@ describe('extractedRequest', () => {
     expect(result.extractedRequests).toMatchInlineSnapshot(`
       [
         {
-          "body": 
-      "mutation submitAsusFeedback {
+          "body": "mutation submitAsusFeedback {
               create_asus_feedback(
                 input: {
                   action: FEEDBACK_PROVIDED
@@ -259,8 +258,7 @@ describe('extractedRequest', () => {
                   tellUsMore: "\${tellUsMore}"
                 }
               )
-            }"
-      ,
+            }",
           "cookies": [],
           "headers": [
             "ROPRO_DEVICE_INFO: \${userAgent}",

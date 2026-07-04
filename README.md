@@ -71,12 +71,6 @@ Requires **Go 1.26+** and **bun 1.3.11+**. See [HACKING.md](HACKING.md#build-and
 |:---:|:---:|
 | ![Native scan](https://github.com/vigolium/docs/blob/main/images/vigolium-cli-native-scan.png?raw=true) | ![Agentic Scan](https://github.com/vigolium/docs/blob/main/images/vigolium-cli-agent-audit-1.png?raw=true) |
 
-## ⚡ Vigolium Cloud Console
-
-A cloud-based solution for teams that want the power of Vigolium without managing infrastructure. Console is the **upgraded, fully-featured version of Vigolium**: managed scanning, centralized reporting, team collaboration, and extra features layered on top of the open-source core, so you can focus on fixing vulnerabilities instead of maintaining tooling.
-
-> Check out the Cloud Console at [console.vigolium.com](https://console.vigolium.com/).
-
 ## Key Features
 
 ### Native Scan
@@ -124,7 +118,7 @@ vigolium run discovery -t https://example.com
 vigolium scan -t https://example.com --only discovery --format html -o report.html
 ```
 
-See [docs.vigolium.com/architecture/overview](https://docs.vigolium.com/architecture/overview) for the full overview and [docs.vigolium.com/native-scan/strategies](https://docs.vigolium.com/native-scan/strategies) for strategies, profiles, and pace configuration.
+See the [architecture overview](https://docs.vigolium.com/architecture/overview) for the full pipeline and the [strategies guide](https://docs.vigolium.com/native-scan/strategies) for strategies, profiles, and pace configuration. For a quick command reference, see [docs.vigolium.com/getting-started/cheat-sheet](https://docs.vigolium.com/getting-started/cheat-sheet).
 
 ## Server Mode
 
@@ -147,7 +141,7 @@ cat urls.txt | vigolium ingest -s http://localhost:9002
 vigolium ingest -s http://localhost:9002 -i api.yaml -I openapi
 ```
 
-See [docs.vigolium.com/server-mode/running-the-server](https://docs.vigolium.com/server-mode/running-the-server) for server setup, [docs.vigolium.com/server-mode/ingestion](https://docs.vigolium.com/server-mode/ingestion) for ingestion workflows, and [docs.vigolium.com/api-overview](https://docs.vigolium.com/api-overview) for the full REST API reference.
+See [running the server](https://docs.vigolium.com/server-mode/running-the-server) for server setup, [ingestion](https://docs.vigolium.com/server-mode/ingestion) for ingestion workflows, and the [API overview](https://docs.vigolium.com/api-overview) for the full REST API reference.
 
 > **Burp Suite integration**: forward live Burp Suite traffic to a running Vigolium server with the [burp-vigolium](https://github.com/vigolium/burp-vigolium) extension.
 
@@ -171,7 +165,7 @@ vigolium scan -t https://example.com --auth-file ./login-flow.yaml
 vigolium scan -t https://example.com -H "Authorization: Bearer token123"
 ```
 
-Auth files support static headers, bearer tokens, and automated login flows with token extraction from cookies, JSON responses, or headers. Preset examples are available in `public/presets/sessions/`. See [docs.vigolium.com/native-scan/authentication](https://docs.vigolium.com/native-scan/authentication) for the full guide.
+Auth files support static headers, bearer tokens, and automated login flows with token extraction from cookies, JSON responses, or headers. Preset examples are available in `public/presets/sessions/`. See the [authentication guide](https://docs.vigolium.com/native-scan/authentication) for the full guide.
 
 > The `--auth` / `--auth-file` flags were previously named `--session` / `--session-file`. The old names still work as deprecated aliases.
 
@@ -210,7 +204,13 @@ Agentic scan modes:
 
 > **Standalone audit CLIs**: the agentic security audit also ships as standalone CLIs you can run independently of Vigolium: [vigolium-audit](https://github.com/vigolium/vigolium-audit) (the harness behind `vigolium agent audit`) and [piolium](https://github.com/vigolium/piolium) (the Pi-native driver behind `vigolium agent audit --driver=piolium`).
 
-See [docs.vigolium.com/agentic-scan/agent-mode](https://docs.vigolium.com/agentic-scan/agent-mode) for the full guide.
+See the [agent mode guide](https://docs.vigolium.com/agentic-scan/agent-mode) for the full guide.
+
+## ⚡ Vigolium Cloud Console
+
+A cloud-based solution for teams that want the power of Vigolium without managing infrastructure. Console is the **upgraded, fully-featured version of Vigolium**: managed scanning, centralized reporting, team collaboration, and extra features layered on top of the open-source core, so you can focus on fixing vulnerabilities instead of maintaining tooling.
+
+> Check out the Cloud Console at [console.vigolium.com](https://console.vigolium.com/).
 
 ## Native Scan Layers
 
@@ -234,6 +234,7 @@ Full documentation lives at [docs.vigolium.com](https://docs.vigolium.com/). Qui
 | Start an Agentic Scan | [docs.vigolium.com/getting-started/agentic-scan](https://docs.vigolium.com/getting-started/agentic-scan) |
 | Start an Agentic Audit | [docs.vigolium.com/getting-started/agentic-security-audit](https://docs.vigolium.com/getting-started/agentic-security-audit) |
 | Quickstart | [docs.vigolium.com/getting-started/quickstart](https://docs.vigolium.com/getting-started/quickstart) |
+| Cheat Sheet | [docs.vigolium.com/getting-started/cheat-sheet](https://docs.vigolium.com/getting-started/cheat-sheet) |
 | Server & Ingestion | [docs.vigolium.com/getting-started/server-and-ingestion](https://docs.vigolium.com/getting-started/server-and-ingestion) |
 | Writing Extensions | [docs.vigolium.com/customization/writing-extensions](https://docs.vigolium.com/customization/writing-extensions) |
 
@@ -300,7 +301,7 @@ let varied = vigolium.http.replay(rawRequest, [
 ]);
 ```
 
-See [docs.vigolium.com/customization/writing-extensions](https://docs.vigolium.com/customization/writing-extensions) for the extension authoring guide and `pkg/jsext/vigolium.d.ts` for the full TypeScript API definitions.
+See [writing extensions](https://docs.vigolium.com/customization/writing-extensions) for the extension authoring guide and `pkg/jsext/vigolium.d.ts` for the full TypeScript API definitions.
 
 ## CLI Reference
 

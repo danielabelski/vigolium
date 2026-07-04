@@ -5,7 +5,7 @@ import "github.com/vigolium/vigolium/pkg/types/severity"
 const (
 	ModuleID    = "mcp-resource-fuzz"
 	ModuleName  = "MCP Resource URI Fuzzer"
-	ModuleShort = "Probes MCP resources/read with file://, gopher://, AWS metadata, and path-traversal payloads"
+	ModuleShort = "Probes MCP resources/read with file://, AWS metadata, path-traversal, and OAST SSRF payloads"
 )
 
 var (

@@ -23,6 +23,22 @@ type MergeStats struct {
 	OASTMerged           int
 }
 
+// Add accumulates o's counters into s, for aggregating the stats of several
+// merges (e.g. a multi-source import) into a single total.
+func (s *MergeStats) Add(o *MergeStats) {
+	if o == nil {
+		return
+	}
+	s.ProjectsMerged += o.ProjectsMerged
+	s.ScansMerged += o.ScansMerged
+	s.AgenticScansMerged += o.AgenticScansMerged
+	s.RecordsMerged += o.RecordsMerged
+	s.FindingsMerged += o.FindingsMerged
+	s.FindingsDeduped += o.FindingsDeduped
+	s.FindingRecordsMerged += o.FindingRecordsMerged
+	s.OASTMerged += o.OASTMerged
+}
+
 // mergeCopyTables lists the uuid-keyed result tables copied set-based with
 // OR IGNORE. projects/scans/http_records have a TEXT uuid primary key;
 // agentic_scans has an AUTOINCREMENT integer id plus a UNIQUE(uuid) business

@@ -45,7 +45,7 @@ type bundleFilters struct {
 }
 
 func runExportBundle() error {
-	db, err := getDB()
+	db, err := openExportDB()
 	if err != nil {
 		return err
 	}

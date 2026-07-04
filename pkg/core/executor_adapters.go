@@ -113,3 +113,24 @@ type repoRemarksAnnotator struct {
 func (u *repoRemarksAnnotator) AppendRemarks(ctx context.Context, annotations map[string][]string) error {
 	return u.repo.AppendRemarks(ctx, annotations)
 }
+
+// repoRecordResponseRewriter adapts *database.Repository to
+// modkit.RecordResponseRewriter (used by the passive js-beautify module to
+// overwrite a record's minified JS body with its beautified form).
+type repoRecordResponseRewriter struct {
+	repo *database.Repository
+}
+
+func (u *repoRecordResponseRewriter) RewriteRecordResponse(ctx context.Context, uuid string, rawResponse []byte) error {
+	return u.repo.OverwriteRecordResponseBody(ctx, uuid, rawResponse)
+}
+
+// executorScopeChecker adapts *config.ScopeMatcher to modkit.ScopeChecker so
+// modules can ask whether a host is within the scan's scope (i.e. the target).
+type executorScopeChecker struct {
+	matcher *config.ScopeMatcher
+}
+
+func (s *executorScopeChecker) IsHostInScope(host string) bool {
+	return s.matcher.HostInScope(host)
+}

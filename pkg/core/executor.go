@@ -459,11 +459,20 @@ func NewExecutor(
 	}
 	e.pool.activeTaskSem = make(chan struct{}, activeTaskLimit)
 
-	// Wire risk score updater, remarks annotator, and request UUID resolver into ScanContext
+	// Wire risk score updater, remarks annotator, record-response rewriter, and
+	// request UUID resolver into ScanContext
 	if e.scanCtx != nil && cfg.Repository != nil {
 		e.scanCtx.RiskScoreUpdater = &repoRiskScoreUpdater{repo: cfg.Repository}
 		e.scanCtx.RemarksAnnotator = &repoRemarksAnnotator{repo: cfg.Repository}
+		e.scanCtx.RecordRewriter = &repoRecordResponseRewriter{repo: cfg.Repository}
 		e.scanCtx.RequestUUIDResolver = e
+	}
+
+	// Expose a read-only scope check so modules can tell a scan-target host from a
+	// third-party one (e.g. js-beautify only skips vendor scripts that are not the
+	// target). Independent of Repository (works for stateless scans too).
+	if e.scanCtx != nil && cfg.ScopeMatcher != nil {
+		e.scanCtx.Scope = &executorScopeChecker{matcher: cfg.ScopeMatcher}
 	}
 
 	// Wire OAST provider into ScanContext
@@ -1547,6 +1556,21 @@ var moduleResultChanPool = sync.Pool{
 	New: func() any { return make(chan moduleCallResult, 1) },
 }
 
+// recordPassiveResult records the module's timing/metrics and normalizes its
+// return: on error it logs at debug and drops the events (returns nil), otherwise
+// it returns the events. Shared by the inline and watchdog-goroutine completion
+// paths of runPassiveWithTimeout.
+func (e *Executor) recordPassiveResult(module modules.PassiveModule, start time.Time, events []*output.ResultEvent, err error) []*output.ResultEvent {
+	e.moduleMetrics.Record(module.ID(), time.Since(start), len(events), err)
+	if err != nil {
+		zap.L().Debug("Passive module error",
+			zap.String("module", module.ID()),
+			zap.Error(err))
+		return nil
+	}
+	return events
+}
+
 // runPassiveWithTimeout executes a passive module scan function with a timeout guard.
 func (e *Executor) runPassiveWithTimeout(
 	ctx context.Context,
@@ -1562,18 +1586,39 @@ func (e *Executor) runPassiveWithTimeout(
 		return nil
 	}
 
+	// Only contextual passive modules observe the handed context.
+	_, isContextual := module.(modules.ContextualPassiveModule)
+
 	timeout := e.passiveModuleTimeout()
 	// Allow modules to override with a per-module timeout hint
+	hintedTimeout := false
 	if hinter, ok := module.(modules.TimeoutHinter); ok {
 		if hint := hinter.TimeoutHint(); hint > 0 {
 			timeout = hint
+			hintedTimeout = true
 		}
 	}
 
-	// Only contextual passive modules observe the handed context, so only they
-	// need a cancellable child (see callGuard).
-	_, needCancel := module.(modules.ContextualPassiveModule)
-	callCtx, timeoutC, stop := callGuard(ctx, timeout, needCancel)
+	// Fast inline path for the common case: a non-contextual passive module with
+	// no explicit timeout hint. Passive modules send no traffic (no network I/O
+	// to block on), read a size-capped body, and Go's regexp is RE2 (linear-time,
+	// no catastrophic backtracking) — so their runtime is bounded and short, and
+	// the per-call watchdog goroutine + pooled timer + result channel are pure
+	// overhead on the single highest-frequency call in the dispatch loop. Running
+	// inline is also safer against a module panic (it unwinds to the worker's
+	// recoverFromPanic instead of crashing an unrecovered raw goroutine). Modules
+	// that observe the context or ask for a specific timeout keep the enforced
+	// goroutine path below; the end-of-scan drain-stall cap remains the backstop.
+	runInline := !isContextual && !hintedTimeout
+	if runInline {
+		start := time.Now()
+		events, err := scanFn(ctx)
+		return e.recordPassiveResult(module, start, events, err)
+	}
+
+	// Enforced-timeout path: contextual modules need a cancellable child (see
+	// callGuard); hinted modules asked for their timeout to be enforced.
+	callCtx, timeoutC, stop := callGuard(ctx, timeout, isContextual)
 	defer stop()
 
 	start := time.Now()
@@ -1586,14 +1631,7 @@ func (e *Executor) runPassiveWithTimeout(
 	select {
 	case r := <-ch:
 		moduleResultChanPool.Put(ch) // goroutine done; channel drained and safe to reuse
-		e.moduleMetrics.Record(module.ID(), time.Since(start), len(r.events), r.err)
-		if r.err != nil {
-			zap.L().Debug("Passive module error",
-				zap.String("module", module.ID()),
-				zap.Error(r.err))
-			return nil
-		}
-		return r.events
+		return e.recordPassiveResult(module, start, r.events, r.err)
 	case <-timeoutC:
 		e.moduleMetrics.Record(module.ID(), time.Since(start), 0, nil)
 		zap.L().Warn("Passive module timed out — skipping",

@@ -49,6 +49,8 @@ var (
 	globalRateLimit   int
 	globalModules     []string
 	globalModuleTags  []string
+	globalModuleIDs   []string
+	globalPassiveOnly bool
 	globalScanUUID    string
 	globalSpecURL     bool
 	globalSpecHeader  []string

@@ -118,14 +118,15 @@ func (m *Module) ScanPerHost(
 			continue
 		}
 		if p.oast {
-			// OAST hits are tracked out-of-band; nothing to do here besides log
-			// the attempt as evidence for the operator.
-			findings = append(findings, m.makeFinding(urlx.String(), "(bare uri)", p, "request issued; check OAST log"))
+			// The read has been issued with the OAST callback URI. A genuine SSRF
+			// is confirmed out-of-band by the global OAST poller, which emits its
+			// own finding once a callback lands. Emitting one here — before any
+			// callback — would be an unconfirmed false positive.
 			continue
 		}
 		if p.confirm != nil {
 			if ok, n := p.confirm(body, ""); ok {
-				findings = append(findings, m.makeFinding(urlx.String(), p.value, p, fmt.Sprintf("%d file-content marker(s) confirmed", n)))
+				findings = append(findings, m.makeFinding(urlx.String(), p.value, p, fmt.Sprintf("%d content marker(s) confirmed", n)))
 			}
 		}
 	}
@@ -141,6 +142,14 @@ func (m *Module) ScanPerHost(
 		if len(placeholders) == 0 {
 			continue
 		}
+		// Per-template benign baseline: fill every placeholder with "1" so marker
+		// subtraction has something real to compare against. The old code looked
+		// up baselines[tpl.URITemplate] but that map is keyed by concrete resource
+		// URIs, so the baseline was always empty.
+		var tplBaseline string
+		if _, b, err := client.ReadResource(9500+ti, substituteTemplate(tpl.URITemplate, placeholders, "", "")); err == nil {
+			tplBaseline = b
+		}
 		for pi, p := range payloads {
 			for _, ph := range placeholders {
 				uri := substituteTemplate(tpl.URITemplate, placeholders, ph, p.value)
@@ -149,13 +158,13 @@ func (m *Module) ScanPerHost(
 					continue
 				}
 				if p.oast {
-					findings = append(findings, m.makeFinding(urlx.String(), uri, p, "template request issued; check OAST log"))
+					// Confirmed out-of-band by the global OAST poller — see the
+					// bare-URI loop above. No in-band finding.
 					continue
 				}
-				baseline := baselines[tpl.URITemplate]
 				if p.confirm != nil {
-					if ok, n := p.confirm(body, baseline); ok {
-						findings = append(findings, m.makeFinding(urlx.String(), uri, p, fmt.Sprintf("%d file-content marker(s) confirmed", n)))
+					if ok, n := p.confirm(body, tplBaseline); ok {
+						findings = append(findings, m.makeFinding(urlx.String(), uri, p, fmt.Sprintf("%d content marker(s) confirmed", n)))
 					}
 				}
 			}
@@ -254,6 +263,13 @@ func buildPayloads(scanCtx *modkit.ScanContext, targetURL string) []uriPayload {
 			value:    "%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd",
 			confirm:  filesig.ConfirmPasswd,
 		},
+		{
+			name:     "Cloud metadata SSRF (AWS IMDS)",
+			vulnTag:  "ssrf",
+			severity: severity.High,
+			value:    "http://169.254.169.254/latest/meta-data/",
+			confirm:  confirmAWSMetadata,
+		},
 	}
 	if oast := scanCtx.OASTProv(); oast != nil && oast.Enabled() {
 		callback := oast.GenerateURL(targetURL, "uri", "mcp-resource", "mcp-resource-fuzz", "")
@@ -282,4 +298,26 @@ func capitalise(s string) string {
 		}
 		return strings.ToUpper(s[:1]) + s[1:]
 	}
+}
+
+// confirmAWSMetadata matches the ConfirmFunc contract: it confirms only when the
+// resources/read response carries several structural markers of an AWS IMDS
+// meta-data listing that are absent from the benign baseline. Requiring 2+
+// distinct markers stops a page that merely echoes one token (reflection) from
+// confirming.
+func confirmAWSMetadata(body, baseline string) (bool, int) {
+	markers := []string{
+		"ami-id", "instance-id", "instance-type", "local-ipv4",
+		"iam", "security-credentials", "AccessKeyId", "SecretAccessKey",
+	}
+	hits := 0
+	for _, mrk := range markers {
+		if strings.Contains(body, mrk) && !strings.Contains(baseline, mrk) {
+			hits++
+		}
+	}
+	if hits >= 2 {
+		return true, hits
+	}
+	return false, 0
 }

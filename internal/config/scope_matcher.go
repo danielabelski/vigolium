@@ -126,6 +126,17 @@ func (m *ScopeMatcher) hostInScope(host string) bool {
 	return result
 }
 
+// HostInScope reports whether host is within the configured scope (host rule +
+// origin mode + runtime allow-set). It is the exported, host-only view of the
+// scope used, e.g., to decide whether a known-vendor host is actually the scan
+// target (in scope) rather than a third-party resource loaded by the target.
+func (m *ScopeMatcher) HostInScope(host string) bool {
+	if m == nil {
+		return false
+	}
+	return m.hostInScope(host)
+}
+
 // IsStaticFile returns true if the URL path ends with a known static-asset extension.
 func (m *ScopeMatcher) IsStaticFile(path string) bool {
 	if len(m.staticExts) == 0 {

@@ -53,6 +53,7 @@ func init() {
 	registerInputSourceFlags(flags)
 	registerHTTPClientFlags(flags)
 	registerScanModuleFlags(flags)
+	registerModuleSelectionFlags(flags)
 	registerScanPipelineFlags(flags)
 	registerSpecFlags(flags)
 	registerNativeScanFlags(flags, true)
@@ -105,8 +106,10 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 
 	// Copy global flags into scan options
 	scanOpts.ScanUUID = globalScanUUID
-	scanOpts.Modules = resolveModules()
-	scanOpts.PassiveModules = []string{"all"}
+	if err := validateModuleSelectionFlags(false); err != nil {
+		return err
+	}
+	scanOpts.Modules, scanOpts.PassiveModules = resolveModuleSelection(false)
 	scanOpts.Targets = globalTargets
 	scanOpts.TargetsFilePaths = globalTargetFiles
 	scanOpts.InputFileMode = globalInputMode
@@ -443,6 +446,9 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 			return fmt.Errorf("invalid spidering configuration: %w", err)
 		}
 	}
+	if scanNoCarryBrowserSession {
+		scanOpts.CarryBrowserSession = false
+	}
 	if scanOpts.ExternalHarvestEnabled {
 		if len(settings.ExternalHarvester.Sources) == 0 {
 			defaults := config.DefaultExternalHarvesterConfig()
@@ -729,6 +735,7 @@ func reportNativeScanSuccess(db *database.DB, settings *config.Settings, repo *d
 		hosts := summaryScopeHosts(context.Background(), repo, settings, scanOpts.Targets, scanOpts.ProjectUUID, scanOpts.ScanUUID)
 		printScanCompletionSummary(repo, scanOpts.ProjectUUID, hosts, time.Since(scanStart))
 	}
+	maybePrintScanFindings(context.Background(), db, scanOpts.ProjectUUID, scanOpts.ScanUUID)
 	evaluateFailOnGate(repo, scanOpts.ProjectUUID, scanOpts.ScanUUID, scanOpts.Silent)
 }
 
@@ -748,11 +755,14 @@ func runStatelessTargetFile(cmd *cobra.Command, settings *config.Settings, strat
 		return fmt.Errorf("target file(s) %s contain no targets", strings.Join(scanOpts.TargetsFilePaths, ", "))
 	}
 
-	// Parallel fan-out: with -P > 1 and more than one target, scan targets
-	// concurrently as isolated child processes instead of looping sequentially
-	// in this process. A single target (or -P 1) keeps the in-process path
-	// below unchanged — there is nothing to parallelize and no exec overhead.
-	if scanOpts.Parallel > 1 && len(targets) > 1 {
+	// Fan-out dispatch: any multi-target run routes through the fan-out, which
+	// scans targets as isolated child processes and prints the compact
+	// start/done progress lines plus a roll-up. With -P > 1 it runs several at a
+	// time; at -P 1 the same path serializes (one worker slot) so a sequential
+	// run gets the identical progress output — only the concurrency differs. A
+	// single target keeps the in-process path below (live per-target console,
+	// full banner) — there is nothing to fan out and no exec overhead.
+	if len(targets) > 1 {
 		return runStatelessTargetsParallel(cmd, settings, strategyName, targets)
 	}
 
@@ -765,13 +775,32 @@ func runStatelessTargetFile(cmd *cobra.Command, settings *config.Settings, strat
 	origFiles := scanOpts.TargetsFilePaths
 	origOutput := scanOpts.Output
 	origPrinted := scanOpts.ScanConfigPrinted
+	origCaptured := scanOpts.CapturedConsole
 	scanOpts.TargetsFilePaths = nil
 	defer func() {
 		scanOpts.Targets = origTargets
 		scanOpts.TargetsFilePaths = origFiles
 		scanOpts.Output = origOutput
 		scanOpts.ScanConfigPrinted = origPrinted
+		scanOpts.CapturedConsole = origCaptured
 	}()
+
+	// Per-target console capture: mirror each target's live console session to a
+	// sibling <output>-<host>.console.log — the same artifact the -P parallel
+	// fan-out writes for every child, so a sequential (non-P) split-by-host run is
+	// no longer missing it. Only worthwhile when the requested output is deferred
+	// to files (jsonl/html/sqlite/fs): with a plain console format the console IS
+	// the output and a second copy would be redundant (and would nest with the
+	// console-format transcript executeNativeScan starts itself). Skipped when
+	// there's no live console to capture (silent, -j JSON, CI output). Setting
+	// CapturedConsole makes each per-target run read like a console scan (findings
+	// streamed in human-readable form, no repetitive "[status]" ticker), matching
+	// what the -P children write; the terminal still sees everything live because
+	// the capture passes bytes through to the real streams.
+	captureConsole := !scanOpts.Silent && !globalJSON && !globalCIOutput && hasDeferredOutputFormat(scanOpts.OutputFormats)
+	if captureConsole {
+		scanOpts.CapturedConsole = true
+	}
 
 	multi := len(targets) > 1
 	for i, target := range targets {
@@ -798,7 +827,38 @@ func runStatelessTargetFile(cmd *cobra.Command, settings *config.Settings, strat
 				terminal.HiCyan(target))
 		}
 
-		if scanErr := executeNativeScan(cmd, settings, strategyName); scanErr != nil {
+		// Start the per-target console capture after the [i/N] header (a parent-loop
+		// line, not part of the scan) so the log opens on the scan banner — the same
+		// shape a -P child writes. Anchored to the resolved per-target output so it
+		// lands next to the sqlite/html files as <output>-<host>.console.log.
+		var (
+			tc          *transcriptCapture
+			consolePath string
+		)
+		if captureConsole {
+			consolePath = perTargetConsolePath(scanOpts.Output)
+			if c, terr := startTranscriptCapture(consolePath); terr != nil {
+				fmt.Fprintf(os.Stderr, "%s Failed to capture console log to %s (%v); scanning without it\n",
+					terminal.WarnPrefix(), terminal.Cyan(consolePath), terr)
+				consolePath = ""
+			} else {
+				tc = c
+			}
+		}
+
+		scanErr := executeNativeScan(cmd, settings, strategyName)
+
+		// Restore the real streams before printing where the log landed, so that
+		// note reaches the terminal instead of being swallowed into the log file.
+		if tc != nil {
+			tc.Stop()
+		}
+		if consolePath != "" && !scanOpts.Silent {
+			fmt.Fprintf(os.Stderr, "%s Console log written to %s\n",
+				terminal.InfoSymbol(), terminal.Cyan(consolePath))
+		}
+
+		if scanErr != nil {
 			zap.L().Error("Stateless target scan failed",
 				zap.String("target", target),
 				zap.Error(scanErr))
@@ -809,6 +869,19 @@ func runStatelessTargetFile(cmd *cobra.Command, settings *config.Settings, strat
 	}
 
 	return nil
+}
+
+// hasDeferredOutputFormat reports whether formats requests any file-based output
+// (jsonl/html/sqlite/fs) rather than only the live console. It's the signal that
+// a captured <output>.console.log is worth writing: with a plain console format
+// the console already IS the output.
+func hasDeferredOutputFormat(formats []string) bool {
+	for _, f := range formats {
+		if f != "console" {
+			return true
+		}
+	}
+	return false
 }
 
 // readTargetFilesLines reads every target file in paths (each one URL/address
@@ -1762,6 +1835,20 @@ func printScanSummary(opts *types.Options, settings *config.Settings, strategyNa
 	fmt.Fprintf(os.Stderr, "           %s | %s\n",
 		phaseLabel("KnownIssueScan", "known-issue-scan", knownIssueScanEnabled),
 		phaseLabel("DynamicAssessment", "dynamic-assessment", daEnabled))
+	// Total scan-duration budget (from --scanning-max-duration). The per-phase
+	// durations above are factor-scaled slices of this cap and share it — the
+	// whole scan is bounded by it. Under a parallel fan-out (-P > 1) each target
+	// is an isolated child process with its own budget, so the cap applies per
+	// target line, not across the whole batch.
+	if opts.ScanMaxDuration > 0 {
+		budgetLine := "Max scan duration: " + terminal.HiBlue(opts.ScanMaxDuration.String())
+		if opts.Parallel > 1 {
+			budgetLine += " " + terminal.Gray("per target line (each -P child runs its own budget)")
+		} else {
+			budgetLine += " " + terminal.Gray("(whole scan, all phases share this budget)")
+		}
+		fmt.Fprintf(os.Stderr, "  %s %s\n", terminal.Purple(terminal.SymbolInfo), budgetLine)
+	}
 	heuristicsDesc := map[string]string{
 		"basic":    "probe target root pages to detect content type (HTML, JSON, blank) and skip spidering for non-HTML targets",
 		"advanced": "basic checks + deep HTML analysis to detect SPA frameworks and optimize phase selection",

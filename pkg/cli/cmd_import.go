@@ -22,7 +22,7 @@ import (
 )
 
 var importCmd = &cobra.Command{
-	Use:   "import <path|gs://...>",
+	Use:   "import <path|gs://...> [more-paths...]",
 	Short: "Import scan data from an audit folder, JSONL, archive, or another vigolium SQLite database",
 	Long: `Import scan data into the database from various sources.
 
@@ -39,6 +39,16 @@ Supported inputs:
   - .tar.gz / .tgz / .zip archive containing an audit folder or JSONL
   - gs://<project-uuid>/<key> URL to any of the above (downloaded then imported)
 
+Multiple sources can be imported in one command — pass several positional paths
+('vigolium import a.sqlite b.sqlite c.sqlite', or 'a.jsonl b.jsonl') and/or use
+--glob-db to expand a glob of local files ('vigolium import --glob-db
+"prefix-*.sqlite"', or '"*.jsonl"'). Each source is imported by its own detected
+type, so the same input formats above are all supported. Use one format per run:
+mixing formats (e.g. .sqlite with .jsonl) still works but prints a warning.
+Sources are imported sequentially into the same destination DB and their results
+aggregated into one summary; because SQLite merges and finding imports dedup on
+natural keys, re-runs and overlapping inputs are safe.
+
 Use --upload to push the local source to cloud storage after a successful import,
 or --upload-key=<key> to choose an explicit storage key (folders are bundled to
 tar.gz unless the key ends in .zip).
@@ -53,13 +63,14 @@ Report customization flags (--report-title, --report-target, --report-duration,
 --report-generated-at, --report-url) and finding filters (--severity, --search)
 mirror 'vigolium export', so a single import step can emit a fully-branded report:
 'vigolium import ./audit --format html -o audit-report.html --report-title "My custom report"'.`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.ArbitraryArgs,
 	RunE: runImport,
 }
 
 func init() {
 	importCmd.Flags().Bool("upload", false, "Upload the local import source to cloud storage after import")
 	importCmd.Flags().String("upload-key", "", "Explicit storage key for --upload (default: imports/<basename>-<ts>.<ext>)")
+	importCmd.Flags().StringVar(&globalGlobDB, "glob-db", "", "Glob of local files to import alongside any positional paths (use one format per run), e.g. --glob-db 'prefix-*.sqlite' or '*.jsonl'")
 	importCmd.Flags().String("format", "", "Also write a report after import: html, report, pdf, or markdown (md). Mirrors `vigolium export --format`.")
 	importCmd.Flags().StringP("output", "o", "", "Report output path or gs://<project>/<key> URL (required when --format is set; supports {ts})")
 	// Report customization + finding filters — mirror `vigolium export` so a
@@ -91,17 +102,33 @@ func runImport(cmd *cobra.Command, args []string) error {
 	defer closeDatabaseOnExit()
 
 	ctx := context.Background()
-	// Normalize "gcs://" (alias) to canonical "gs://" so the downstream
-	// HasPrefix checks and DB-stored StorageURL stay consistent.
-	inputArg := storage.NormalizeGCSURI(args[0])
 	upload, _ := cmd.Flags().GetBool("upload")
 	uploadKey, _ := cmd.Flags().GetString("upload-key")
 	if uploadKey != "" {
 		upload = true
 	}
-	if upload && strings.HasPrefix(inputArg, "gs://") {
-		fmt.Fprintf(os.Stderr, "%s --upload is ignored when input is already in cloud storage\n", terminal.WarningSymbol())
-		upload = false
+	globDB := globalGlobDB
+
+	// Gather every import source: positional paths plus any local files matched
+	// by --glob-db. Positional args are gcs://→gs:// normalized and deduped
+	// here so the destination DB, HasPrefix checks and StorageURL stay
+	// consistent regardless of ordering.
+	sources, err := gatherImportSources(args, globDB)
+	if err != nil {
+		return err
+	}
+	multi := len(sources) > 1
+	if multi {
+		// Multiple sources are meant to be one format per run; warn (don't fail)
+		// when the set mixes formats, since each is still imported by its type.
+		warnMixedImportFormats(sources)
+	}
+
+	// An explicit --upload-key addresses a single object; with more than one
+	// source it would clobber, so reject it up front rather than silently
+	// overwrite. Auto-generated per-source keys (empty --upload-key) are fine.
+	if uploadKey != "" && multi {
+		return fmt.Errorf("--upload-key cannot be used with multiple import sources (%d resolved); drop --upload-key to auto-generate a key per source", len(sources))
 	}
 
 	// Validate report flags up front so a typo fails before the import work,
@@ -116,12 +143,6 @@ func runImport(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--format %s requires -o/--output for the report path", reportFormat)
 		}
 	}
-
-	localPath, cleanup, err := resolveImportInput(ctx, inputArg)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
 
 	db, err := getDB()
 	if err != nil {
@@ -144,9 +165,11 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 	repo := database.NewRepository(db)
 
-	opts := dbimport.Options{
-		OriginalSource:     inputArg,
-		SessionDirArchiver: cliSessionDirArchiver,
+	// One label for both the banner and the summary: the single source path, or
+	// "N sources" when there are several.
+	label := sources[0]
+	if multi {
+		label = fmt.Sprintf("%d sources", len(sources))
 	}
 
 	// Announce the work before it starts: parsing an audit folder and writing
@@ -155,16 +178,36 @@ func runImport(cmd *cobra.Command, args []string) error {
 	if !globalJSON {
 		fmt.Fprint(os.Stderr, GetBanner())
 		fmt.Fprintf(os.Stderr, "%s %s\n", terminal.InfoSymbol(),
-			terminal.BoldCyan(fmt.Sprintf("Importing scan data from %s ...", inputArg)))
+			terminal.BoldCyan(fmt.Sprintf("Importing scan data from %s ...", label)))
 		fmt.Fprintf(os.Stderr, "  %s\n",
 			terminal.Gray("Parsing input and writing records to the database — this can take a moment for large audits"))
 	}
 
-	result, err := dbimport.ImportPath(ctx, repo, localPath, projectUUID, opts)
-	if err != nil {
-		return err
+	results := make([]*dbimport.Result, 0, len(sources))
+	for i, src := range sources {
+		result, err := importOneSource(ctx, repo, src, projectUUID)
+		if err != nil {
+			return fmt.Errorf("import %s: %w", src, err)
+		}
+		results = append(results, result)
+		// Per-source progress line for multi-source human runs; the aggregate
+		// block follows. JSON stays a single object, emitted below.
+		if multi && !globalJSON {
+			printImportSourceProgress(i+1, len(sources), src, result)
+		}
 	}
-	printImportResult(localPath, result)
+
+	// Summary: single source keeps the exact pre-existing shape (full block /
+	// single JSON object). Multiple sources fold into one aggregate summary,
+	// labelled by the glob pattern when one drove the set.
+	if multi {
+		if globDB != "" {
+			label = globDB
+		}
+		printImportResult(label, aggregateImportResults(results))
+	} else {
+		printImportResult(label, results[0])
+	}
 
 	if reportFormat != "" {
 		reportTitle, _ := cmd.Flags().GetString("report-title")
@@ -183,23 +226,152 @@ func runImport(cmd *cobra.Command, args []string) error {
 			severity:    reportSeverity,
 			search:      reportSearch,
 		}
-		if err := emitImportReport(ctx, db, result, reportFormat, reportOutput, opts); err != nil {
+		// A single audit source scopes the report to that audit's findings;
+		// multiple sources have no single owning scan (nil), so the report
+		// covers all findings in the project.
+		var reportScan *database.AgenticScan
+		if !multi {
+			reportScan = results[0].AgenticScan
+		}
+		if err := emitImportReport(ctx, db, reportScan, reportFormat, reportOutput, opts); err != nil {
 			return fmt.Errorf("import succeeded but report generation failed: %w", err)
 		}
 	}
 
 	if upload {
-		uploadSrc := inputArg
-		if strings.HasPrefix(inputArg, "gs://") {
-			uploadSrc = localPath
+		for _, src := range sources {
+			// A gs:// source is already in cloud storage — nothing to push up.
+			if strings.HasPrefix(src, "gs://") {
+				fmt.Fprintf(os.Stderr, "%s --upload skipped for %s (already in cloud storage)\n", terminal.WarningSymbol(), src)
+				continue
+			}
+			url, err := uploadImportSource(ctx, src, uploadKey)
+			if err != nil {
+				return fmt.Errorf("import succeeded but upload failed: %w", err)
+			}
+			fmt.Printf("%s Source uploaded to %s\n", terminal.SuccessSymbol(), terminal.Gray(url))
 		}
-		url, err := uploadImportSource(ctx, uploadSrc, uploadKey)
-		if err != nil {
-			return fmt.Errorf("import succeeded but upload failed: %w", err)
-		}
-		fmt.Printf("%s Source uploaded to %s\n", terminal.SuccessSymbol(), terminal.Gray(url))
 	}
 	return nil
+}
+
+// gatherImportSources resolves the full ordered, deduplicated list of import
+// sources from the positional args and an optional --glob-db pattern.
+// Positional args are gcs://→gs:// normalized; glob matches are local paths.
+// Returns an error when nothing resolves so the user gets a clear message
+// instead of a silent no-op.
+func gatherImportSources(args []string, globDB string) ([]string, error) {
+	var raw []string
+	for _, a := range args {
+		// Normalize "gcs://" (alias) to canonical "gs://" so downstream
+		// HasPrefix checks and DB-stored StorageURL stay consistent.
+		raw = append(raw, storage.NormalizeGCSURI(a))
+	}
+	if globDB != "" {
+		matches, err := filepath.Glob(globDB)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --glob-db pattern %q: %w", globDB, err)
+		}
+		if len(matches) == 0 {
+			fmt.Fprintf(os.Stderr, "%s --glob-db %q matched no files\n", terminal.WarningSymbol(), globDB)
+		}
+		// filepath.Glob returns lexically sorted matches, so appending them
+		// directly keeps the import order deterministic.
+		raw = append(raw, matches...)
+	}
+	sources := dedupeStrings(raw)
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("no import sources: provide a path argument or --glob-db <pattern>")
+	}
+	return sources, nil
+}
+
+// importSourceFormat returns a coarse format category for a source path/URL,
+// used only to warn when a multi-source import mixes formats. Extension-based
+// (SQLite files are otherwise detected by header, but the mixed-format warning
+// is a lightweight heuristic that must not stat/open every source). gs:// URLs
+// are categorized by their key's extension. Sibling extensions of one format
+// (.sqlite/.sqlite3/.db, .jsonl/.ndjson) collapse to the same category so an
+// all-SQLite or all-JSONL run never trips the warning.
+func importSourceFormat(src string) string {
+	s := strings.TrimPrefix(src, "gs://")
+	// ArchiveExt already recognizes the archive and JSONL extensions.
+	switch dbimport.ArchiveExt(s) {
+	case ".tar.gz", ".tgz", ".zip":
+		return "archive"
+	case ".jsonl", ".ndjson", ".json":
+		return "jsonl"
+	}
+	switch strings.ToLower(filepath.Ext(s)) {
+	case ".sqlite", ".sqlite3", ".db":
+		return "sqlite"
+	case "":
+		// A directory (audit folder) or extension-less path.
+		return "folder"
+	default:
+		return "other"
+	}
+}
+
+// warnMixedImportFormats prints a warning (to stderr) when the resolved sources
+// span more than one format category. Each source is still imported by its own
+// detected type — the warning just flags the likely-unintended mix, per the
+// "one format per run" contract. Returns the distinct categories in first-seen
+// order so callers/tests can inspect the decision.
+func warnMixedImportFormats(sources []string) []string {
+	kinds := make([]string, 0, len(sources))
+	for _, s := range sources {
+		kinds = append(kinds, importSourceFormat(s))
+	}
+	kinds = dedupeStrings(kinds)
+	if len(kinds) > 1 && !globalJSON {
+		fmt.Fprintf(os.Stderr, "%s Mixed import formats (%s) — each source is imported by its own type, but prefer one format per run for predictable merges\n",
+			terminal.WarningSymbol(), strings.Join(kinds, ", "))
+	}
+	return kinds
+}
+
+// importOneSource resolves a single source (downloading gs:// inputs to a temp
+// file that is cleaned up before returning) and imports it into repo. Factored
+// out of runImport so the multi-source loop cleans up each source's temp file
+// as it goes rather than deferring every cleanup to the end of the command.
+func importOneSource(ctx context.Context, repo *database.Repository, src, projectUUID string) (*dbimport.Result, error) {
+	localPath, cleanup, err := resolveImportInput(ctx, src)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	opts := dbimport.Options{
+		OriginalSource:     src,
+		SessionDirArchiver: cliSessionDirArchiver,
+	}
+	return dbimport.ImportPath(ctx, repo, localPath, projectUUID, opts)
+}
+
+// aggregateImportResults folds per-source import results into one combined
+// Result for the multi-source summary via dbimport.MergeResults (which sums the
+// counts and MergeStats). It then applies a presentation rule: the merge-shaped
+// summary block is only rendered when *every* source was a SQLite merge (the
+// common --glob-db case), so a mix of audit/JSONL/SQLite sources falls back
+// to the generic finding-count summary.
+func aggregateImportResults(results []*dbimport.Result) *dbimport.Result {
+	agg := dbimport.MergeResults(results)
+	for _, r := range results {
+		if r.MergeStats == nil {
+			agg.MergeStats = nil
+			break
+		}
+	}
+	return agg
+}
+
+// printImportSourceProgress prints a compact one-line summary of a single
+// source's import during a multi-source run (human output only). The detailed
+// aggregate block is printed once at the end by printImportResult.
+func printImportSourceProgress(idx, total int, src string, r *dbimport.Result) {
+	fmt.Printf("  %s [%d/%d] %s — %d records, %d findings (%d dup)\n",
+		terminal.SuccessSymbol(), idx, total, terminal.Cyan(src),
+		r.RecordsImported, r.FindingsSaved, r.FindingsSkipped)
 }
 
 // cliSessionDirArchiver copies an audit source folder into the per-run agent
@@ -352,7 +524,7 @@ func printMergeResult(srcPath string, s *database.MergeStats) {
 // scoped to that audit's findings; otherwise it falls back to all findings in
 // the project DB. This collapses the historical import-then-export two-step
 // into one command.
-func emitImportReport(ctx context.Context, db *database.DB, result *dbimport.Result, format, outputArg string, opts importReportOpts) error {
+func emitImportReport(ctx context.Context, db *database.DB, scan *database.AgenticScan, format, outputArg string, opts importReportOpts) error {
 	gen, defaultTitle, ok := reportGenerator(format)
 	if !ok {
 		return fmt.Errorf("unsupported report format %q", format)
@@ -363,7 +535,10 @@ func emitImportReport(ctx context.Context, db *database.DB, result *dbimport.Res
 		return err
 	}
 
-	scanUUID := result.AgenticScanUUID()
+	scanUUID := ""
+	if scan != nil {
+		scanUUID = scan.UUID
+	}
 	var findings []*database.Finding
 	q := db.NewSelect().Model(&findings).OrderExpr("found_at DESC")
 	if scanUUID != "" {
@@ -397,13 +572,13 @@ func emitImportReport(ctx context.Context, db *database.DB, result *dbimport.Res
 		GeneratedAt:     opts.generatedAt,
 		ReportSharedURL: opts.reportURL,
 	}
-	if s := result.AgenticScan; s != nil {
-		meta.ScanTarget = s.TargetURL
+	if scan != nil {
+		meta.ScanTarget = scan.TargetURL
 		if meta.ScanTarget == "" {
-			meta.ScanTarget = s.SourcePath
+			meta.ScanTarget = scan.SourcePath
 		}
-		if s.DurationMs > 0 {
-			meta.ScanDuration = (time.Duration(s.DurationMs) * time.Millisecond).Round(time.Second).String()
+		if scan.DurationMs > 0 {
+			meta.ScanDuration = (time.Duration(scan.DurationMs) * time.Millisecond).Round(time.Second).String()
 		}
 	}
 	// Explicit flag overrides win over the auto-detected scan metadata, matching

@@ -9,14 +9,14 @@ const (
 )
 
 var (
-	ModuleDesc = `**What it means:** The IIS server leaks partial file and directory names because 8.3 short-filename (tilde) generation is enabled. Wildcard paths with a tilde return differential HTTP status codes recovering the first six characters and three-character extension of files under the web root. Informational recon.
+	ModuleDesc = `**What it means:** IIS leaks partial filenames because 8.3 short-name (tilde) generation is enabled; wildcard tilde paths return differential status codes exposing a file's first six characters and extension. The scanner reconstructs full names by matching fragments against a wordlist via Windows' short-name and checksum algorithms, confirms each guess through independent oracles, recurses into directories, and feeds confirmed URLs into the scan.
 
-**How it's exploited:** An attacker maps hidden surface from these fragments: backup files (web~1.zip), config and credential files, admin pages, and unlinked endpoints, narrowing full-filename guessing into targeted requests.
+**How it's exploited:** Fragments become real files — backups, web.config, source, databases, admin pages. Disclosed config, backup, and source files are flagged High.
 
-**Fix:** Disable 8.3 short-name generation on the volume (NtfsDisable8dot3NameCreation, strip names with fsutil), or restrict the surface so the tilde oracle returns no distinct status.`
+**Fix:** Disable 8.3 generation (NtfsDisable8dot3NameCreation) and strip existing names with fsutil.`
 
-	ModuleConfirmation = "Confirmed when the server returns distinct status codes for wildcard patterns matching existing vs non-existing 8.3 short filenames"
+	ModuleConfirmation = "Confirmed when the server returns distinct status codes for wildcard patterns matching existing vs non-existing 8.3 short filenames; each resolved full filename is independently re-confirmed (405-method or status-differential oracle) before being reported or queued"
 	ModuleSeverity     = severity.Medium
 	ModuleConfidence   = severity.Certain
-	ModuleTags         = []string{"aspnet", "info-disclosure", "heavy"}
+	ModuleTags         = []string{"iis", "aspnet", "info-disclosure", "heavy"}
 )

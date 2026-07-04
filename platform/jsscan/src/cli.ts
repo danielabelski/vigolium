@@ -9,6 +9,7 @@ const description = 'Extract API endpoints and HTTP request patterns from JavaSc
 
 interface Options {
   force: boolean;
+  beautify: boolean;
 }
 
 async function readStdin() {
@@ -22,6 +23,7 @@ program
   .version(version)
   .description(description)
   .option('-f, --force', 'overwrite input file with deobfuscated code')
+  .option('-b, --beautify', 'also unminify + unpack bundles and emit a beautified record')
   .argument('[file]', 'input file, defaults to stdin')
   .action(async (input: string | undefined) => {
     const { force, ...options } = program.opts<Options>();
@@ -50,5 +52,21 @@ program
     // Output code as JSON line to stdout
     const codeRecord = { type: 'code', filename, content: result.code };
     console.log(JSON.stringify(codeRecord));
+
+    // Output the beautified (unminified + unpacked) document, when requested and produced.
+    if (result.beautified) {
+      const b = result.beautified;
+      console.log(
+        JSON.stringify({
+          type: 'beautified',
+          filename,
+          format: b.format,
+          moduleCount: b.moduleCount,
+          modulePaths: b.modulePaths,
+          changed: b.changed,
+          content: b.content,
+        }),
+      );
+    }
   })
   .parse();

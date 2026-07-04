@@ -18,6 +18,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
+	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
 	"github.com/vigolium/vigolium/pkg/input/source"
 	"github.com/vigolium/vigolium/pkg/jsext"
@@ -46,7 +47,13 @@ type Runner struct {
 	dedupManager      *dedup.Manager
 	repository        *database.Repository // Optional: database storage
 	heuristicsResults map[string]*HeuristicsResult
-	spidering         spideringOutcome     // cross-phase signals captured after Spidering (drives Discovery auto-fuzz)
+	spidering         spideringOutcome // cross-phase signals captured after Spidering (drives Discovery auto-fuzz)
+	// browserSessions holds WAF/bot-cleared sessions harvested by the spidering
+	// browser, keyed by lowercased hostname. Populated after Spidering (when
+	// Options.CarryBrowserSession is on) and consumed by Discovery
+	// (buildDeparosConfig) and the shared scan requester so later phases inherit
+	// the cleared session. Nil when spidering did not run or carrying is disabled.
+	browserSessions   map[string]httpmsg.CarriedSession
 	autoFuzzDiscovery bool                 // set by runDiscoveryPhase when low-yield/SSO auto-enables FUZZ fuzzing
 	scanLogger        *database.ScanLogger // Optional: structured scan logging
 	teeWriter         *teeWriter           // Optional: captures stderr for trace logging

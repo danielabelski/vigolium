@@ -3,6 +3,17 @@ package modules
 import (
 	xsslightscanner "github.com/vigolium/vigolium/pkg/modules/active/xss_light_scanner"
 
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_cloudsettings_injection"
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_console_exposure"
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_content_discovery"
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_default_credentials"
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_dispatcher_bypass"
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_oob_injection"
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_rce"
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_sensitive_servlet"
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_ssrf"
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_xss"
+	"github.com/vigolium/vigolium/pkg/modules/active/aem_xxe"
 	"github.com/vigolium/vigolium/pkg/modules/active/angular_template_injection"
 	"github.com/vigolium/vigolium/pkg/modules/active/api_key_url_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/api_rate_limit_bypass"
@@ -65,6 +76,8 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/http_request_smuggling"
 	"github.com/vigolium/vigolium/pkg/modules/active/idor_detection"
 	"github.com/vigolium/vigolium/pkg/modules/active/idor_guid"
+	"github.com/vigolium/vigolium/pkg/modules/active/iis_cookieless_source_disclosure"
+	"github.com/vigolium/vigolium/pkg/modules/active/iis_extension_confusion_bypass"
 	"github.com/vigolium/vigolium/pkg/modules/active/iis_shortname_discovery"
 	"github.com/vigolium/vigolium/pkg/modules/active/input_behavior_probe"
 	"github.com/vigolium/vigolium/pkg/modules/active/insecure_deserialization"
@@ -89,12 +102,14 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/mass_assignment"
 	"github.com/vigolium/vigolium/pkg/modules/active/mcp_batch_abuse"
 	"github.com/vigolium/vigolium/pkg/modules/active/mcp_completion_enum"
+	"github.com/vigolium/vigolium/pkg/modules/active/mcp_dos_amplification"
 	"github.com/vigolium/vigolium/pkg/modules/active/mcp_method_enum"
 	"github.com/vigolium/vigolium/pkg/modules/active/mcp_origin_rebinding"
 	"github.com/vigolium/vigolium/pkg/modules/active/mcp_prompt_fuzz"
 	"github.com/vigolium/vigolium/pkg/modules/active/mcp_resource_fuzz"
 	"github.com/vigolium/vigolium/pkg/modules/active/mcp_server_probe"
 	"github.com/vigolium/vigolium/pkg/modules/active/mcp_session_checks"
+	"github.com/vigolium/vigolium/pkg/modules/active/mcp_tool_definition_drift"
 	"github.com/vigolium/vigolium/pkg/modules/active/mcp_tool_fuzz"
 	"github.com/vigolium/vigolium/pkg/modules/active/metaframework_probe"
 	"github.com/vigolium/vigolium/pkg/modules/active/nextjs_chunk_audit"
@@ -118,6 +133,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/php_framework_debug"
 	"github.com/vigolium/vigolium/pkg/modules/active/php_path_info_misconfig"
 	"github.com/vigolium/vigolium/pkg/modules/active/php_source_disclosure"
+	"github.com/vigolium/vigolium/pkg/modules/active/powerpages_dataverse_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/prototype_pollution"
 	"github.com/vigolium/vigolium/pkg/modules/active/proxy_header_trust"
 	"github.com/vigolium/vigolium/pkg/modules/active/proxy_pingback"
@@ -131,7 +147,13 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/response_header_injection"
 	"github.com/vigolium/vigolium/pkg/modules/active/reverse_proxy_path_confusion"
 	"github.com/vigolium/vigolium/pkg/modules/active/routing_ssrf"
+	"github.com/vigolium/vigolium/pkg/modules/active/salesforce_aura_apex_execution"
+	"github.com/vigolium/vigolium/pkg/modules/active/salesforce_aura_object_exposure"
+	"github.com/vigolium/vigolium/pkg/modules/active/salesforce_aura_record_exposure"
+	"github.com/vigolium/vigolium/pkg/modules/active/salesforce_lightning_debug_mode"
 	"github.com/vigolium/vigolium/pkg/modules/active/sensitive_file_discovery"
+	"github.com/vigolium/vigolium/pkg/modules/active/servicenow_kb_widget_exposure"
+	"github.com/vigolium/vigolium/pkg/modules/active/servicenow_widget_data_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/smart_behavior_detection"
 	"github.com/vigolium/vigolium/pkg/modules/active/spring_actuator_misconfig"
 	"github.com/vigolium/vigolium/pkg/modules/active/spring_boot_admin_exposure"
@@ -260,6 +282,8 @@ func registerActiveModules(r *Registry) {
 	r.RegisterActive(sensitive_file_discovery.New())
 	r.RegisterActive(backup_file_discovery.New())
 	r.RegisterActive(iis_shortname_discovery.New())
+	r.RegisterActive(iis_cookieless_source_disclosure.New())
+	r.RegisterActive(iis_extension_confusion_bypass.New())
 	// Active modules - JSONP
 	r.RegisterActive(jsonp_callback.New())
 	// Active modules - Open Redirect
@@ -290,6 +314,18 @@ func registerActiveModules(r *Registry) {
 	// Active modules - Joomla Security
 	r.RegisterActive(joomla_misconfig.New())
 	r.RegisterActive(joomla_user_enum.New())
+	// Active modules - Adobe Experience Manager Security
+	r.RegisterActive(aem_console_exposure.New())
+	r.RegisterActive(aem_content_discovery.New())
+	r.RegisterActive(aem_cloudsettings_injection.New())
+	r.RegisterActive(aem_sensitive_servlet.New())
+	r.RegisterActive(aem_dispatcher_bypass.New())
+	r.RegisterActive(aem_default_credentials.New())
+	r.RegisterActive(aem_xss.New())
+	r.RegisterActive(aem_ssrf.New())
+	r.RegisterActive(aem_oob_injection.New())
+	r.RegisterActive(aem_xxe.New())
+	r.RegisterActive(aem_rce.New())
 	// Active modules - Cross-CMS Security
 	r.RegisterActive(cms_installer_exposure.New())
 	// Active modules - Firebase Security
@@ -397,4 +433,14 @@ func registerActiveModules(r *Registry) {
 	r.RegisterActive(mcp_session_checks.New())
 	r.RegisterActive(mcp_batch_abuse.New())
 	r.RegisterActive(mcp_origin_rebinding.New())
+	r.RegisterActive(mcp_tool_definition_drift.New())
+	r.RegisterActive(mcp_dos_amplification.New())
+	// Active modules - SaaS Data Exposure (Salesforce / ServiceNow / Power Pages)
+	r.RegisterActive(salesforce_aura_object_exposure.New())
+	r.RegisterActive(salesforce_aura_record_exposure.New())
+	r.RegisterActive(salesforce_aura_apex_execution.New())
+	r.RegisterActive(salesforce_lightning_debug_mode.New())
+	r.RegisterActive(servicenow_widget_data_exposure.New())
+	r.RegisterActive(servicenow_kb_widget_exposure.New())
+	r.RegisterActive(powerpages_dataverse_exposure.New())
 }

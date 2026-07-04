@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/vigolium/vigolium/pkg/spitolas/internal/action"
@@ -17,6 +18,13 @@ type Result struct {
 	Stats     Stats
 	Fragments fragment.FragmentStats
 	Session   *CrawlSession
+
+	// HarvestedCookies is the browser's cookie jar at end of crawl (including any
+	// WAF/bot clearance cookies the real browser earned). BrowserUserAgent is the
+	// UA the browser presented. Both are carried forward so later scan phases can
+	// inherit the cleared session. Empty when harvesting was unavailable.
+	HarvestedCookies []*http.Cookie
+	BrowserUserAgent string
 }
 
 // Summary returns a text summary of the crawl.

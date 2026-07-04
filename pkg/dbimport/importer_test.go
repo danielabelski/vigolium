@@ -12,6 +12,44 @@ import (
 	"github.com/vigolium/vigolium/pkg/database"
 )
 
+func TestMergeResults(t *testing.T) {
+	results := []*Result{
+		{
+			RecordsImported: 10, FindingsTotal: 4, FindingsSaved: 3, FindingsSkipped: 1, ParseErrors: 1,
+			SeverityCounts: map[string]int{"high": 2, "low": 1},
+			SkippedTypes:   map[string]int{"note": 1},
+			MergeStats:     &database.MergeStats{RecordsMerged: 10, FindingsMerged: 3, FindingsDeduped: 1, ScansMerged: 1},
+		},
+		nil, // nil entries are ignored
+		{
+			RecordsImported: 5, FindingsTotal: 2, FindingsSaved: 2,
+			SeverityCounts: map[string]int{"high": 1},
+			MergeStats:     &database.MergeStats{RecordsMerged: 5, FindingsMerged: 2, ScansMerged: 2, OASTMerged: 4},
+		},
+	}
+	agg := MergeResults(results)
+	if agg.RecordsImported != 15 || agg.FindingsTotal != 6 || agg.FindingsSaved != 5 || agg.FindingsSkipped != 1 || agg.ParseErrors != 1 {
+		t.Fatalf("counters wrong: %+v", agg)
+	}
+	if agg.SeverityCounts["high"] != 3 || agg.SeverityCounts["low"] != 1 || agg.SkippedTypes["note"] != 1 {
+		t.Fatalf("maps wrong: sev=%v skipped=%v", agg.SeverityCounts, agg.SkippedTypes)
+	}
+	if agg.MergeStats == nil {
+		t.Fatal("expected summed MergeStats")
+	}
+	if agg.MergeStats.RecordsMerged != 15 || agg.MergeStats.FindingsMerged != 5 ||
+		agg.MergeStats.FindingsDeduped != 1 || agg.MergeStats.ScansMerged != 3 || agg.MergeStats.OASTMerged != 4 {
+		t.Fatalf("summed MergeStats wrong: %+v", agg.MergeStats)
+	}
+
+	// A source without MergeStats leaves the others summed; MergeResults itself
+	// keeps MergeStats non-nil (the all-or-nothing display rule is the caller's).
+	empty := MergeResults(nil)
+	if empty.MergeStats != nil || empty.RecordsImported != 0 {
+		t.Fatalf("empty aggregate should be zero-valued: %+v", empty)
+	}
+}
+
 // newTestRepo spins up a throwaway in-memory SQLite repository, mirroring how
 // the stateless JSONL loader bootstraps its scratch DB.
 func newTestRepo(t *testing.T) *database.Repository {

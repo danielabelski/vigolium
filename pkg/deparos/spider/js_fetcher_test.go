@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/vigolium/vigolium/pkg/deparos/jsvendor"
 )
 
 func TestIsCDNDomain(t *testing.T) {
@@ -122,7 +123,7 @@ func TestIsCDNDomain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isCDNDomain(tt.host)
+			result := jsvendor.IsCDNDomain(tt.host)
 			assert.Equal(t, tt.expected, result, "host: %s", tt.host)
 		})
 	}
@@ -386,7 +387,7 @@ func TestIsLibraryFile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isLibraryFile(tt.urlPath)
+			result := jsvendor.IsLibraryFile(tt.urlPath)
 			assert.Equal(t, tt.expected, result, "path: %s", tt.urlPath)
 		})
 	}
@@ -403,7 +404,7 @@ func BenchmarkIsCDNDomain(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = isCDNDomain(hosts[i%len(hosts)])
+		_ = jsvendor.IsCDNDomain(hosts[i%len(hosts)])
 	}
 }
 
@@ -418,6 +419,6 @@ func BenchmarkIsLibraryFile(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = isLibraryFile(paths[i%len(paths)])
+		_ = jsvendor.IsLibraryFile(paths[i%len(paths)])
 	}
 }

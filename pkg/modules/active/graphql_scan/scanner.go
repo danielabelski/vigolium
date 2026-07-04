@@ -9,6 +9,7 @@ import (
 	httputil "github.com/projectdiscovery/utils/http"
 	"github.com/vigolium/vigolium/pkg/core/hosterrors"
 	"github.com/vigolium/vigolium/pkg/dedup"
+	"github.com/vigolium/vigolium/pkg/graphqlx"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/infra"
@@ -100,46 +101,50 @@ func (m *Module) ScanPerRequest(
 		})
 	}
 
-	// Phase 3: Test SQL injection through GraphQL arguments
+	// Phase 3: Test error-based SQL injection through GraphQL arguments
 	sqliResults := m.testInjection(ctx, httpClient, endpointPath, introBody, target)
 	results = append(results, sqliResults...)
 
-	// Phase 4: Test batching (array-based)
-	batchBody, err := m.sendGraphQLQuery(ctx, httpClient, endpointPath, batchQuery)
-	if err == nil && isBatchResponse(batchBody) {
-		results = append(results, &output.ResultEvent{
-			URL:     target,
-			Matched: target + endpointPath,
-			ExtractedResults: []string{
-				fmt.Sprintf("GraphQL endpoint: %s", endpointPath),
-				"Query batching supported",
-			},
-			Info: output.Info{
-				Name:        "GraphQL Query Batching",
-				Description: "GraphQL endpoint supports query batching, which can be abused to bypass rate limiting or perform denial of service attacks.",
-				Severity:    severity.Low,
-				Confidence:  severity.Certain,
-			},
-		})
+	// The remaining phases each perform their own multi-round confirmation and
+	// only fire on a confirmed live GraphQL endpoint (reached only after
+	// discoverEndpoint succeeded above), so a non-GraphQL host never triggers them.
+	// The introspection schema is parsed once here and shared; a nil schema
+	// (introspection disabled or unparseable) skips the schema-driven phases.
+	schema, _ := graphqlx.ParseSchema([]byte(introBody))
+
+	// Phase 4: Expand the introspection schema into concrete operations and feed
+	// them into the pipeline so every detector evaluates real GraphQL responses.
+	if op := m.phaseOperations(ctx, scanCtx, endpointPath, schema, target); op != nil {
+		results = append(results, op)
 	}
 
-	// Phase 5: Test alias-based batching
-	aliasBody, err := m.sendGraphQLQuery(ctx, httpClient, endpointPath, aliasBatchQuery)
-	if err == nil && isAliasBatchResponse(aliasBody) {
-		results = append(results, &output.ResultEvent{
-			URL:     target,
-			Matched: target + endpointPath,
-			ExtractedResults: []string{
-				fmt.Sprintf("GraphQL endpoint: %s", endpointPath),
-				"Alias-based query batching supported",
-			},
-			Info: output.Info{
-				Name:        "GraphQL Alias-Based Query Batching",
-				Description: "GraphQL endpoint supports alias-based query batching, which can be abused to bypass rate limiting even when array batching is disabled.",
-				Severity:    severity.Low,
-				Confidence:  severity.Certain,
-			},
-		})
+	// Phase 5: Exposed in-browser GraphQL IDE (GraphiQL/Playground/Altair/…).
+	results = append(results, m.phaseConsole(ctx, httpClient, endpointPath, target)...)
+
+	// Phase 6: Weaponized (uncapped) query batching — rate-limit/brute-force bypass.
+	if b := m.phaseBatching(ctx, httpClient, endpointPath, target); b != nil {
+		results = append(results, b)
+	}
+
+	// Phase 7: Broken object-level authorization (IDOR/BOLA) on predictable ids.
+	results = append(results, m.phaseAuthz(ctx, httpClient, endpointPath, schema, target)...)
+
+	// Phase 8: Reflected XSS in error messages.
+	if x := m.phaseXSSError(ctx, httpClient, endpointPath, schema, target); x != nil {
+		results = append(results, x)
+	}
+
+	// Phase 9: Boolean-based SQL injection (corroborates the error-based path).
+	if s := m.phaseBooleanSQLi(ctx, httpClient, endpointPath, schema, target); s != nil {
+		results = append(results, s)
+	}
+
+	// Phase 10: Missing query-depth/complexity limit — deep scans only (heavier
+	// than the default surface, though the probe itself is bounded).
+	if scanCtx.DeepScan {
+		if d := m.phaseDoS(ctx, httpClient, endpointPath, schema, target); d != nil {
+			results = append(results, d)
+		}
 	}
 
 	return results, nil
@@ -306,22 +311,7 @@ func (m *Module) sendGraphQLQueryEx(
 	httpClient *http.Requester,
 	path, queryBody string,
 ) (string, bool, error) {
-	raw := ctx.Request().Raw()
-
-	// Build POST request to GraphQL endpoint
-	modified, err := httpmsg.SetPath(raw, path)
-	if err != nil {
-		return "", false, err
-	}
-	modified, err = httpmsg.SetMethod(modified, "POST")
-	if err != nil {
-		return "", false, err
-	}
-	modified, err = httpmsg.AddOrReplaceHeader(modified, "Content-Type", "application/json")
-	if err != nil {
-		return "", false, err
-	}
-	modified, err = httpmsg.SetBodyString(modified, queryBody)
+	modified, err := buildRaw(ctx, "POST", path, "application/json", queryBody)
 	if err != nil {
 		return "", false, err
 	}
@@ -354,20 +344,10 @@ func (m *Module) sendGraphQLGET(
 	httpClient *http.Requester,
 	path, query string,
 ) (string, error) {
-	raw := ctx.Request().Raw()
-
 	fullPath := path + "?query=" + strings.ReplaceAll(strings.ReplaceAll(query, " ", "+"), "{", "%7B")
 	fullPath = strings.ReplaceAll(fullPath, "}", "%7D")
 
-	modified, err := httpmsg.SetPath(raw, fullPath)
-	if err != nil {
-		return "", err
-	}
-	modified, err = httpmsg.SetMethod(modified, "GET")
-	if err != nil {
-		return "", err
-	}
-	modified, err = httpmsg.ClearBody(modified)
+	modified, err := buildRaw(ctx, "GET", fullPath, "", "")
 	if err != nil {
 		return "", err
 	}

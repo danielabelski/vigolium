@@ -134,6 +134,29 @@ var stackRules = []stackRule{
 		},
 		Name: "joomla", Cat: "cms", Tag: "joomla", Conf: ConfidenceHigh,
 	},
+	{
+		Match: func(r *probeResponse) (bool, string, string) {
+			if strings.Contains(r.Body, "Welcome to Adobe Experience Manager") {
+				return true, "", "AEM welcome text in body"
+			}
+			if strings.Contains(r.Body, "/etc.clientlibs/") || strings.Contains(r.Body, "cq:template") {
+				return true, "", "AEM clientlib / cq: markers in body"
+			}
+			if strings.Contains(r.Body, "/etc/designs/") && strings.Contains(r.Body, "/content/dam/") {
+				return true, "", "AEM /etc/designs + /content/dam asset paths"
+			}
+			server := strings.ToLower(r.Header("Server"))
+			if strings.Contains(server, "communique") || strings.Contains(server, "day-servlet-engine") {
+				return true, "", "Server: " + r.Header("Server")
+			}
+			setCookie := strings.ToLower(strings.Join(r.HeaderValues("Set-Cookie"), "; "))
+			if strings.Contains(setCookie, "login-token=") || strings.Contains(setCookie, "cq-authoring-mode") {
+				return true, "", "AEM login-token / cq-authoring-mode cookie"
+			}
+			return false, "", ""
+		},
+		Name: "adobe-experience-manager", Cat: "cms", Tag: "aem", Conf: ConfidenceHigh,
+	},
 
 	// --- Framework signals (cookies, body) ---
 	{

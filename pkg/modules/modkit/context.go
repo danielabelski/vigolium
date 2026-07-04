@@ -85,6 +85,26 @@ type RequestUUIDResolver interface {
 	ResolveRequestUUID(requestHash string) string
 }
 
+// ScopeChecker answers whether a host is within the scan's configured scope,
+// i.e. whether it is (part of) the scan target rather than a third-party
+// resource. Used by the js-beautify module to only treat a known-vendor host as
+// third-party when the scan is not actually targeting that vendor.
+type ScopeChecker interface {
+	IsHostInScope(host string) bool
+}
+
+// RecordResponseRewriter overwrites a stored HTTP record's raw response in place
+// and recomputes its derived hash/length/word fields. Used by the passive
+// js-beautify module to replace a minified JS body with its beautified,
+// bundle-unpacked form so downstream traffic/finding/fs views and manual review
+// see readable source. No-op when the record can't be resolved (e.g. stateless).
+type RecordResponseRewriter interface {
+	// RewriteRecordResponse replaces the raw response bytes of the record with
+	// the given UUID. rawResponse must be a complete HTTP response (status line
+	// + headers + body).
+	RewriteRecordResponse(ctx context.Context, uuid string, rawResponse []byte) error
+}
+
 // OASTProvider generates out-of-band callback URLs for blind vulnerability detection.
 type OASTProvider interface {
 	GenerateURL(targetURL, paramName, injectionType, moduleID, requestHash string) string
@@ -126,7 +146,9 @@ type ScanContext struct {
 	DedupManager        *dedup.Manager
 	RiskScoreUpdater    RiskScoreUpdater
 	RemarksAnnotator    RemarksAnnotator
+	RecordRewriter      RecordResponseRewriter
 	RequestUUIDResolver RequestUUIDResolver
+	Scope               ScopeChecker
 	OASTProvider        OASTProvider
 	MutationGen         MutationGenerator
 	RequestFeeder       RequestFeeder
@@ -195,6 +217,23 @@ func (sc *ScanContext) Feeder() RequestFeeder {
 		return nil
 	}
 	return sc.RequestFeeder
+}
+
+// RecordResponseRewriterOrNil returns the RecordResponseRewriter or nil safely
+// (unset in stateless scans and bare-ScanContext tests).
+func (sc *ScanContext) RecordResponseRewriterOrNil() RecordResponseRewriter {
+	if sc == nil {
+		return nil
+	}
+	return sc.RecordRewriter
+}
+
+// IsScanTarget reports whether host is within the scan's configured scope (i.e.
+// the scan is targeting that host). Returns false when no scope checker is wired
+// (ingested traffic / no-scope scans / tests) — so a known-vendor host is then
+// treated as third-party by default, which is the safe choice for beautification.
+func (sc *ScanContext) IsScanTarget(host string) bool {
+	return sc != nil && sc.Scope != nil && sc.Scope.IsHostInScope(host)
 }
 
 // ShouldFollowSubdomains reports whether the subdomain_harvest module should

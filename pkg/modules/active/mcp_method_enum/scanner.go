@@ -10,6 +10,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
+	"github.com/vigolium/vigolium/pkg/utils"
 )
 
 // methodWordlist is intentionally short - we keep the false-positive risk
@@ -97,6 +98,30 @@ func (m *Module) ScanPerHost(
 	}
 	_ = client.SendInitializedNotification()
 
+	// Negative control: probe a guaranteed-nonexistent method first to learn how
+	// this server answers unknown methods. Without it, a server that returns a
+	// result for *any* method (a catch-all) — or that uses a non-standard error
+	// code like -32603/-32600 for unknowns — would trip a finding on every single
+	// wordlist entry. `unknownCode` is the error code this server uses for methods
+	// it doesn't implement; matching it means "not found", same as -32601.
+	unknownCode := errMethodNotFound
+	{
+		controlMethod := "vig-nonexistent-" + utils.RandomString(12)
+		body, _, err := client.PostRaw(mcpinfra.MarshalRequest(4999, controlMethod, map[string]any{}))
+		if err == nil && body != "" {
+			if resp, perr := mcpinfra.ParseResponse(body); perr == nil && resp != nil {
+				if resp.Error == nil && len(resp.Result) > 0 {
+					// Catch-all: unknown methods return a result. Every wordlist
+					// probe would look "exposed" — bail rather than emit noise.
+					return nil, nil
+				}
+				if resp.Error != nil {
+					unknownCode = resp.Error.Code
+				}
+			}
+		}
+	}
+
 	var findings []*output.ResultEvent
 	for i, method := range methodWordlist {
 		body, _, err := client.PostRaw(mcpinfra.MarshalRequest(5000+i, method, map[string]any{}))
@@ -108,7 +133,7 @@ func (m *Module) ScanPerHost(
 			continue
 		}
 		isError := resp.Error != nil
-		if isError && resp.Error.Code == errMethodNotFound {
+		if isError && (resp.Error.Code == errMethodNotFound || resp.Error.Code == unknownCode) {
 			continue
 		}
 		if !isError && len(resp.Result) == 0 {

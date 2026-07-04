@@ -53,6 +53,11 @@ type BodyCheck struct {
 
 	// Pattern checks if body matches this regex.
 	Pattern *regexp.Regexp
+
+	// containsLower is the lowercased byte form of Contains, precomputed once at
+	// rule-build time (see normalizeBodyChecks) so matchBody compares against the
+	// once-lowercased body without re-lowering/allocating the needle per call.
+	containsLower []byte
 }
 
 // detector implements Detector interface.
@@ -99,9 +104,19 @@ func (d *detector) classify(statusCode int, header http.Header, body []byte) *Bl
 		return nil
 	}
 
+	// Lowercase the body once up front. Every rule's substring BodyChecks (7 for
+	// Cloudflare alone, dozens across the rule set) need a case-insensitive
+	// compare; lowercasing per-check re-copied the whole body 20-40 times for a
+	// single blocking response — exactly when a WAF-protected target is already
+	// hammering this path.
+	var lowerBody []byte
+	if len(body) > 0 {
+		lowerBody = bytes.ToLower(body)
+	}
+
 	// Check each rule in priority order
 	for _, rule := range d.rules {
-		if result := d.matchRule(rule, header, body, statusCode); result != nil {
+		if result := d.matchRule(rule, header, body, lowerBody, statusCode); result != nil {
 			return result
 		}
 	}
@@ -110,7 +125,7 @@ func (d *detector) classify(statusCode int, header http.Header, body []byte) *Bl
 }
 
 // matchRule checks if a response matches a specific WAF rule.
-func (d *detector) matchRule(rule Rule, header http.Header, body []byte, statusCode int) *BlockResult {
+func (d *detector) matchRule(rule Rule, header http.Header, body, lowerBody []byte, statusCode int) *BlockResult {
 	// Check status code if rule has specific codes
 	if len(rule.StatusCodes) > 0 && !containsInt(rule.StatusCodes, statusCode) {
 		return nil
@@ -130,7 +145,7 @@ func (d *detector) matchRule(rule Rule, header http.Header, body []byte, statusC
 	// Check body patterns
 	bodyMatched := false
 	for _, check := range rule.BodyChecks {
-		if indicator := matchBody(body, check); indicator != "" {
+		if indicator := matchBody(body, lowerBody, check); indicator != "" {
 			indicators = append(indicators, indicator)
 			bodyMatched = true
 		}
@@ -178,14 +193,22 @@ func matchHeader(headers http.Header, check HeaderCheck) string {
 	return ""
 }
 
-// matchBody checks if body matches a BodyCheck.
-func matchBody(body []byte, check BodyCheck) string {
+// matchBody checks if body matches a BodyCheck. lowerBody is the caller's
+// once-lowercased copy of body, reused across all checks for the case-insensitive
+// Contains compare; the raw body is retained for case-sensitive pattern matching.
+func matchBody(body, lowerBody []byte, check BodyCheck) string {
 	if len(body) == 0 {
 		return ""
 	}
 
 	if check.Contains != "" {
-		if bytes.Contains(bytes.ToLower(body), []byte(strings.ToLower(check.Contains))) {
+		needle := check.containsLower
+		if needle == nil {
+			// Rule wasn't run through normalizeBodyChecks (no production path does
+			// this, but guard so an empty needle can't match every body).
+			needle = []byte(strings.ToLower(check.Contains))
+		}
+		if bytes.Contains(lowerBody, needle) {
 			return "body contains: " + truncate(check.Contains, 50)
 		}
 	}
@@ -230,7 +253,7 @@ func truncate(s string, maxLen int) string {
 
 // defaultRules returns the built-in WAF detection rules.
 func defaultRules() []Rule {
-	return []Rule{
+	rules := []Rule{
 		cloudflareRule(),
 		akamaiRule(),
 		awsWAFRule(),
@@ -239,6 +262,21 @@ func defaultRules() []Rule {
 		sucuriRule(),
 		modsecurityRule(),
 		genericRule(),
+	}
+	normalizeBodyChecks(rules)
+	return rules
+}
+
+// normalizeBodyChecks precomputes the lowercased needle for every substring
+// BodyCheck once, so the per-response classify loop never re-lowers/allocates it.
+func normalizeBodyChecks(rules []Rule) {
+	for i := range rules {
+		for j := range rules[i].BodyChecks {
+			bc := &rules[i].BodyChecks[j]
+			if bc.Contains != "" {
+				bc.containsLower = []byte(strings.ToLower(bc.Contains))
+			}
+		}
 	}
 }
 

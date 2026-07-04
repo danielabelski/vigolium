@@ -86,6 +86,24 @@ func TestScanPerHost_StrictOriginNoFinding(t *testing.T) {
 	assert.Empty(t, res, "a server enforcing Origin validation must not be flagged")
 }
 
+// TestIsRebindingRelevantHost locks in the locality gate that decides whether a
+// missing-Origin-validation finding is a High DNS-rebinding sink (local/private)
+// or a low-severity note (public).
+func TestIsRebindingRelevantHost(t *testing.T) {
+	local := []string{
+		"127.0.0.1", "127.0.0.1:8080", "localhost", "localhost:3000",
+		"[::1]:9000", "10.0.0.5", "192.168.1.10:8000", "172.16.0.1",
+		"169.254.1.1", "app.local", "0.0.0.0:8080",
+	}
+	for _, h := range local {
+		assert.True(t, isRebindingRelevantHost(h), "%s should be treated as rebinding-relevant", h)
+	}
+	remote := []string{"example.com", "api.example.com:443", "8.8.8.8", "203.0.113.5:8080"}
+	for _, h := range remote {
+		assert.False(t, isRebindingRelevantHost(h), "%s should NOT be treated as rebinding-relevant", h)
+	}
+}
+
 // TestCanProcess_RequiresResponse verifies the detection gate.
 func TestCanProcess_RequiresResponse(t *testing.T) {
 	rr := modtest.Request(t, "http://example.com/mcp")

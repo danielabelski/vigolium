@@ -183,44 +183,6 @@ func TestHasIntrospection(t *testing.T) {
 	}
 }
 
-func TestIsBatchResponse(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-		want bool
-	}{
-		{
-			name: "valid batch response",
-			body: `[{"data":{"__typename":"Query"}},{"data":{"__typename":"Query"}},{"data":{"__typename":"Query"}}]`,
-			want: true,
-		},
-		{
-			name: "single response (not batch)",
-			body: `{"data":{"__typename":"Query"}}`,
-			want: false,
-		},
-		{
-			name: "array with fewer than 3",
-			body: `[{"data":1},{"data":2}]`,
-			want: false,
-		},
-		{
-			name: "invalid JSON",
-			body: `not json`,
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isBatchResponse(tt.body)
-			if got != tt.want {
-				t.Errorf("isBatchResponse() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestEscapeJSON(t *testing.T) {
 	tests := []struct {
 		input string

@@ -91,6 +91,165 @@ func TestScanPerHost_NoMCPServer(t *testing.T) {
 	assert.Empty(t, res, "a non-MCP server must not yield a finding")
 }
 
+// toolErrorMCPHandler enumerates a tool but returns isError:true when it is
+// called — the tool is reachable but the call did NOT execute.
+func toolErrorMCPHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp" || r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		switch rpcMethod(raw) {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "sess-1234567890")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","serverInfo":{"name":"demo-mcp","version":"1"}}}`)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{"msg":{"type":"string"}}}}]}}`)
+		case "resources/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":3,"result":{"resources":[]}}`)
+		case "prompts/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":5,"result":{"prompts":[]}}`)
+		case "tools/call":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":100,"result":{"content":[{"type":"text","text":"unauthorized"}],"isError":true}}`)
+		default:
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`)
+		}
+	}
+}
+
+// TestScanPerHost_ToolErrorNotCallable is the regression for the callability
+// over-claim: a tool whose call returns isError:true must NOT escalate the
+// finding to "Unauthenticated Tool Invocation" — it stays at enumeration.
+func TestScanPerHost_ToolErrorNotCallable(t *testing.T) {
+	srv := httptest.NewServer(toolErrorMCPHandler())
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/mcp")
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res)
+	assert.Equal(t, "MCP Server Exposed - Unauthenticated Tool Enumeration", res[0].Info.Name,
+		"a tool returning isError must not be reported as callable")
+	joined := strings.Join(res[0].ExtractedResults, "\n")
+	assert.NotContains(t, joined, "Callable:", "no tool should be listed as callable")
+}
+
+// destructiveToolMCPHandler enumerates a tool whose name suggests a
+// state-changing operation; the probe must not invoke it.
+func destructiveToolMCPHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp" || r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		switch rpcMethod(raw) {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "sess-1234567890")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","serverInfo":{"name":"demo-mcp","version":"1"}}}`)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"delete_account","inputSchema":{"type":"object","properties":{"id":{"type":"string"}}}}]}}`)
+		case "resources/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":3,"result":{"resources":[]}}`)
+		case "prompts/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":5,"result":{"prompts":[]}}`)
+		case "tools/call":
+			t := "should-not-be-invoked"
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":100,"result":{"content":[{"type":"text","text":"`+t+`"}],"isError":false}}`)
+		default:
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`)
+		}
+	}
+}
+
+// TestScanPerHost_SkipsStateChangingTool verifies the safety guard: a tool named
+// like a destructive operation is enumerated but not invoked, and the evidence
+// records that it was skipped.
+func TestScanPerHost_SkipsStateChangingTool(t *testing.T) {
+	srv := httptest.NewServer(destructiveToolMCPHandler())
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/mcp")
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res)
+	assert.Equal(t, "MCP Server Exposed - Unauthenticated Tool Enumeration", res[0].Info.Name)
+	joined := strings.Join(res[0].ExtractedResults, "\n")
+	assert.Contains(t, joined, "Not invoked", "skipped state-changing tool must be recorded")
+	assert.Contains(t, joined, "delete_account")
+	assert.NotContains(t, joined, "Callable:", "a skipped tool must not be listed callable")
+}
+
+// secretLeakingMCPHandler exposes a read tool whose output contains a live AWS
+// access key — a credential leak via unauthenticated tool invocation.
+func secretLeakingMCPHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp" || r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		switch rpcMethod(raw) {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "sess-1234567890")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","serverInfo":{"name":"demo-mcp","version":"1"}}}`)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"get_config","inputSchema":{"type":"object","properties":{}}}]}}`)
+		case "resources/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":3,"result":{"resources":[]}}`)
+		case "prompts/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":5,"result":{"prompts":[]}}`)
+		case "tools/call":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":100,"result":{"content":[{"type":"text","text":"aws_access_key_id=AKIAIOSFODNN7EXAMPLE region=us-east-1"}],"isError":false}}`)
+		default:
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`)
+		}
+	}
+}
+
+// TestScanPerHost_DetectsSecretInToolOutput verifies a live credential returned
+// by a tool is flagged as a distinct secret-leak finding.
+func TestScanPerHost_DetectsSecretInToolOutput(t *testing.T) {
+	srv := httptest.NewServer(secretLeakingMCPHandler())
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/mcp")
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	found := false
+	for _, e := range res {
+		if e.Info.Name == "MCP Tool Output Leaks Secret" {
+			found = true
+			assert.Contains(t, strings.Join(e.ExtractedResults, "\n"), "AWS access key id")
+		}
+	}
+	assert.True(t, found, "an AWS key in tool output must produce a secret-leak finding")
+}
+
+// TestScanSecrets covers the high-precision secret matcher.
+func TestScanSecrets(t *testing.T) {
+	assert.Empty(t, scanSecrets("just a normal tool response with no secrets"))
+	assert.Contains(t, scanSecrets("key AKIAIOSFODNN7EXAMPLE here"), "AWS access key id")
+	assert.Contains(t, scanSecrets("token ghp_0123456789abcdefghijABCDEFGHIJ012345"), "GitHub token")
+	assert.Empty(t, scanSecrets("the aws documentation mentions AKIA but not a full key"))
+}
+
 // TestCanProcess_RequiresResponse checks the metadata gate: a request without a
 // captured response is not processable.
 func TestCanProcess_RequiresResponse(t *testing.T) {

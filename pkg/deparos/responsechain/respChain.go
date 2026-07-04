@@ -217,6 +217,25 @@ type ResponseChain struct {
 	htmlOnce   sync.Once
 	parsedHTML *html.Node
 	htmlErr    error
+
+	// Cached fingerprint sample. Stored as an opaque value so this package
+	// avoids an import cycle with the fingerprint package. Computed on demand
+	// via sync.Once so soft-404 analysis and fingerprint storage — which both
+	// sample the same chain — don't each re-parse HTML and re-hash the body.
+	fpOnce sync.Once
+	fpVal  any
+	fpErr  error
+}
+
+// CachedFingerprint lazily computes and caches an opaque fingerprint value
+// derived from this chain, invoking compute exactly once regardless of how many
+// consumers sample the same response. Higher-level packages (fingerprint) own
+// the concrete type; this package only holds the memoized result.
+func (r *ResponseChain) CachedFingerprint(compute func() (any, error)) (any, error) {
+	r.fpOnce.Do(func() {
+		r.fpVal, r.fpErr = compute()
+	})
+	return r.fpVal, r.fpErr
 }
 
 // NewResponseChain creates a new response chain for a http request

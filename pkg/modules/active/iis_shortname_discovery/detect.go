@@ -160,18 +160,3 @@ func testMethodSuffix(
 		tildes:    activeTildes,
 	}
 }
-
-// isIISServer checks response headers to determine if the server is IIS.
-func isIISServer(resp *httpmsg.HttpResponse) bool {
-	server := strings.ToLower(resp.Header("Server"))
-	if strings.Contains(server, "microsoft-iis") {
-		return true
-	}
-	if resp.HasHeader("X-AspNet-Version") || resp.HasHeader("X-AspNetMvc-Version") {
-		return true
-	}
-	if strings.Contains(strings.ToLower(resp.Header("X-Powered-By")), "asp.net") {
-		return true
-	}
-	return false
-}

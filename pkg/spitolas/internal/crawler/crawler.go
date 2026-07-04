@@ -2309,13 +2309,27 @@ func (c *Crawler) buildResult() *Result {
 		c.session.MarkEnd()
 	}
 
-	return &Result{
+	res := &Result{
 		Config:    c.config,
 		Graph:     c.graph,
 		Stats:     c.stats,
 		Fragments: c.fragManager.GetStats(),
 		Session:   c.session,
 	}
+
+	// Harvest the browser session (cookies + UA) while the browser is still
+	// alive — buildResult runs before the deferred pool.Close() in Run. Failures
+	// are non-fatal: the crawl already succeeded, we just can't carry the session.
+	if c.browser != nil {
+		res.BrowserUserAgent = c.browser.UserAgent()
+		if cookies, err := c.browser.HarvestCookies(); err != nil {
+			zap.L().Debug("Failed to harvest browser cookies for session carry-forward", zap.Error(err))
+		} else {
+			res.HarvestedCookies = cookies
+		}
+	}
+
+	return res
 }
 
 // Stats returns current statistics.
