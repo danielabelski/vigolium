@@ -286,7 +286,12 @@ func (m *Module) buildBaseline(
 		// of re-parsing on this hot path.
 		fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
-		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
+		// NoClustering: the baseline loop sends the identical "BASE" request several
+		// times to model the endpoint's natural per-request variation. The 500ms
+		// request-cluster cache keys on raw request bytes, so clustered samples return
+		// the first response's cached copy and the variation model collapses — under-
+		// modelling a dynamic endpoint. Each sample must be a genuine round-trip.
+		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoClustering: true})
 		if err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 				return nil, false, "", ""

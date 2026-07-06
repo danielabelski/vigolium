@@ -61,7 +61,7 @@ func TestScanPerRequest_JSONBeaconNotFlagged(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body := `{"siteToken":"bb500abe8ea54c71aec2a78c57f677cd","location":"https://a.biowarp.roche.com/","eventType":1}`
+	body := `{"siteToken":"bb500abe8ea54c71aec2a78c57f677cd","location":"https://a.biowarp.acme.com/","eventType":1}`
 	req := modtest.RequestJSON(t, srv.URL+"/cdn-cgi/rum", body).
 		Request().
 		WithAddedHeader("Cookie", "session=abc123def456")

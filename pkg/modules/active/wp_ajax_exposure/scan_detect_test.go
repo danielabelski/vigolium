@@ -87,7 +87,7 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 // TestScanPerRequest_GenericErrorPageNoFalsePositive reproduces the reported
 // false positive: a WordPress-ish host whose admin-ajax.php returns the small
 // "0" control body for unregistered actions but answers ai1wm_export with a
-// generic "load-failed … Refresh" HTML error page (as help.grab.com did). The
+// generic "load-failed … Refresh" HTML error page (as help.initech.com did). The
 // response differs from the control probe yet carries no All-in-One WP
 // Migration marker, so it must NOT be reported as an exposed export handler.
 func TestScanPerRequest_GenericErrorPageNoFalsePositive(t *testing.T) {

@@ -129,8 +129,8 @@ func TestPerTargetOutputPath(t *testing.T) {
 		{"unparseable target falls back to index", "out.jsonl", "::::", 4, "out-005.jsonl"},
 		// --split-by-host with no -o: the file is named by the host alone, no
 		// leading "-" separator (the host already disambiguates files).
-		{"empty base names file by host", "", "https://insurance.grab-sure.com", 0, "insurance.grab-sure.com"},
-		{"empty base keeps bare extension", ".jsonl", "https://insurance.grab-sure.com", 0, "insurance.grab-sure.com.jsonl"},
+		{"empty base names file by host", "", "https://insurance.initech-sure.com", 0, "insurance.initech-sure.com"},
+		{"empty base keeps bare extension", ".jsonl", "https://insurance.initech-sure.com", 0, "insurance.initech-sure.com.jsonl"},
 		{"empty base unparseable falls back to index", "", "::::", 3, "004"},
 	}
 	for _, tt := range tests {

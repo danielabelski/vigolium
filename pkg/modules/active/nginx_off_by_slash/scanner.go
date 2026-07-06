@@ -145,6 +145,19 @@ func (m *Module) ScanPerRequest(
 				continue
 			}
 
+			// Catch-all / SPA-shell guard. The single wildcard probe above
+			// disables itself whenever a WAF/CDN throttles it to a non-2xx, and
+			// every per-suffix differential control below fails CLOSED toward
+			// "escaped" on the same throttling — the combination that fabricates
+			// a /api../source-style report on a wildcard SPA host where /, /api,
+			// /api../source and /api../<random> all return one identical Angular
+			// index.html. Confirm the shell POSITIVELY from independent samples;
+			// when the hit is that shell, no suffix under this request can be a
+			// real escape, so stop probing the whole request.
+			if modkit.ResemblesCatchAllShell(scanCtx, ctx, httpClient, body) {
+				return results, nil
+			}
+
 			// Strict drop-on-fail: re-fetch the same traversal path twice more and
 			// require it to keep returning a stable, non-wildcard 200. A one-shot
 			// 200 from a transient race / load-balancer flap / caching edge will

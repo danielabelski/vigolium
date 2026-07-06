@@ -22,13 +22,13 @@ func TestDebugRedirectFingerprinting(t *testing.T) {
 	defer SetLogger(zap.NewNop())
 
 	// Server that redirects ALL paths to the homepage
-	// This simulates gcas.stryker.com behavior
+	// This simulates gcas.globex.com behavior
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Log what path we received
 		t.Logf("Server received: %s", r.URL.Path)
 
 		// Redirect to homepage
-		w.Header().Set("Location", "https://gcas.stryker.com/")
+		w.Header().Set("Location", "https://gcas.globex.com/")
 		w.WriteHeader(302)
 	}))
 	defer server.Close()

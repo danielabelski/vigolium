@@ -8,6 +8,12 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// Is2xx reports whether status is an HTTP 2xx success code. Shared by the modules
+// whose differential/boolean legs require a genuine 2xx content difference rather
+// than a status flip (a 3xx redirect, 4xx rejection, or 5xx error is not the query
+// result or resource reacting).
+func Is2xx(status int) bool { return status >= 200 && status < 300 }
+
 // IsValidForInjectionVulns checks if the URL is valid for injection vulnerability testing.
 // Rejects media/JS URLs and OPTIONS/CONNECT methods.
 func IsValidForInjectionVulns(urlx *urlutil.URL, ctx *httpmsg.HttpRequestResponse) bool {
@@ -26,11 +32,49 @@ var urlParamNames = []string{
 	"resource", "fetch", "load", "proxy", "request",
 }
 
+// standardRequestHeaders are fixed HTTP request headers a browser or client always
+// sends. None is a server-side URL-fetch/injection sink, yet the name/value
+// heuristics below otherwise qualify some of them: `Upgrade-Insecure-Requests`
+// substring-matches "request", and `Referer`/`Origin` carry a URL value. Injecting
+// an internal URL into any of these does not make the server fetch it — it only
+// perturbs the app's redirect/CSRF/content-negotiation logic, whose response
+// differential is then misread as SSRF (the fcworkflow.acme.com Referer /
+// Upgrade-Insecure-Requests false positives). Each is a fixed protocol/browser
+// header, not an application parameter, so excluding it by exact name is safe;
+// genuine header SSRF sinks (X-Forwarded-*, X-Original-URL, Forwarded, …) are custom
+// headers and are deliberately absent here.
+var standardRequestHeaders = map[string]bool{
+	"referer": true, "referrer": true, "origin": true,
+	"upgrade-insecure-requests": true, "user-agent": true,
+	"accept": true, "accept-language": true, "accept-encoding": true,
+	"accept-charset": true, "cache-control": true, "pragma": true,
+	"connection": true, "cookie": true, "host": true, "dnt": true,
+	"te": true, "priority": true, "content-type": true, "content-length": true,
+	"x-requested-with": true, "from": true, "via": true, "range": true,
+	"if-modified-since": true, "if-none-match": true, "max-forwards": true,
+	"sec-fetch-dest": true, "sec-fetch-mode": true, "sec-fetch-site": true,
+	"sec-fetch-user": true, "sec-ch-ua": true, "sec-ch-ua-mobile": true,
+	"sec-ch-ua-platform": true,
+}
+
+// IsStandardRequestHeader reports whether name (case-insensitive) is a fixed
+// standard HTTP request header that is never an application URL-fetch/injection
+// sink. Insertion-point gates use it to avoid mis-scoping a scan onto a browser
+// header whose URL-like name or value would otherwise qualify it.
+func IsStandardRequestHeader(name string) bool {
+	return standardRequestHeaders[strings.ToLower(name)]
+}
+
 // LooksLikeURLParam reports whether a parameter — by its name or its current
 // value — looks like it accepts a URL. Shared by the SSRF / SSRF-bypass modules
 // so they target the same parameter surface.
 func LooksLikeURLParam(name, value string) bool {
 	nameLower := strings.ToLower(name)
+	// A fixed standard request header is not a fetch sink, however URL-like its
+	// name or value looks — exclude it before the heuristics below can qualify it.
+	if standardRequestHeaders[nameLower] {
+		return false
+	}
 	for _, n := range urlParamNames {
 		if strings.Contains(nameLower, n) {
 			return true

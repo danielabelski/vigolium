@@ -293,7 +293,7 @@ func (m *Module) probeEndpoint(
 		// with an Allow set that is a subset of {POST, OPTIONS}. A generic
 		// web-server / front-controller catch-all advertises read/other methods —
 		// nginx's "GET, POST" 405 page, or a front-controller's blank-body
-		// "OPTIONS, TRACE, GET, HEAD, POST" (the vn.einvoice.grab.com production
+		// "OPTIONS, TRACE, GET, HEAD, POST" (the vn.einvoice.initech.com production
 		// false positive). Reject anything beyond POST/OPTIONS: that is a server
 		// default, not a mounted Rails route.
 		allowHeader := resp.Response().Header.Get("Allow")

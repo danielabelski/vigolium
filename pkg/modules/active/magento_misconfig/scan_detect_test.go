@@ -78,14 +78,14 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 // magentoCatchAllShell is a themed SPA / catch-all application shell that 200s
 // almost any path with the same body. It contains the generic words the old
 // single-marker probes keyed on ("setup", "downloader") but no Magento-identity
-// anchor — the vn.einvoice.grab.com case.
+// anchor — the vn.einvoice.initech.com case.
 const magentoCatchAllShell = `<!DOCTYPE html><html><head><title>Hóa đơn điện tử</title>` +
 	`<script src="/Content/js/setup-downloader.js"></script></head><body>` +
 	`<nav><a href="/hoa-don/tra-cuu">Tra cứu</a><a href="/admin">Quản trị</a></nav>` +
 	`<main>Welcome to the invoice portal. Please sign in to continue.</main></body></html>`
 
 // TestScanPerRequest_CatchAllShellNoFalsePositive reproduces the
-// vn.einvoice.grab.com false positive: an ASP.NET catch-all that 200s every
+// vn.einvoice.initech.com false positive: an ASP.NET catch-all that 200s every
 // path with the same app shell (containing weak words like "setup"/"downloader")
 // must not be reported as an exposed Magento endpoint, because no Magento-identity
 // anchor co-occurs.

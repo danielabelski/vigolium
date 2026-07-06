@@ -15,6 +15,11 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
 )
 
+// catchAllShell is the generic 200 app shell a wildcard Next.js host serves for
+// every unmatched route — shared by the two catch-all false-positive tests.
+const catchAllShell = `<html><body>Welcome to our platform — explore products and pricing` +
+	`<script src="/_next/static/chunks/main.js"></script></body></html>`
+
 // seedNext403 builds a request to rawURL with a synthetic 403 baseline whose body
 // carries a Next.js marker (/_next/), so the module's framework gate and its
 // 401/403 entry gate both fire.
@@ -66,8 +71,6 @@ func TestScanPerRequest_DetectsPathBypass(t *testing.T) {
 // the rewrite reached the shell, not the protected resource.
 func TestScanPerRequest_NoFalsePositive_CatchAllShell(t *testing.T) {
 	t.Parallel()
-	const shell = `<html><body>Welcome to our platform — explore products and pricing` +
-		`<script src="/_next/static/chunks/main.js"></script></body></html>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The clean protected path stays forbidden (the header never helps);
 		// everything else — rewrites and the random catch-all probe — returns the
@@ -78,11 +81,46 @@ func TestScanPerRequest_NoFalsePositive_CatchAllShell(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(shell))
+		_, _ = w.Write([]byte(catchAllShell))
 	}))
 	defer srv.Close()
 
 	res, err := New().ScanPerRequest(seedNext403(t, srv.URL+"/admin"), modtest.Requester(t), &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "a path rewrite that lands on the generic catch-all shell must not be reported as a middleware bypass")
+}
+
+// TestScanPerRequest_NoFalsePositive_CatchAllShell_ThrottledProbe reproduces the
+// WAF-flake variant of the catch-all FP — the exact class that produced the
+// off-by-slash false positive on a WAF/CDN-fronted host. The app is the same
+// wildcard catch-all as above (every unmatched route → one 200 shell), but the
+// primary single-probe catch-all control (/<canary>-vgo404) is throttled to a
+// 503. The OLD guard fails OPEN on that non-200 control and reports the shell as a
+// Critical bypass; the hardened guard also samples the site root "/" and a random
+// web-root directory independently, so the throttled probe cannot hide the shell.
+func TestScanPerRequest_NoFalsePositive_CatchAllShell_ThrottledProbe(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/admin":
+			// Clean protected path stays forbidden.
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`<html><body>Forbidden<script src="/_next/x.js"></script></body></html>`))
+		case strings.Contains(r.URL.Path, "-vgo404"):
+			// The lone original-template catch-all control is WAF-throttled to a
+			// non-200, disabling the old single-probe guard (fail-open).
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("throttled"))
+		default:
+			// Every other route — the path rewrites, the site root "/", and the
+			// random web-root directory the hardened guard samples — is the shell.
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(catchAllShell))
+		}
+	}))
+	defer srv.Close()
+
+	res, err := New().ScanPerRequest(seedNext403(t, srv.URL+"/admin"), modtest.Requester(t), &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a wildcard-shell bypass must not be reported even when the single-probe catch-all control is throttled")
 }

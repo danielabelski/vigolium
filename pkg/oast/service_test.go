@@ -460,6 +460,130 @@ func TestHandleInteractionCoalescesPerNonce(t *testing.T) {
 	}
 }
 
+// TestHandleInteractionCoalescesInfoPerHostInjectionPoint covers the noise the
+// investigation flagged: a crawler plants the same low-signal injection point (a
+// Referer the target logs and resolves) across dozens of URLs on one host, and
+// each DNS-only callback classifies Info/Tentative. Those must collapse to ONE
+// finding per (module, host, injection point) — not one per URL — while a distinct
+// injection point or a distinct host still keys separately.
+func TestHandleInteractionCoalescesInfoPerHostInjectionPoint(t *testing.T) {
+	repo := newOASTTestRepo(t)
+	ctx := context.Background()
+	const project = "proj-info"
+
+	var emits int
+	svc := &Service{
+		repo:        repo,
+		emitResult:  func(*output.ResultEvent) { emits++ },
+		scanUUID:    "scan-info",
+		projectUUID: project,
+	}
+
+	// Register one payload (nonce) per crawled URL, all on host dialog1.example via
+	// the same Referer injection point, then fire a DNS callback for each. A generic
+	// blind-SSRF DNS-only callback classifies Info/Tentative.
+	fire := func(nonce, targetURL, param, moduleID string) {
+		svc.trackerCache().Add(nonce, PayloadContext{
+			TargetURL:     targetURL,
+			ParameterName: param,
+			InjectionType: "parameter",
+			ModuleID:      moduleID,
+			CallbackURL:   nonce + ".oast.vigolium.com",
+		})
+		svc.handleInteraction(&server.Interaction{Protocol: "dns", UniqueID: nonce, RemoteAddress: "8.8.8.8", Timestamp: time.Unix(1, 0).UTC()})
+	}
+
+	urls := []string{
+		"https://dialog1.example/",
+		"https://dialog1.example/login",
+		"https://dialog1.example/s/",
+		"https://dialog1.example/_ui/12345",
+		"https://dialog1.example/idp/endpoint?SAMLRequest=x",
+	}
+	for i, u := range urls {
+		fire("nonceReferer"+string(rune('a'+i)), u, "Referer", "oast-probe")
+	}
+	if emits != 1 {
+		t.Fatalf("Info DNS callbacks across %d URLs (same host+param) emitted %d findings, want 1 (coalesced)", len(urls), emits)
+	}
+
+	// A different injection point on the same host is a distinct signal → new finding.
+	fire("nonceRefURL", "https://dialog1.example/dlg?refURL=y", "refURL", "oast-probe")
+	if emits != 2 {
+		t.Fatalf("distinct injection point on same host: emits=%d, want 2", emits)
+	}
+
+	// A different module on the same host+param also keys separately.
+	fire("nonceBlind", "https://dialog1.example/", "Referer", "ssrf-blind")
+	if emits != 3 {
+		t.Fatalf("distinct module on same host+param: emits=%d, want 3", emits)
+	}
+
+	// A different host, same module+param → new finding.
+	fire("nonceOtherHost", "https://other.example/", "Referer", "oast-probe")
+	if emits != 4 {
+		t.Fatalf("distinct host: emits=%d, want 4", emits)
+	}
+
+	infos, err := repo.GetFindingsBySeverity(ctx, project, "info", 50)
+	if err != nil {
+		t.Fatalf("GetFindingsBySeverity(info): %v", err)
+	}
+	if len(infos) != 4 {
+		t.Fatalf("stored %d info findings, want 4 (5 same-key URLs collapsed to 1, + 3 distinct keys)", len(infos))
+	}
+}
+
+func TestOASTEmissionKey(t *testing.T) {
+	base := PayloadContext{ParameterName: "Referer", ModuleID: "oast-probe"}
+
+	// Non-Info interactions keep per-nonce identity.
+	for _, sev := range []severity.Severity{severity.High, severity.Critical, severity.Medium, severity.Low} {
+		p := base
+		p.TargetURL = "https://h.example/a"
+		if got := oastEmissionKey(sev, "nonce-1", p); got != "nonce-1" {
+			t.Errorf("oastEmissionKey(%s) = %q, want per-nonce %q", sev, got, "nonce-1")
+		}
+	}
+
+	// Info interactions coalesce across URLs on the same host+injection point.
+	a := base
+	a.TargetURL = "https://h.example/a?q=1"
+	b := base
+	b.TargetURL = "https://h.example/b"
+	ka := oastEmissionKey(severity.Info, "nonce-a", a)
+	kb := oastEmissionKey(severity.Info, "nonce-b", b)
+	if ka != kb {
+		t.Errorf("Info keys for same host+param differ: %q vs %q", ka, kb)
+	}
+	if ka == "nonce-a" {
+		t.Errorf("Info key must not be the nonce, got %q", ka)
+	}
+
+	// Distinct param, host, or module → distinct key.
+	pParam := base
+	pParam.TargetURL = "https://h.example/a"
+	pParam.ParameterName = "refURL"
+	pHost := base
+	pHost.TargetURL = "https://other.example/a"
+	pMod := base
+	pMod.TargetURL = "https://h.example/a"
+	pMod.ModuleID = "ssrf-blind"
+	for name, p := range map[string]PayloadContext{"param": pParam, "host": pHost, "module": pMod} {
+		if got := oastEmissionKey(severity.Info, "nonce-x", p); got == ka {
+			t.Errorf("distinct %s should not share key %q", name, ka)
+		}
+	}
+
+	// Header case-insensitivity: Referer and referer collapse.
+	lower := base
+	lower.TargetURL = "https://h.example/c"
+	lower.ParameterName = "referer"
+	if oastEmissionKey(severity.Info, "n", lower) != ka {
+		t.Errorf("case-different param names must coalesce")
+	}
+}
+
 func TestClassifyInteraction(t *testing.T) {
 	pctx := PayloadContext{
 		TargetURL:     "http://target.com",
@@ -593,12 +717,12 @@ func TestClassifyCommandInjectionProtocolMismatch(t *testing.T) {
 	const host = "d8vktfraf7em8h1864k0bigm5o33zt98m.oast.vigolium.com"
 	// The wild payload, verbatim: base host + ";nslookup <oast>" in X-Forwarded-Host.
 	xfh := PayloadContext{
-		TargetURL:     "https://lk-customerops-dr.sc-corp.net/",
+		TargetURL:     "https://lk-customerops-dr.hooli-corp.net/",
 		ParameterName: "X-Forwarded-Host",
 		InjectionType: "os-command-injection (header)",
 		ModuleID:      "command-injection-oast",
 		CallbackURL:   host,
-		Payload:       "lk-customerops-dr.sc-corp.net;nslookup " + host,
+		Payload:       "lk-customerops-dr.hooli-corp.net;nslookup " + host,
 	}
 	for _, proto := range []string{"http", "https", "HTTPS"} {
 		sev, conf, desc := classifyInteraction(proto, xfh)

@@ -232,7 +232,13 @@ func (m *Module) fetch(httpClient *http.Requester, service *httpmsg.Service, raw
 	// of re-parsing on this hot path.
 	req := httpmsg.NewRequestResponseRaw(raw, service)
 
-	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true})
+	// NoClustering: the confirm step re-sends the identical restricted-path request
+	// across rounds to prove it stays blocked (not flapping into reachability). The
+	// 500ms request-cluster cache keys on raw request bytes, so a clustered re-send
+	// returns the first (blocked) response's cached copy and a flapping upstream that
+	// intermittently serves the restricted content is never caught (a false positive on
+	// a High-severity access-control finding). Every round must be a genuine round-trip.
+	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
 	if err != nil {
 		if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 			return 0, "", false, true

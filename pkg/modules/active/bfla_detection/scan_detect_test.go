@@ -256,7 +256,7 @@ func TestScanPerRequest_CatchAllGatewayNoFalsePositive(t *testing.T) {
 }
 
 // TestScanPerRequest_PublicPageNoCredentialsNoFalsePositive reproduces the
-// lp.stryker.com false positive: an unauthenticated GET to a "/debug/" landing
+// lp.globex.com false positive: an unauthenticated GET to a "/debug/" landing
 // page returns 200, and "removing" the (absent) Authorization/Cookie headers
 // trivially returns the same 200 because the request was never authenticated.
 // The endpoint is simply public — there is no authorization to break — so a
@@ -265,7 +265,7 @@ func TestScanPerRequest_PublicPageNoCredentialsNoFalsePositive(t *testing.T) {
 	t.Parallel()
 	// A dynamic landing page: same template, content varies slightly per request
 	// (as the report's 13985 vs 14389 body lengths show).
-	landing := "<html><body>Stryker landing page " + strings.Repeat("product highlight ", 90) + "</body></html>"
+	landing := "<html><body>Globex landing page " + strings.Repeat("product highlight ", 90) + "</body></html>"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "-vigolium-wp/") {
 			w.WriteHeader(http.StatusNotFound)
@@ -343,7 +343,7 @@ func TestScanPerRequest_RandomizedContentNoFalsePositive(t *testing.T) {
 }
 
 // TestScanPerRequest_StaticImageAssetNoFalsePositive reproduces the
-// media-assets.stryker.com false positive: an Akamai/Scene7 image route whose
+// media-assets.globex.com false positive: an Akamai/Scene7 image route whose
 // path matches the admin heuristic only by substring ("/system" inside the
 // "System Image" filename segment) serves a 200 WebP image to everyone. Stripping
 // or switching auth returns the same image, so the old code flagged it. The
@@ -352,7 +352,7 @@ func TestScanPerRequest_StaticImageAssetNoFalsePositive(t *testing.T) {
 	t.Parallel()
 	// A binary WebP payload, mirroring the report's RIFF....WEBP body.
 	webp := "RIFF\x00\x00\x00\x00WEBPVP8 " + strings.Repeat("\x00\x01\x02\x03\xff\xfe", 64)
-	const imgPath = "/is/image/stryker/System Image"
+	const imgPath = "/is/image/globex/System Image"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The image path answers 200 for every method (CDN cache hit); all other
 		// paths — the wildcard probe and the method baseline — 404. Without the
@@ -368,7 +368,7 @@ func TestScanPerRequest_StaticImageAssetNoFalsePositive(t *testing.T) {
 	defer srv.Close()
 
 	client := modtest.Requester(t)
-	rr := modtest.Response(modtest.Request(t, srv.URL+"/is/image/stryker/System%20Image"), "image/webp", webp)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/is/image/globex/System%20Image"), "image/webp", webp)
 
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
@@ -376,7 +376,7 @@ func TestScanPerRequest_StaticImageAssetNoFalsePositive(t *testing.T) {
 }
 
 // TestScanPerRequest_EmptyPrivilegedBaselineNoFalsePositive reproduces the
-// stryker-agile.atlassian.net /secure/ConfigureReport.jspa false positive: a JSP
+// globex-agile.atlassian.net /secure/ConfigureReport.jspa false positive: a JSP
 // action endpoint (matched as "admin" via the "/config" substring in
 // "/configurereport") answers an unauthenticated request with an empty 200
 // (Content-Length: 0) for both GET and POST, while a random nonexistent path

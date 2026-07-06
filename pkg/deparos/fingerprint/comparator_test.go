@@ -294,7 +294,7 @@ func createTestHTTPRequest(t *testing.T, method, urlStr string, body io.Reader) 
 // TestComparator_PrefixRoutedEmptyBody_NotWildcard is a regression test for a real
 // endpoint dropped by naive wildcard validation.
 //
-// Scenario (mirrors login.aspciamqalogin.roche.com's SAP Gigya gateway): the origin
+// Scenario (mirrors login.aspciamqalogin.acme.com's SAP Gigya gateway): the origin
 // routes on the last-segment PREFIX — any path whose last segment starts with a real
 // route name ("metrics") returns 200 with an empty body, while paths that break the
 // prefix return 404. /metrics is a genuine Prometheus endpoint that returns an empty

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/cli/tui"
 	"github.com/vigolium/vigolium/pkg/database"
@@ -125,7 +126,7 @@ func init() {
 	pf.IntVar(&findingOffset, "offset", 0, "Number of findings to skip (for pagination)")
 
 	// Finding-specific filter flags
-	pf.StringVar(&findingSeverity, "severity", "", "Filter by severity: critical,high,medium,low,info (comma-separated)")
+	pf.StringVar(&findingSeverity, "severity", "", "Filter by severity: critical,high,medium,low,suspect,info (comma-separated; single-letter shorthands or any unambiguous prefix ok, e.g. 'h,c' or 'me,info'). Alias: --sev")
 	pf.StringVar(&findingMinSeverity, "min-severity", "", "Filter by minimum severity (e.g. high → high+critical); ignored when --severity is set")
 	pf.StringVar(&findingConfidence, "confidence", "", "Filter by confidence: certain,firm,tentative (comma-separated)")
 	pf.StringVar(&findingScanUUID, "scan-uuid", "", "Filter by scan UUID")
@@ -148,6 +149,18 @@ func init() {
 	f.StringVar(&findingPick, "pick", "", "Select finding(s) by 1-based position in the result list (e.g. 2, 1,3, 2-4); applied after --search/filters and sort")
 	registerAgentJSONFlags(f)
 	tui.AddFlags(findingCmd, &findingTUIFlag, &findingNoTUIFlag)
+
+	// Accept --sev as an alias for --severity. A normalize func routes the name
+	// to the same flag so both spellings share one value (registering a second
+	// flag bound to the same var would let one silently overwrite the other).
+	// Set globally so it reaches the merged parse-time set — --severity is a
+	// persistent flag, so a func on PersistentFlags() alone would not apply.
+	findingCmd.SetGlobalNormalizationFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		if name == "sev" {
+			name = "severity"
+		}
+		return pflag.NormalizedName(name)
+	})
 }
 
 func runFinding(cmd *cobra.Command, args []string) error {
@@ -219,16 +232,35 @@ func runFinding(cmd *cobra.Command, args []string) error {
 
 		if globalJSON {
 			return displayFindingsJSON(ctx, db, findings, total, filters.ProjectUUID)
-		} else if findingMarkdown {
-			return displayFindingsMarkdown(ctx, db, findings)
-		} else if findingBurp {
-			return displayFindingsBurp(db, ctx, findings)
-		} else if findingRaw {
-			return displayFindingsRaw(db, ctx, findings)
-		} else if findingTree {
-			return displayFindingTree(db, ctx, findings, total)
 		}
-		return findingDisplayTable(db, ctx, findings, total)
+
+		// Echo the active filter conditions (severity, search, host, …) so it's
+		// clear the result set was narrowed and by what — and, for --severity,
+		// that a fuzzy token like 'me' resolved to 'medium'. Text modes only; JSON
+		// already carries the filters implicitly and must stay clean on stdout.
+		printActiveFindingFilters(filters, fuzzyTerm)
+
+		var renderErr error
+		switch {
+		case findingMarkdown:
+			renderErr = displayFindingsMarkdown(ctx, db, findings)
+		case findingBurp:
+			renderErr = displayFindingsBurp(db, ctx, findings)
+		case findingRaw:
+			renderErr = displayFindingsRaw(db, ctx, findings)
+		case findingTree:
+			warnIfCapped(len(findings), total) // top, so it's seen before a long tree
+			renderErr = displayFindingTree(db, ctx, findings, total)
+		default:
+			warnIfCapped(len(findings), total)
+			renderErr = findingDisplayTable(db, ctx, findings, total)
+		}
+		if renderErr != nil {
+			return renderErr
+		}
+		// Repeat at the bottom so it's also visible after scrolling a long list.
+		warnIfCapped(len(findings), total)
+		return nil
 	})
 }
 
@@ -379,9 +411,9 @@ func buildFindingFilters(fuzzyTerm string) (database.QueryFilters, error) {
 
 	var severities []string
 	if findingSeverity != "" {
-		severities = strings.Split(findingSeverity, ",")
+		severities = parseSeverityList(findingSeverity)
 	} else if findingMinSeverity != "" {
-		severities = severitiesAtOrAbove(findingMinSeverity)
+		severities = severitiesAtOrAbove(normalizeSeverity(findingMinSeverity))
 		if severities == nil {
 			return database.QueryFilters{}, fmt.Errorf("invalid --min-severity %q (want one of: %s)", findingMinSeverity, strings.Join(severityOrder, ", "))
 		}
@@ -425,6 +457,48 @@ func buildFindingFilters(fuzzyTerm string) (database.QueryFilters, error) {
 		SortBy:        findingSort,
 		SortAsc:       findingAsc,
 	}, nil
+}
+
+// printActiveFindingFilters prints a one-line summary of the filter conditions
+// actually in effect (e.g. "severity=medium,info · search=\"foo\""), or nothing
+// when no narrowing filter is set. It reads the built filters so the severity it
+// shows is the normalized/fuzzy-expanded value that was applied, giving the user
+// confirmation that a shorthand like 'me' resolved to 'medium'.
+func printActiveFindingFilters(filters database.QueryFilters, fuzzyTerm string) {
+	var s filterSummary
+	s.addQuoted("search", fuzzyTerm)
+	if len(filters.SearchTerms) > 0 {
+		s.addQuoted("search", strings.Join(filters.SearchTerms, " "))
+	}
+	// Severity: show the normalized list when --severity is set, or the expanded
+	// threshold set when --min-severity is used, so the fuzzy expansion is visible.
+	if findingSeverity != "" {
+		s.addSeverities("severity", filters.Severity)
+	} else if findingMinSeverity != "" {
+		s.addMinSeverity("min-severity", normalizeSeverity(findingMinSeverity), filters.Severity)
+	}
+	s.addConfidences("confidence", filters.Confidence)
+	s.add("host", filters.HostPattern)
+	s.add("path", filters.PathPattern)
+	s.add("method", strings.Join(filters.Methods, ","))
+	s.addInts("status", filters.StatusCodes)
+	s.add("header", filters.HeaderSearch)
+	s.add("body", filters.BodySearch)
+	s.add("source", filters.Source)
+	s.add("scan-uuid", filters.ScanUUID)
+	s.add("agentic-scan", findingAgenticScan)
+	s.add("module-type", filters.ModuleType)
+	s.add("finding-source", filters.FindingSource)
+	if filters.FindingID != 0 {
+		s.add("id", strconv.Itoa(filters.FindingID))
+	}
+	if filters.DateFrom != nil {
+		s.add("from", filters.DateFrom.Format("2006-01-02"))
+	}
+	if filters.DateTo != nil {
+		s.add("to", filters.DateTo.Format("2006-01-02"))
+	}
+	s.print()
 }
 
 func displayFindingsJSON(ctx context.Context, db *database.DB, findings []*database.Finding, total int64, projectUUID string) error {

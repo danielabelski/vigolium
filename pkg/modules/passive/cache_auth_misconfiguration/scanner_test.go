@@ -78,7 +78,7 @@ func TestScanPerRequest_AuthHeaderCachedNoVary_Flags(t *testing.T) {
 // --- Negative: static-asset path by segment (the reported FP) ---------------
 
 // /css/images has no file extension but both segments are static dirs — the
-// exact lp.stryker.com false positive this hardening targets.
+// exact lp.globex.com false positive this hardening targets.
 func TestScanPerRequest_StaticDirSegment_NoFinding(t *testing.T) {
 	resp := []string{
 		"Cache-Control: public, max-age=60",

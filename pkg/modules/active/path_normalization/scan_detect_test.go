@@ -188,7 +188,7 @@ func binaryCDNHandler() http.HandlerFunc {
 }
 
 // TestScanPerRequest_NoFalsePositiveOnBinaryCDNAsset is the regression guard for
-// the reported false positive (media-assets.stryker.com): a binary image CDN with
+// the reported false positive (media-assets.globex.com): a binary image CDN with
 // a query string on the URL and per-request varying bytes must NOT be flagged.
 // The backed-off traversal path returns a 200 image/webp, but image/binary
 // content is excluded from the status oracle (it is the static-root oracle's
@@ -201,7 +201,7 @@ func TestScanPerRequest_NoFalsePositiveOnBinaryCDNAsset(t *testing.T) {
 
 	client := modtest.Requester(t)
 	// Query string present, mirroring a real Scene7 image request.
-	rr := modtest.Request(t, srv.URL+"/is/image/stryker/visualization?wid=800&fmt=webp")
+	rr := modtest.Request(t, srv.URL+"/is/image/globex/visualization?wid=800&fmt=webp")
 
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
@@ -231,7 +231,7 @@ func TestScanPerRequest_NoFalsePositiveDegenerateBackoff(t *testing.T) {
 	defer srv.Close()
 
 	client := modtest.Requester(t)
-	rr := modtest.Request(t, srv.URL+"/is/image/stryker/visualization?wid=800")
+	rr := modtest.Request(t, srv.URL+"/is/image/globex/visualization?wid=800")
 
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
@@ -239,7 +239,7 @@ func TestScanPerRequest_NoFalsePositiveDegenerateBackoff(t *testing.T) {
 }
 
 // rateLimitedBaselineHandler reproduces the reported false positive
-// (roch-business.gxs.com.sg): a Webflow-style CDN where an upward `..//`
+// (biz-portal.initech.com.sg): a Webflow-style CDN where an upward `..//`
 // traversal normalizes to the public homepage, the over-traversed path
 // overshoots the root and is rejected (400), and the clean path / root / a
 // non-existent sibling are all transiently RATE-LIMITED (429) during the scan.

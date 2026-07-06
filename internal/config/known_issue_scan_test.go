@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestKnownIssueScanConfig_Validate_SeverityOverrides(t *testing.T) {
 	tests := []struct {
@@ -81,9 +84,41 @@ func TestDefaultFindingGrouping_GroupsSourcemapByModule(t *testing.T) {
 		"smart-behavior-detection",
 		"rails-info-exposure",
 		"postmessage-handler-detect",
+		// Sensitive URL params: one per-host hygiene finding (constant module_name),
+		// not one row per crawled URL that carries a query key/token.
+		"sensitive-url-params",
+		// Confirmed per-URL/param findings whose module_name embeds a payload/param
+		// token (so by-rule can't fold them) — by-module collapses per host.
+		"crlf-injection",
+		"api-key-url-exposure",
+		// Per-response hygiene siblings of csp-weakness-audit / cache-data-leak.
+		"clickjacking-detect",
+		"cache-auth-misconfiguration",
+		// Per-response / per-page hygiene that fires once per URL: reverse-tabnabbing
+		// (unsafe target=_blank page), sensitive data leaked in a response header, and
+		// Nginx path-escape behavior — one per-host finding, affected URLs/headers unioned.
+		"reverse-tabnabbing-detect",
+		"sensitive-header-leak",
+		"nginx-path-escape",
 	} {
 		if !set[want] {
 			t.Errorf("default ByModule should include %q, got %v", want, gc.ByModule)
+		}
+	}
+
+	// By-rule modules fold repeats of one rule/variant per host while keeping
+	// distinct variants apart — the per-endpoint / per-param injection findings that
+	// share one module_id but carry the header/technique in module_name.
+	for _, want := range []string{"secret-detect", "host-header-injection", "ldap-injection", "proxy-header-trust", "csti-detection", "express-trust-proxy-misconfig", "aspnet-viewstate-scan"} {
+		if !slices.Contains(gc.ByRule, want) {
+			t.Errorf("default ByRule should include %q, got %v", want, gc.ByRule)
+		}
+	}
+	// The multi-vector injection modules must be by-RULE (module_name kept), never
+	// by-MODULE: by-module would conflate distinct header vectors / techniques on one host.
+	for _, banned := range []string{"host-header-injection", "ldap-injection", "proxy-header-trust"} {
+		if set[banned] {
+			t.Errorf("%s must be by-rule, not by-module (by-module conflates variants), got ByModule %v", banned, gc.ByModule)
 		}
 	}
 	// Secret-bearing modules stay value-grouped so distinct leaked secrets remain

@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.2.2] - 2026-07-07
+
+A false-positive-hardening and read-command ergonomics release on top of v0.2.1 — no new modules (registry stays at 198 active + 115 passive). It fixes two shared root causes behind a class of differential/blind false positives — confirmation legs that "reproduced" against a cached response, and non-deterministic endpoints whose status flips were misread as injection — and tightens signature-stripping, OAST callback fan-out, and hygiene-finding noise.
+
+### Added
+
+- **`--severity` / `--sev` filter on `finding` and `db list`** — comma-separated severity list accepting single-letter shorthands (`h,c`) and any unambiguous prefix (`me,info`, `crit`).
+- **"Filtered by:" summary line on `finding` and `traffic`** — text-mode listings echo the active filter conditions (severity, confidence, search, host, …) so it's clear how the result set was narrowed; suppressed for JSON output.
+- **Per-source attribution for `--glob-db` merged reads** — `finding`/`traffic` trees built from multiple merged databases show one db-path root per source file, attributing each finding and record back to where it came from.
+- **`--limit` cap notice** — a stderr hint reports how many rows were shown of the total and how to raise the cap.
+
+### Changed
+
+- **Finding grouping widened for noisy per-URL / per-page findings** — `sensitive-header-leak`, `sensitive-url-params`, `clickjacking-detect`, `reverse-tabnabbing-detect`, `nginx-path-escape`, `cache-auth-misconfiguration`, `crlf-injection`, and `api-key-url-exposure` now collapse to one per-host finding (affected routes/params/values unioned onto the survivor) instead of one row per crawled URL.
+- **OAST findings coalesce per emission key** — a payload's callback fan-out (DNS A/AAAA, recursive resolvers, then the HTTP-fetch leg) collapses to one finding at the strongest protocol rank, and low-signal Info interactions also coalesce across the many URLs that plant the same injection point on a host.
+- **SAML signature-stripping scoped to where the attack applies** — the leg now requires a SAML `<Assertion>` (so a `SAMLRequest`/`AuthnRequest` to an IdP SSO endpoint no longer false-positives), requires an accepted baseline status (2xx/3xx), and treats a 5xx control as a crash rather than a bypass.
+
+### Fixed
+
+- **Confirmation legs poisoned by the request-cluster cache** — the 500 ms cache keyed on raw request bytes returned the first response verbatim, so an identical re-send always "reproduced" (and timing re-sends came back ~0 ms). Confirm/baseline/timing round-trips now pass `NoClustering: true` across `code-exec`, `default-credentials`, `http-request-smuggling`, `race-interference`, `reverse-proxy-path-confusion`, `sqli-boolean-blind`, `sqli-time-blind`, `ssti-blind`, `unauth-service-exposure`, and `ssrf-detection`.
+- **Non-deterministic / status-flip differentials misread as injection** — endpoints that flap between a 200 page and a 302 redirect independent of the payload could mimic a proxied fetch or boolean oracle. The differential legs now require a determinism re-fetch, agreeing controls, and 2xx status discipline (via shared `infra.Is2xx`) across `ssrf-detection`, `xpath-injection`, `ldap-injection`, `nosqli-operator-injection`, and `idor-guid` (which also requires a *substantial* body difference so per-request tokens don't read as a different object).
+- **Standard request headers wrongly treated as URL-fetch / injection sinks** — `Referer`, `Origin`, `Upgrade-Insecure-Requests`, `Via`, and `From` are fixed browser/protocol headers, not application parameters. A shared `infra.IsStandardRequestHeader` now excludes them across the SSRF/OAST family (`ssrf-blind`, `oast-probe`), and `input-behavior-probe` drops them from its probe set.
+- **GraphQL boolean-injection keyword differentials** — the `graphql_scan` boolean leg now confirms against an inert-`OR` control, so an endpoint reacting to the mere presence of the token is no longer misread as injection.
+- **Base64 findings collapse rotating-token JSON blobs** — `base64-data-detect` keys findings on the decoded JSON shape (per host+source), collapsing a rotating token embedded on every page to one finding while opaque/non-JSON blobs keep their per-value identity.
+
+### Internal
+
+- New shared helpers in `pkg/modules/infra/filter.go` (`Is2xx`, `IsStandardRequestHeader`) plus `pkg/cli/{filter_summary,severity_gate}.go`.
+- New/expanded tests: `severity_gate_test.go`, `oast/service_test.go`, `signature_bypass_test.go`, `base64_data_detect/scanner_test.go`, scanner tests for the new gates (`ssrf_detection`, `xpath_injection`, `ldap_injection`), and `known_issue_scan_test.go`.
+
 ## [v0.2.1] - 2026-07-05
 
 A detection-breadth and agent-provider release on top of the v0.2.0 stable line. Eleven new modules land (5 active + 6 passive), several existing detectors grow out-of-band and bypass legs, the olium agent runtime gains three new provider backends (the public OpenAI Responses API, a Claude Code Agent-SDK bridge, and a generic Anthropic Messages proxy), and a path-normalization/FUZZ baselining bug that was suppressing cache-key and content-discovery findings is fixed. A batch of read-command ergonomics also lands — a grouped `finding` tree view, `--pick` position selection, repeatable AND-combined `--search`, compact-by-default (and syntax-highlighted) Markdown, and post-scan traffic printing — alongside a subcommand-help reorganization and two scoping/merge correctness fixes. The registry now stands at 198 active + 115 passive registrations.
@@ -48,7 +78,7 @@ A detection-breadth and agent-provider release on top of the v0.2.0 stable line.
 ### Fixed
 
 - **Path-normalization / FUZZ baseline false negatives** — the discovery fingerprinter no longer runs bypass paths through `path.Clean`; a new `SetWirePath` preserves bypass sequences (`%23`, `..`, `//`, `..;/`) byte-for-byte on the wire, `engine_init` keys the baseline via `ExtractCacheKey` (instead of a `path.Dir` that collapsed the bypass to `/`), and `httpmsg` emits the raw `RequestURI` rather than a decoded relative path. Cache-key and content-discovery findings that depended on an un-normalized path are detected again.
-- **Scope keyword over-matching** — origin-scope keyword matching now compares the keyword against the host's registrable-domain leading label (its eTLD+1 label) instead of a bare full-hostname substring. Same-org hosts on other TLDs / brand domains stay in scope (keyword `roche` still matches `roche.io`, `rochegroup.com`) while an unrelated third party whose subdomain merely *contains* the keyword — e.g. `rochegroup.cloudflareaccess.com`, a Cloudflare SSO wall whose registrable label is `cloudflareaccess` — is now correctly excluded.
+- **Scope keyword over-matching** — origin-scope keyword matching now compares the keyword against the host's registrable-domain leading label (its eTLD+1 label) instead of a bare full-hostname substring. Same-org hosts on other TLDs / brand domains stay in scope (keyword `acme` still matches `acme.io`, `acmegroup.com`) while an unrelated third party whose subdomain merely *contains* the keyword — e.g. `acmegroup.cloudflareaccess.com`, a Cloudflare SSO wall whose registrable label is `cloudflareaccess` — is now correctly excluded.
 - **`--db-isolate` merge race on a fresh shared `--db`** — the destination-database critical section (open → schema-create → default-seed → merge) now runs entirely inside one cross-process merge lock. Previously the WAL-mode switch and `CREATE … IF NOT EXISTS` DDL ran outside the lock and could surface `SQLITE_BUSY` under a `-P` fan-out of finishers targeting one brand-new shared database.
 
 ### Internal

@@ -204,7 +204,7 @@ func looksLikeWPControl(c *controlProbe) bool {
 // genericErrorMarkers are substrings (lowercase) that identify a generic HTML
 // error / challenge / SPA-shell page served by a CDN, WAF, or front-end router
 // rather than by WordPress's admin-ajax. The reported false positive was
-// help.grab.com answering every admin-ajax POST with a "load-failed … Refresh"
+// help.initech.com answering every admin-ajax POST with a "load-failed … Refresh"
 // HTML page; any of these in the body marks the response as untrusted.
 var genericErrorMarkers = []string{
 	"load-failed",
@@ -301,7 +301,7 @@ func (m *Module) probeAction(
 	}
 
 	// Defense in depth: drop generic error / challenge / SPA-shell pages. A
-	// CDN/WAF/app router serves a boilerplate HTML page (the help.grab.com
+	// CDN/WAF/app router serves a boilerplate HTML page (the help.initech.com
 	// "load-failed … Refresh" page that produced a false positive is one) for
 	// every admin-ajax POST regardless of action. If such a page also matched a
 	// plugin token by coincidence, only trust it when it's clearly an

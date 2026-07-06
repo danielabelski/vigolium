@@ -253,6 +253,49 @@ func TestScanPerInsertionPoint_GenericMarkerFailsClosedWhenControlsError(t *test
 	assert.Empty(t, res, "a generic marker whose negative controls cannot be fetched must be dropped, not reported as SSRF")
 }
 
+// TestScanPerInsertionPoint_NonDeterministicControlNotSSRF reproduces the
+// fcworkflow.acme.com false positive: a login/workflow endpoint that flaps
+// between an HTML page and an empty redirect independent of the payload. The
+// localhost probe lands on the HTML page (generic `<html` marker) while the dead
+// host returns a short error — mimicking a proxied fetch — but re-fetching the
+// ORIGINAL value shows the endpoint is non-deterministic (its two control
+// responses disagree), so the generic-marker finding must be dropped.
+func TestScanPerInsertionPoint_NonDeterministicControlNotSSRF(t *testing.T) {
+	var origHits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.URL.Query().Get("url")
+		switch {
+		case strings.Contains(v, "192.0.2.1"):
+			// Dead-host sibling: short, marker-free error (passes the differential).
+			_, _ = io.WriteString(w, "upstream connection timed out")
+		case strings.Contains(v, "images.example.com"):
+			// The ORIGINAL value flaps: consecutive fetches return substantially
+			// different (but marker-free) bodies, the way a session/redirect flow does.
+			if atomic.AddInt64(&origHits, 1)%2 == 0 {
+				w.WriteHeader(http.StatusFound) // empty body
+				return
+			}
+			_, _ = io.WriteString(w, "temporarily redirected to the corporate single sign-on gateway, please wait while we establish your session")
+		default:
+			// Every internal/localhost payload gets the app's own HTML page (generic
+			// `<html` marker), NOT because the server proxied localhost.
+			_, _ = io.WriteString(w, "<html><body>corporate login portal</body></html>")
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(
+		modtest.Request(t, srv.URL+"/?url=https://images.example.com/logo.png"),
+		"text/plain", "fetched remote resource ok",
+	)
+	ip := modtest.InsertionPoint(t, rr, "url")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a non-deterministic endpoint (flapping control) must not yield a generic-marker SSRF finding")
+}
+
 // ssrfStatusTemplate renders a long, fixed status page that only echoes the target
 // host word. It is the shape that defeats a bare-token check: change just the host
 // and the whole body is otherwise identical, so two renderings are >0.95 similar.

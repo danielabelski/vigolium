@@ -79,7 +79,7 @@ func TestScanPerRequest_NumericFilteredOut(t *testing.T) {
 }
 
 // TestScanPerRequest_PathSegmentNotReflected is the regression for the dominant
-// false positive across the Snapchat scan corpus: a route name reflecting in its
+// false positive across the Hooli scan corpus: a route name reflecting in its
 // own page. "/about" renders a page that naturally contains "about" (nav, title,
 // canonical link), so treating the path segment as a reflected parameter is noise.
 // Path segments must be skipped; only real query/body parameter values count.

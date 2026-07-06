@@ -183,7 +183,7 @@ func (m *Module) testForwardedHost(
 	// substring somewhere inside another URL. The reported false positive is the
 	// latter: behind CloudFront an OAuth login flow reflects X-Forwarded-Host into
 	// the URL-encoded redirect_uri= query parameter of a 302 whose authority stays
-	// the trusted IdP (wam.roche.com), so the real destination is identical with or
+	// the trusted IdP (wam.acme.com), so the real destination is identical with or
 	// without the spoofed header — there is nothing to poison. Match authority
 	// position only; an echo inside a query value (or any %2F%2Fhost reflection)
 	// does not qualify.

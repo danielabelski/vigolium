@@ -13,6 +13,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 // Boolean-based differential thresholds. A wildcard response is only flagged
@@ -228,15 +229,60 @@ func (m *Module) ScanPerInsertionPoint(
 		}
 	}
 
-	// Require the wildcard response to diverge substantially from BOTH the
-	// baseline AND the control. Both deltas must clear the absolute+relative
-	// gate, so a single anomalous probe (e.g., transient 5xx) can't carry the
-	// finding on its own.
+	// Status discipline: LDAP filter expansion changes the RESULT SET rendered on
+	// the same page, not the HTTP status. A wildcard that flips the status
+	// (baseline 200 → wildcard 500/302/404, or the reverse) is a status artifact —
+	// an error page, redirect, or not-found — not a boolean oracle, and its body
+	// naturally differs from a 200 baseline. isAccessDenied only screens
+	// 401/403/429/503, so 500/302/404 would otherwise slip through. Require all three
+	// responses to share one 2xx status before trusting a body-size differential.
+	if !infra.Is2xx(baselineSig.statusCode) || !infra.Is2xx(wildcardSig.statusCode) || !infra.Is2xx(controlSig.statusCode) {
+		return results, nil
+	}
+	if wildcardSig.statusCode != baselineSig.statusCode || wildcardSig.statusCode != controlSig.statusCode {
+		return results, nil
+	}
+
+	// Require the wildcard response to diverge substantially from BOTH the baseline
+	// AND the control. This is a pure comparison over responses already in hand, so
+	// it runs BEFORE the (network-bound) determinism/reproduction re-fetches below —
+	// the overwhelmingly common non-injectable param (wildcard body ≈ baseline)
+	// short-circuits here without paying for those extra round-trips.
 	if !hasSubstantialBodyDifference(wildcardSig, baselineSig) {
 		return results, nil
 	}
 	if !hasSubstantialBodyDifference(wildcardSig, controlSig) {
 		return results, nil
+	}
+
+	// Determinism precondition. The wildcard-vs-baseline/control deltas only mean
+	// "LDAP filter expansion" if the endpoint answers the SAME input the SAME way.
+	// The params this module targets (user/search/query/name/email) are exactly the
+	// ones rendered into search-result pages whose size varies per request (result
+	// counts, ads, tokens, timestamps); on those a `*` that merely matches more rows
+	// than a specific term — ordinary application search, not LDAP — clears the
+	// deltas. Re-fetch the original value twice and require a stable body; a flapping
+	// or dynamic page fails closed. NoClustering (in probeSignature) makes each a
+	// genuine round-trip so the 500ms request cache can't hide the variance.
+	origRaw := ip.BuildRequest([]byte(ip.BaseValue()))
+	det1, _, ok1 := m.probeSignature(ctx, httpClient, origRaw)
+	det2, _, ok2 := m.probeSignature(ctx, httpClient, origRaw)
+	if !ok1 || !ok2 {
+		return results, nil
+	}
+	if det1.statusCode != det2.statusCode || hasSubstantialBodyDifference(det1, det2) {
+		return results, nil // original value is non-deterministic — differential is noise
+	}
+
+	// Reproduction: re-send the wildcard and require its response to be stable. A
+	// one-off anomaly (a transient large page or error render) that happened to clear
+	// the deltas on the first probe will not reproduce here.
+	wildcardSig2, _, ok3 := m.probeSignature(ctx, httpClient, wildcardRaw)
+	if !ok3 {
+		return results, nil
+	}
+	if wildcardSig2.statusCode != wildcardSig.statusCode || hasSubstantialBodyDifference(wildcardSig, wildcardSig2) {
+		return results, nil // wildcard response is not reproducible
 	}
 
 	results = append(results, &output.ResultEvent{
@@ -254,6 +300,11 @@ func (m *Module) ScanPerInsertionPoint(
 		Info: output.Info{
 			Name:        "LDAP Injection: boolean-based",
 			Description: fmt.Sprintf("Wildcard injection in parameter %q produced a response that differs substantially from both the baseline and a no-match control, suggesting LDAP filter manipulation", ip.Name()),
+			// The wildcard differential is an in-band heuristic (a `*` may widen an
+			// ordinary application search just as it widens an LDAP filter), so it is
+			// reported Tentative even after the determinism/reproduction gates — below
+			// the error-based leg, whose LDAP-specific token match warrants Firm.
+			Confidence: severity.Tentative,
 		},
 	})
 
@@ -316,7 +367,12 @@ func (m *Module) probeSignature(
 	// re-parsing on this hot path.
 	req := httpmsg.NewRequestResponseRaw(rawReq, ctx.Service())
 
-	resp, _, err := httpClient.Execute(req, http.Options{})
+	// NoClustering: the boolean leg re-sends IDENTICAL requests to prove the endpoint
+	// is deterministic (the original value fetched twice) and that the wildcard
+	// response reproduces. The 500ms request-cluster cache keys on raw request bytes,
+	// so without this a re-fetch returns the first response's cached copy and the
+	// stability checks pass trivially even on a flapping endpoint.
+	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 	if err != nil {
 		if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 			return responseSignature{}, "", false
@@ -337,8 +393,14 @@ func isAccessDenied(status int) bool {
 	return status == 401 || status == 403 || status == 429 || status == 503
 }
 
-// isLDAPRelatedParam checks if a parameter name suggests LDAP involvement.
+// isLDAPRelatedParam checks if a parameter name suggests LDAP involvement. Fixed
+// standard request headers are excluded first: the short tokens below ("user", "dn",
+// "ou", …) substring-match browser headers (User-Agent, DNT) that carry no LDAP
+// query and only add noise/wasted probes if fuzzed with filter metacharacters.
 func isLDAPRelatedParam(name string) bool {
+	if infra.IsStandardRequestHeader(name) {
+		return false
+	}
 	nameLower := strings.ToLower(name)
 	for _, p := range ldapParamNames {
 		if strings.Contains(nameLower, p) {

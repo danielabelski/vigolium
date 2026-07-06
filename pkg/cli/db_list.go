@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -88,7 +89,7 @@ func registerListFlags(cmd *cobra.Command) {
 	cmd.Flags().IntSliceVar(&listStatus, "status", nil, "Filter records by HTTP status code (can be specified multiple times)")
 	cmd.Flags().StringVar(&listPath, "path", "", "Filter records by URL path pattern")
 	cmd.Flags().StringVar(&listScanUUID, "scan-uuid", "", "Filter records by scan UUID")
-	cmd.Flags().StringVar(&listSeverity, "severity", "", "Filter findings by severity: critical, high, medium, low, info")
+	cmd.Flags().StringVar(&listSeverity, "severity", "", "Filter findings by severity: critical,high,medium,low,suspect,info (comma-separated; single-letter shorthands ok, e.g. 'h,c')")
 	cmd.Flags().IntVar(&listMinRisk, "min-risk", 0, "Show only records with risk score at or above this value")
 	cmd.Flags().StringVar(&listRemark, "remark", "", "Filter records containing this text in remarks")
 	cmd.Flags().StringVar(&listModuleType, "module-type", "", "Filter findings by module type (active, passive, nuclei, secret-scan, agent, source-tools, oast, extension)")
@@ -212,7 +213,7 @@ func runListHTTPRecords(ctx context.Context, db *database.DB) error {
 
 	var severities []string
 	if listSeverity != "" {
-		severities = strings.Split(listSeverity, ",")
+		severities = parseSeverityList(listSeverity)
 	}
 
 	projectUUID, err := resolveProjectUUID()
@@ -282,7 +283,7 @@ func runListFindings(ctx context.Context, db *database.DB) error {
 
 	var severities []string
 	if listSeverity != "" {
-		severities = strings.Split(listSeverity, ",")
+		severities = parseSeverityList(listSeverity)
 	}
 
 	projectUUID, err := resolveProjectUUID()
@@ -655,101 +656,164 @@ func displayRaw(records []*database.HTTPRecord) error {
 	return nil
 }
 
-func displayTree(records []*database.HTTPRecord) error {
-	// Group records by host
-	hostMap := make(map[string][]*database.HTTPRecord)
-	for _, rec := range records {
-		key := fmt.Sprintf("%s://%s:%d", rec.Scheme, rec.Hostname, rec.Port)
-		hostMap[key] = append(hostMap[key], rec)
+// warnIfCapped prints a stderr hint when a listing was truncated by the row cap
+// (total exceeds what was shown), so the user knows the view is partial and how
+// to widen it. A no-op when nothing was cut. Written to stderr to keep piped
+// stdout clean.
+func warnIfCapped(shown int, total int64) {
+	if total > int64(shown) {
+		fmt.Fprintf(os.Stderr, "%s Output capped by --limit (%s of %s). Pass %s to show more (%s for all).\n",
+			terminal.WarningSymbol(),
+			terminal.BoldYellow(fmt.Sprintf("%d", shown)),
+			terminal.BoldRed(fmt.Sprintf("%d", total)),
+			terminal.BoldCyan("-n/--limit"),
+			terminal.BoldCyan("-n 0"))
 	}
+}
 
-	for hostKey, hostRecords := range hostMap {
-		fmt.Printf("└── %s %s\n",
+// displayTree renders the queried HTTP records as a database → host → path →
+// request tree. The database path is the root node; each level's connectors are
+// composed from its ancestors' prefixes (via treeBranch) so the vertical guide
+// lines stay aligned all the way down. Under --glob-db there is one db-path root
+// per merged source file so each record's origin is visible.
+func displayTree(records []*database.HTTPRecord) error {
+	for _, root := range splitRecordsBySource(records) {
+		fmt.Println(terminal.Bold(root.label))
+		renderRecordHostTree(root.records)
+	}
+	return nil
+}
+
+// recordRoot is one traffic-tree root: a db-path label and the records under it.
+type recordRoot struct {
+	label   string
+	records []*database.HTTPRecord
+}
+
+// splitRecordsBySource groups records into per-root blocks: a single root (the
+// DB path) for a plain read, or one root per --glob-db source file (in merge
+// order) so each record is shown beneath the database it came from. Records that
+// can't be attributed fall back to a shared root.
+func splitRecordsBySource(records []*database.HTTPRecord) []recordRoot {
+	if globDBMergedCount() == 0 {
+		return []recordRoot{{label: displayDBPath(), records: records}}
+	}
+	byFile := make(map[string][]*database.HTTPRecord)
+	var unattributed []*database.HTTPRecord
+	for _, rec := range records {
+		if file := globSourceForRecord(rec.UUID); file != "" {
+			byFile[file] = append(byFile[file], rec)
+		} else {
+			unattributed = append(unattributed, rec)
+		}
+	}
+	var roots []recordRoot
+	for _, s := range globDBSources {
+		if rs := byFile[s.file]; len(rs) > 0 {
+			roots = append(roots, recordRoot{label: terminal.ShortenHome(s.file), records: rs})
+		}
+	}
+	if len(unattributed) > 0 {
+		roots = append(roots, recordRoot{label: displayDBPath(), records: unattributed})
+	}
+	return roots
+}
+
+// renderRecordHostTree prints the host → path → request subtree beneath an
+// already-printed root line.
+func renderRecordHostTree(records []*database.HTTPRecord) {
+	// Group records by host, preserving first-seen order for stable output.
+	hostKeys, hostMap := groupTreeRecords(records, func(rec *database.HTTPRecord) string {
+		return fmt.Sprintf("%s://%s:%d", rec.Scheme, rec.Hostname, rec.Port)
+	})
+
+	for hi, hostKey := range hostKeys {
+		hostRecords := hostMap[hostKey]
+		hostConnector, hostChildBar := treeBranch(hi == len(hostKeys)-1)
+
+		fmt.Printf("%s%s %s\n",
+			hostConnector,
 			terminal.BoldCyan(hostKey),
 			terminal.BoldMagenta(fmt.Sprintf("(%d records)", len(hostRecords))))
 
-		// Group by path prefix
-		pathMap := make(map[string][]*database.HTTPRecord)
-		for _, rec := range hostRecords {
+		// Group by first path segment, preserving first-seen order.
+		pathKeys, pathMap := groupTreeRecords(hostRecords, func(rec *database.HTTPRecord) string {
 			pathParts := strings.Split(rec.Path, "/")
-			prefix := "/"
 			if len(pathParts) > 1 && pathParts[1] != "" {
-				prefix = "/" + pathParts[1]
+				return "/" + pathParts[1]
 			}
-			pathMap[prefix] = append(pathMap[prefix], rec)
-		}
+			return "/"
+		})
 
-		pathIndex := 0
-		for pathPrefix, pathRecords := range pathMap {
-			pathIndex++
-			isLast := pathIndex == len(pathMap)
-			connector := "├──"
-			if isLast {
-				connector = "└──"
-			}
+		for pi, pathPrefix := range pathKeys {
+			pathRecords := pathMap[pathPrefix]
+			pathConnector, pathChildBar := treeBranch(pi == len(pathKeys)-1)
 
-			fmt.Printf("    %s %s\n", connector, pathPrefix)
+			fmt.Printf("%s%s%s\n", hostChildBar, pathConnector, pathPrefix)
 
+			reqPrefix := hostChildBar + pathChildBar
 			for reqIndex, rec := range pathRecords {
-				isLastReq := reqIndex == len(pathRecords)-1
-				reqConnector := "│   ├──"
-				if isLast {
-					reqConnector = "    ├──"
-				}
-				if isLastReq {
-					if isLast {
-						reqConnector = "    └──"
-					} else {
-						reqConnector = "│   └──"
-					}
-				}
+				reqConnector, _ := treeBranch(reqIndex == len(pathRecords)-1)
 
-				respPart := ""
-				if rec.HasResponse {
-					statusColor := terminal.Green
-					if rec.StatusCode >= 400 {
-						statusColor = terminal.Yellow
-					}
-					if rec.StatusCode >= 500 {
-						statusColor = terminal.Red
-					}
-					respPart = fmt.Sprintf(" %s %s %s",
-						terminal.BoldMagenta("→"),
-						statusColor(fmt.Sprintf("%d", rec.StatusCode)),
-						terminal.Gray(fmt.Sprintf("(%dms, %dB, %dW)", rec.ResponseTimeMs, rec.ResponseContentLength, rec.ResponseWords)))
-
-					if rec.ResponseContentType != "" {
-						ct := rec.ResponseContentType
-						if idx := strings.Index(ct, ";"); idx > 0 {
-							ct = ct[:idx]
-						}
-						respPart += " " + terminal.Orange(ct)
-					}
-
-					if rec.ResponseTitle != "" {
-						title := rec.ResponseTitle
-						if len(title) > 40 {
-							title = title[:37] + "..."
-						}
-						respPart += " " + terminal.Cyan(fmt.Sprintf("%q", title))
-					}
-
-					if rec.RiskScore > 0 {
-						respPart += " " + terminal.BoldYellow(fmt.Sprintf("[risk:%d]", rec.RiskScore))
-					}
-				}
-
-				fmt.Printf("%s %s %s%s\n",
+				fmt.Printf("%s%s%s %s%s\n",
+					reqPrefix,
 					reqConnector,
 					terminal.Cyan(rec.Method),
 					terminal.White(rec.Path),
-					respPart)
+					treeRecordSuffix(rec))
 			}
 		}
-		fmt.Println()
+	}
+}
+
+// groupTreeRecords buckets records by key(rec) while preserving the order in
+// which each distinct key first appears, so the tree is deterministic and
+// reflects record order rather than Go's random map iteration.
+func groupTreeRecords(records []*database.HTTPRecord, key func(*database.HTTPRecord) string) ([]string, map[string][]*database.HTTPRecord) {
+	var order []string
+	groups := make(map[string][]*database.HTTPRecord)
+	for _, rec := range records {
+		k := key(rec)
+		if _, seen := groups[k]; !seen {
+			order = append(order, k)
+		}
+		groups[k] = append(groups[k], rec)
+	}
+	return order, groups
+}
+
+// treeRecordSuffix renders the response summary shown after a request line in
+// the tree (status, timing/size, content-type, title, risk score).
+func treeRecordSuffix(rec *database.HTTPRecord) string {
+	if !rec.HasResponse {
+		return ""
 	}
 
-	return nil
+	statusColor := terminal.Green
+	if rec.StatusCode >= 400 {
+		statusColor = terminal.Yellow
+	}
+	if rec.StatusCode >= 500 {
+		statusColor = terminal.Red
+	}
+	suffix := fmt.Sprintf(" %s %s %s",
+		terminal.BoldMagenta("→"),
+		statusColor(fmt.Sprintf("%d", rec.StatusCode)),
+		terminal.Gray(fmt.Sprintf("(%dms, %dB, %dW)", rec.ResponseTimeMs, rec.ResponseContentLength, rec.ResponseWords)))
+
+	if rec.ResponseContentType != "" {
+		suffix += " " + terminal.Orange(shortContentType(rec.ResponseContentType))
+	}
+
+	if rec.ResponseTitle != "" {
+		suffix += " " + terminal.Cyan(fmt.Sprintf("%q", clicommon.Truncate(rec.ResponseTitle, 40)))
+	}
+
+	if rec.RiskScore > 0 {
+		suffix += " " + terminal.BoldYellow(fmt.Sprintf("[risk_score:%d]", rec.RiskScore))
+	}
+
+	return suffix
 }
 
 func displayTable(records []*database.HTTPRecord, total int64, offset, _ int) error {

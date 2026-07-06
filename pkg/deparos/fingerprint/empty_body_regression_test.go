@@ -100,7 +100,7 @@ func TestNewSampleFromRC_EmptyBodyHTML(t *testing.T) {
 
 // TestLearner_307RedirectEmptyBody tests that learner handles 307 redirects with empty body correctly
 func TestLearner_307RedirectEmptyBody(t *testing.T) {
-	// Simulate gcas.stryker.com behavior: 307 redirect with empty body and dynamic Location
+	// Simulate gcas.globex.com behavior: 307 redirect with empty body and dynamic Location
 	requestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++

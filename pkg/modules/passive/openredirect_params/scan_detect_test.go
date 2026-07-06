@@ -65,7 +65,7 @@ func TestScanPerRequest_Benign(t *testing.T) {
 }
 
 // TestScanPerRequest_NonURLValueSkipped is the regression for the dominant
-// false-positive class across the Snapchat scan corpus: a parameter whose *name*
+// false-positive class across the Hooli scan corpus: a parameter whose *name*
 // matches a redirect keyword but whose *value* can never be a redirect target.
 // "location=Boulder" (a job-search city filter), "cb=<timestamp>" (a cache
 // buster), and a long identifier whose name merely contains "url" must all be

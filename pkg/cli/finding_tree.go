@@ -45,6 +45,18 @@ func treeBranch(isLast bool) (connector, childBar string) {
 func displayFindingTree(db *database.DB, ctx context.Context, findings []*database.Finding, total int64) error {
 	printFindingsSummary(db, ctx, len(findings), total)
 
+	// One db-path root per source: a single root for a plain DB, or one per
+	// merged file under --glob-db so each finding's origin file is visible.
+	for _, root := range splitFindingsBySource(findings) {
+		fmt.Println(terminal.Bold(root.label))
+		renderFindingHostTree(root.findings)
+	}
+	return nil
+}
+
+// renderFindingHostTree prints the host → path-prefix → finding subtree beneath
+// an already-printed root line.
+func renderFindingHostTree(findings []*database.Finding) {
 	// Group by host, preserving a sorted, deterministic order.
 	hostMap := make(map[string][]*database.Finding)
 	for _, f := range findings {
@@ -57,9 +69,11 @@ func displayFindingTree(db *database.DB, ctx context.Context, findings []*databa
 	}
 	sort.Strings(hostKeys)
 
-	for _, hostKey := range hostKeys {
+	for hi, hostKey := range hostKeys {
 		hostFindings := hostMap[hostKey]
-		fmt.Printf("└── %s %s %s\n",
+		hostConnector, hostChildBar := treeBranch(hi == len(hostKeys)-1)
+		fmt.Printf("%s%s %s %s\n",
+			hostConnector,
 			terminal.BoldCyan(hostKey),
 			terminal.BoldMagenta(fmt.Sprintf("(%d findings)", len(hostFindings))),
 			findingHostSeverityTag(hostFindings))
@@ -77,24 +91,58 @@ func displayFindingTree(db *database.DB, ctx context.Context, findings []*databa
 		sort.Strings(pathPrefixes)
 
 		for pi, prefix := range pathPrefixes {
-			pathConnector, childBar := treeBranch(pi == len(pathPrefixes)-1)
-			fmt.Printf("    %s%s\n", pathConnector, prefix)
-			printFindingGroups(groupPathFindings(pathMap[prefix]), childBar)
+			pathConnector, pathChildBar := treeBranch(pi == len(pathPrefixes)-1)
+			fmt.Printf("%s%s%s\n", hostChildBar, pathConnector, prefix)
+			printFindingGroups(groupPathFindings(pathMap[prefix]), hostChildBar+pathChildBar)
 		}
-		fmt.Println()
 	}
-	return nil
+}
+
+// findingRoot is one tree root: a db-path label and the findings shown under it.
+type findingRoot struct {
+	label    string
+	findings []*database.Finding
+}
+
+// splitFindingsBySource groups findings into per-root blocks. For a plain DB
+// read this is a single root (the DB path). Under --glob-db it's one root per
+// source file (in merge order) so each finding is shown beneath the database it
+// came from; any finding that can't be attributed falls back to a shared root.
+func splitFindingsBySource(findings []*database.Finding) []findingRoot {
+	if globDBMergedCount() == 0 {
+		return []findingRoot{{label: displayDBPath(), findings: findings}}
+	}
+	byFile := make(map[string][]*database.Finding)
+	var unattributed []*database.Finding
+	for _, f := range findings {
+		if file := globSourceForFinding(f.ID); file != "" {
+			byFile[file] = append(byFile[file], f)
+		} else {
+			unattributed = append(unattributed, f)
+		}
+	}
+	var roots []findingRoot
+	for _, s := range globDBSources {
+		if fs := byFile[s.file]; len(fs) > 0 {
+			roots = append(roots, findingRoot{label: terminal.ShortenHome(s.file), findings: fs})
+		}
+	}
+	if len(unattributed) > 0 {
+		roots = append(roots, findingRoot{label: displayDBPath(), findings: unattributed})
+	}
+	return roots
 }
 
 // printFindingGroups renders each collapsed title group under a path: the group
-// leaf, then one line per affected URL (in white) with its reporting id.
-func printFindingGroups(groups []*findingPathGroup, childBar string) {
+// leaf, then one line per affected URL (in white) with its reporting id. prefix
+// is the accumulated indentation of all ancestor levels (host + path bars).
+func printFindingGroups(groups []*findingPathGroup, prefix string) {
 	for gi, g := range groups {
 		gConnector, gChildBar := treeBranch(gi == len(groups)-1)
-		fmt.Printf("    %s%s%s\n", childBar, gConnector, formatFindingGroupLeaf(g))
+		fmt.Printf("%s%s%s\n", prefix, gConnector, formatFindingGroupLeaf(g))
 		for _, u := range g.urls {
-			fmt.Printf("    %s%s    %s %s  %s\n",
-				childBar, gChildBar,
+			fmt.Printf("%s%s    %s %s  %s\n",
+				prefix, gChildBar,
 				terminal.BoldMagenta("→"),
 				terminal.White(u.url),
 				terminal.Gray(fmt.Sprintf("#%d", u.id)))

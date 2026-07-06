@@ -134,7 +134,7 @@ func mkLink(t *testing.T, rawURL string, src spider.LinkSourceType) *spider.Disc
 // TestCollectValidatedLinks_NoEagerConfirmUnderConfirmRequired proves that under
 // ConfirmRequired (the default) a spider link NEVER confirms a server-side
 // extension on its own — not a same-host <a href>, not a cross-host one, not a
-// JS-scraped path. This is the engineering.grab.com regression: /sharer.php (FB
+// JS-scraped path. This is the engineering.initech.com regression: /sharer.php (FB
 // share button), /citation.cfm (ACM link), and /Blog/Pages/x.aspx (MSDN link)
 // were all "confirmed" from <a href>s on a static blog. Confirmation is now
 // deferred to the served path; filenames are still harvested for discovery.
@@ -211,7 +211,7 @@ func TestOnFileDiscovered_ConfirmsServedExtensionInScope(t *testing.T) {
 	}
 }
 
-// TestOnFileDiscovered_BruteForcedHitDoesNotConfirm is the partnergears.grab.com
+// TestOnFileDiscovered_BruteForcedHitDoesNotConfirm is the partnergears.initech.com
 // regression: a brute-force fuzz wordlist guess (/axis2//axis2-web/HappyAxis.jsp,
 // fuzz.txt) answered with a non-soft-404 200 by a catch-all SPA shell reached
 // OnFileDiscovered and "confirmed" .jsp via the observed source, queuing a full

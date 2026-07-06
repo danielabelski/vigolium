@@ -107,7 +107,7 @@ func TestScanPerRequest_NoSignalNonID(t *testing.T) {
 }
 
 // TestScanPerRequest_TelemetryNumericNotIDOR is the regression for the noisiest
-// idor-params-detect false positive observed across the Snapchat scan corpus:
+// idor-params-detect false positive observed across the Hooli scan corpus:
 // analytics/telemetry parameters carry big integers (a bandwidth reading, a
 // metric, an HTTP status echoed back, a page number) that are not object
 // references. A bare numeric value with no identifier name and no resource-noun

@@ -2,13 +2,13 @@ package ssrf_blind
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/vigolium/vigolium/pkg/core/hosterrors"
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/utils"
@@ -126,21 +126,11 @@ func (m *Module) ScanPerInsertionPoint(
 	return nil, nil
 }
 
-// looksLikeURLParam checks if a parameter name or value suggests URL input.
+// looksLikeURLParam reports whether a parameter looks like a URL sink. It delegates
+// to the shared infra helper so the standard-request-header exclusion (Referer /
+// Origin / Upgrade-Insecure-Requests / … are never fetch sinks) stays consistent
+// across the SSRF family — this local copy previously mis-scoped OAST probes onto
+// those standard headers.
 func looksLikeURLParam(name, value string) bool {
-	nameLower := strings.ToLower(name)
-	urlParamNames := []string{
-		"url", "uri", "link", "src", "href", "dest", "redirect",
-		"path", "file", "page", "target", "callback", "endpoint",
-		"resource", "fetch", "load", "proxy", "request",
-	}
-	for _, n := range urlParamNames {
-		if strings.Contains(nameLower, n) {
-			return true
-		}
-	}
-	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "//") {
-		return true
-	}
-	return false
+	return infra.LooksLikeURLParam(name, value)
 }

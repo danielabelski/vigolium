@@ -26,7 +26,7 @@ func TestRootWildcardFiltering(t *testing.T) {
 	defer SetLogger(zap.NewNop())
 
 	// Server that redirects ALL paths to /login
-	// This simulates www.hyattconnect.com behavior
+	// This simulates www.contoso.com behavior
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Logf("Server received: %s", r.URL.Path)
 
@@ -406,20 +406,20 @@ func TestWildcardValidation_SingleCharPaths(t *testing.T) {
 	assert.Equal(t, TruePositive, result, "/a should be TruePositive - it's a real 200 OK resource")
 }
 
-// TestDebugHyattConnectScenario simulates the exact behavior from the bug report
-func TestDebugHyattConnectScenario(t *testing.T) {
+// TestDebugContosoScenario simulates the exact behavior from the bug report
+func TestDebugContosoScenario(t *testing.T) {
 	// Enable debug logging
 	zapLogger, _ := zap.NewDevelopment()
 	SetLogger(zapLogger)
 	defer SetLogger(zap.NewNop())
 
-	// Simulate the hyattconnect.com scenario:
+	// Simulate the contoso.com scenario:
 	// - All paths at /site/hc/static/site/* redirect to login
 	// - Root paths may also redirect to login
 
 	pathBehavior := func(path string) (int, string, string) {
 		// Simulate redirect for all paths
-		return 302, "https://login.hyattconnect.com/", `<html><body>Redirect</body></html>`
+		return 302, "https://login.contoso.com/", `<html><body>Redirect</body></html>`
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

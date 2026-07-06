@@ -264,6 +264,24 @@ func (m *Module) ScanPerRequest(
 					continue
 				}
 
+				// Independent catch-all sample. The root/nonExistent references above
+				// are captured ONCE at the top of the scan and can be poisoned by a
+				// transient throttle at capture time (the WAF/CDN-flake false-positive
+				// class): on a host whose deep unknown paths render an app-shell that
+				// differs from "/", a poisoned nonExistent reference lets the shell
+				// through. RandomDirCatchAll adds a freshly-memoized
+				// random-web-root-directory shell sample a single poisoned capture
+				// cannot disable; it fails open (a non-2xx control is "not a
+				// catch-all"), so a genuine internal resource is never suppressed. It
+				// runs only after the local oracle admits the candidate, so the
+				// (memoized) probe never fires for a record that has no candidate worth
+				// reporting.
+				if modkit.RandomDirCatchAll(scanCtx, ctx, httpClient, func(b string) bool {
+					return modkit.BodiesSimilarSig(backedSig, b)
+				}) {
+					continue
+				}
+
 				// Reproducibility: a genuine bypass is deterministic. Re-fetch the
 				// backed-off path with the cache bypassed and require the same 2xx
 				// resource with a stable body.

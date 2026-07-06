@@ -352,6 +352,81 @@ func RandomDirCatchAll(
 	return match(res.body)
 }
 
+// RootPageCatchAll GETs the site root ("/") — memoized per observed record — and
+// reports whether its 2xx body satisfies match. On a single-page application the
+// root serves the same client-side shell for every unknown route, so a path
+// probe whose body matches the root is that shell rather than a distinct
+// resource. It is the site-root companion to RandomDirCatchAll (which probes a
+// random nonexistent directory): the two are INDEPENDENT shell samples, so a
+// caller that OR-s them tolerates a WAF/CDN that intermittently blocks or
+// throttles a single probe — the failure mode that lets a wildcard-shell
+// response slip past a lone control. Runs with NoRedirects (a 30x root is not a
+// served shell) and NoClustering (so the probe is not aliased to a cached entry).
+// Returns false on any build/transport error or a non-2xx root, so a flaky root
+// fetch never suppresses a real finding (fail-open toward "not a catch-all").
+func RootPageCatchAll(
+	sc *ScanContext,
+	ctx *httpmsg.HttpRequestResponse,
+	client *http.Requester,
+	match func(body string) bool,
+) bool {
+	if match == nil {
+		return false
+	}
+	res := sc.decoyProbe(ctx, client, "rootpage", "/", "", http.Options{NoRedirects: true, NoClustering: true},
+		func(string) string { return "/" })
+	if !res.ok || res.status < 200 || res.status >= 300 {
+		return false
+	}
+	return match(res.body)
+}
+
+// ResemblesCatchAllShell reports whether hitBody is the host's catch-all
+// application shell rather than a distinct resource produced by a path probe. It
+// is the shared, WAF-flake-robust guard against the wildcard-SPA false positive
+// that path-mangling modules (off-by-slash alias traversal, path normalization,
+// proxy path confusion) share: a wildcard SPA / reverse proxy serves one
+// index.html for EVERY unknown path, so a probe's "successful" 2xx body is just
+// that shell. A lone control probe cannot see this reliably on a WAF/CDN-fronted
+// host — each control is one request that fails (open or closed) the moment it is
+// throttled to a non-2xx — so this confirms the shell POSITIVELY from several
+// INDEPENDENT samples and OR-s them, and no single flaky probe can hide the
+// catch-all:
+//   - the page originally observed on ctx (ResemblesObservedPage — zero traffic),
+//   - a random nonexistent directory at the web root (RandomDirCatchAll), and
+//   - the site root "/" (RootPageCatchAll).
+//
+// All three compare with the dynamic-content-robust BodiesSimilar (QuickRatio),
+// so per-request tokens/timestamps in the shell do not defeat the match. A
+// genuinely distinct resource — an escaped source/config file, a real admin page
+// — is never ~equal to the homepage or a random-directory response, so the guard
+// costs no true positives. The two directory/root probes are memoized per
+// observed record (via decoyProbe), so calling this once per candidate in a probe
+// loop issues at most two extra requests for the whole record.
+//
+// CAUTION: the site-root sample makes this unsuitable for a detector whose
+// genuine hit can legitimately equal the home page (e.g. an index.php PATH_INFO
+// misconfig where /index.php renders the homepage) — such a module should call
+// ResemblesObservedPage + RandomDirCatchAll directly and skip RootPageCatchAll.
+func ResemblesCatchAllShell(
+	scanCtx *ScanContext,
+	ctx *httpmsg.HttpRequestResponse,
+	client *http.Requester,
+	hitBody string,
+) bool {
+	// Tokenize the hit body once and reuse the signature for the observed-page
+	// compare and both shell probes.
+	hitSig := BodySignature(hitBody)
+	if ResemblesObservedPageSig(ctx, hitSig) {
+		return true
+	}
+	shellMatch := func(b string) bool { return BodiesSimilarSig(hitSig, b) }
+	if RandomDirCatchAll(scanCtx, ctx, client, shellMatch) {
+		return true
+	}
+	return RootPageCatchAll(scanCtx, ctx, client, shellMatch)
+}
+
 // MultiRoundExtDecoyCatchAll probes `rounds` distinct guaranteed-nonexistent
 // siblings that share probePath's parent directory AND file extension (e.g.
 // /WEB-INF/vigolium-decoy-<rand>.xml for /WEB-INF/web.xml) and reports whether
@@ -499,17 +574,24 @@ func SiblingServesAnyMarker(
 // listing) is never ~95% similar to the homepage shell, so the guard does not
 // cost true positives.
 func ResemblesObservedPage(ctx *httpmsg.HttpRequestResponse, probeBody string) bool {
+	return ResemblesObservedPageSig(ctx, newRatioSignature(probeBody))
+}
+
+// ResemblesObservedPageSig is the precomputed-signature form of
+// ResemblesObservedPage: a caller that already holds the probe body's ratio
+// signature (e.g. ResemblesCatchAllShell, which reuses it for the shell probes)
+// passes it here to avoid tokenizing the probe body a second time.
+func ResemblesObservedPageSig(ctx *httpmsg.HttpRequestResponse, probeSig ResponseSignature) bool {
 	if ctx == nil || ctx.Response() == nil {
 		return false
 	}
 	// The observed baseline is constant across a module's probe loop, so its
-	// ratio signature is memoized on the response and reused per probe; only the
-	// probe body is tokenized each call.
+	// ratio signature is memoized on the response and reused per probe.
 	baselineSig := observedPageSignature(ctx.Response())
 	if baselineSig.BodyLength == 0 {
 		return false
 	}
-	return QuickRatio(newRatioSignature(probeBody), baselineSig) >= UpperRatioBound
+	return QuickRatio(probeSig, baselineSig) >= UpperRatioBound
 }
 
 // StripReflectedProbePath removes occurrences of the probe path from body so a

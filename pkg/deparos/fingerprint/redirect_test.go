@@ -119,9 +119,9 @@ func TestRedirectSoftFalsePositive(t *testing.T) {
 // to the same location and should be filtered as soft-404.
 func TestRedirectVariantFiltering(t *testing.T) {
 	// Server behavior: ALL paths redirect to homepage
-	// This simulates the real gcas.stryker.com behavior
+	// This simulates the real gcas.globex.com behavior
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Location", "https://gcas.stryker.com/")
+		w.Header().Set("Location", "https://gcas.globex.com/")
 		w.WriteHeader(302)
 	}))
 	defer server.Close()

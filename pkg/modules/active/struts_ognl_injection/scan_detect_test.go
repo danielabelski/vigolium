@@ -169,7 +169,7 @@ func TestScanPerRequest_DetectsHeaderAddOGNL(t *testing.T) {
 	require.NotEmpty(t, res, "expected an OGNL finding when the addHeader marker is returned as a real response header")
 }
 
-// TestScanPerRequest_ReflectedContentTypeErrorNotFlagged is the Snapchat
+// TestScanPerRequest_ReflectedContentTypeErrorNotFlagged is the Hooli
 // camera-kit / gRPC gateway false positive: a 415 "Content-Type '<payload>' is not
 // supported" error echoes the injected Content-Type verbatim into the body AND into
 // a Grpc-Message header value. The reflected text carries both "X-Struts-Test" and
@@ -190,7 +190,7 @@ func TestScanPerRequest_ReflectedContentTypeErrorNotFlagged(t *testing.T) {
 	defer srv.Close()
 
 	client := modtest.Requester(t)
-	rr := modtest.Request(t, srv.URL+"/snapchat.cdp.cof.CircumstancesService/targetingQuery")
+	rr := modtest.Request(t, srv.URL+"/hooli.cdp.cof.CircumstancesService/targetingQuery")
 
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)

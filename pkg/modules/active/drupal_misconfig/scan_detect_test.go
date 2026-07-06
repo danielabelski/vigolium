@@ -59,7 +59,7 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 // catchAllShell is a themed SPA / catch-all application shell that returns 200
 // with the same body for almost any path. It contains the generic words the
 // old single-marker probes keyed on ("update", "install", "database") but no
-// Drupal-identity anchor — exactly the vn.einvoice.grab.com case. A distinct
+// Drupal-identity anchor — exactly the vn.einvoice.initech.com case. A distinct
 // body is served for the random 404-fingerprint path so the fingerprint alone
 // cannot suppress the finding; the co-occurrence markers and baseline-shell
 // guard must.
@@ -70,7 +70,7 @@ const catchAllShell = `<!DOCTYPE html><html><head><title>Hóa đơn điện tử
 	`<main>Welcome to the invoice portal. Please sign in to continue.</main></body></html>`
 
 // TestScanPerRequest_CatchAllShellNoFalsePositive reproduces the
-// vn.einvoice.grab.com false positive: an ASP.NET catch-all that 200s every
+// vn.einvoice.initech.com false positive: an ASP.NET catch-all that 200s every
 // path with the same app shell (containing weak words like "update"/"install")
 // must not be reported as an exposed Drupal endpoint, because no Drupal-identity
 // anchor co-occurs.

@@ -683,11 +683,17 @@ func (m *Module) runBooleanProbeSet(
 		if s.blocked || s.nosqlErr {
 			return nil, nil, nil, probeSkipPair, nil
 		}
+		// Status discipline (all branches): a NoSQL boolean oracle returns 2xx for
+		// every branch — the same endpoint rendering a different result set. A branch
+		// that flips to a 3xx redirect / 4xx / 5xx is a status artifact (auth bounce,
+		// error page), not query control, so the true/false differential would be a
+		// status flip. Previously only condTrue was gated, and it accepted 3xx; require
+		// strict 2xx on every branch (mirrors sqli_boolean_blind's statusOK).
+		if s.status < 200 || s.status >= 300 {
+			return nil, nil, nil, probeSkipPair, nil
+		}
 		switch cond {
 		case condTrue:
-			if s.status < 200 || s.status >= 400 {
-				return nil, nil, nil, probeSkipPair, nil
-			}
 			trueBodies = append(trueBodies, s.body)
 		case condFalse:
 			falseBodies = append(falseBodies, s.body)

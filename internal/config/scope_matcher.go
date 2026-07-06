@@ -574,9 +574,9 @@ func (m *ScopeMatcher) hostMatchesSingleOrigin(host string, ot *originTarget) bo
 		}
 		// Match the keyword against the host's registrable-domain leading label
 		// (the eTLD+1 label), NOT the full hostname. This keeps same-org hosts on
-		// other TLDs / brand domains in scope (e.g. keyword "roche" matches
-		// roche.io, rochegroup.com) while rejecting unrelated third parties whose
-		// subdomain merely contains the keyword — e.g. rochegroup.cloudflareaccess.com,
+		// other TLDs / brand domains in scope (e.g. keyword "acme" matches
+		// acme.io, acmegroup.com) while rejecting unrelated third parties whose
+		// subdomain merely contains the keyword — e.g. acmegroup.cloudflareaccess.com,
 		// a Cloudflare SSO wall whose registrable label is "cloudflareaccess", not
 		// a match. A bare strings.Contains(host, keyword) would wrongly admit it.
 		hostETLD, err := publicsuffix.EffectiveTLDPlusOne(host)
@@ -593,7 +593,7 @@ func (m *ScopeMatcher) hostMatchesSingleOrigin(host string, ot *originTarget) bo
 }
 
 // leadingLabel returns the registrable-domain label of an eTLD+1 — the label
-// before its first dot: "roche.com" → "roche", "example.co.uk" → "example".
+// before its first dot: "acme.com" → "acme", "example.co.uk" → "example".
 // A dotless input (no eTLD+1) is returned unchanged.
 func leadingLabel(etldPlus1 string) string {
 	label, _, _ := strings.Cut(etldPlus1, ".")

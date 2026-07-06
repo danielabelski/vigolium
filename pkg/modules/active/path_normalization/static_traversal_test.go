@@ -176,7 +176,7 @@ func TestStaticTraversal_NoFalsePositiveOnNormalStatic(t *testing.T) {
 
 // TestStaticTraversal_NoFalsePositivePublicFileAtWebRoot is the regression guard
 // for the reported false positive (arcadiacreativestudio.com /
-// @snapchat/mw-web-production): the matrix/encoded-slash path
+// @hooli/mw-web-production): the matrix/encoded-slash path
 // `/mwp;/..%2fpackage.json` normalizes server-side to `/package.json`, which the
 // host already serves publicly at the web root. The clean canonical path returns
 // the identical file and a bogus filename simply 404s, so the decoy control alone
@@ -185,7 +185,7 @@ func TestStaticTraversal_NoFalsePositiveOnNormalStatic(t *testing.T) {
 // so the clean-canonical control must suppress it.
 func TestStaticTraversal_NoFalsePositivePublicFileAtWebRoot(t *testing.T) {
 	t.Parallel()
-	const pkgJSON = `{"name":"@snapchat/mw-web-production","version":"1.0.1","dependencies":{"react":"^18.2.0","express":"^4.18.2"}}`
+	const pkgJSON = `{"name":"@hooli/mw-web-production","version":"1.0.1","dependencies":{"react":"^18.2.0","express":"^4.18.2"}}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The front-end normalizes any `..%2f`/`;` traversal down to its clean
 		// resolution before routing, so the shell and the clean path behave

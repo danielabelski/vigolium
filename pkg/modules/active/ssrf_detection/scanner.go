@@ -368,7 +368,32 @@ func (m *Module) confirmSSRFMarker(
 	if controlBlocked {
 		return false
 	}
-	return !strings.Contains(strings.ToLower(controlBody), markerLower)
+	if strings.Contains(strings.ToLower(controlBody), markerLower) {
+		return false
+	}
+	if !generic {
+		return true
+	}
+
+	// (2b) Non-determinism guard — GENERIC markers only. The generic case rests
+	// entirely on "the page differs for an internal vs. the original URL". That
+	// inference is only valid if the endpoint answers the SAME input the SAME way.
+	// Many login/workflow endpoints instead flap between a 200 HTML page and a 302
+	// redirect (rotating session tokens) independent of the payload — and one unlucky
+	// draw (payload→200 HTML, control→302 empty) mimics a proxied fetch exactly. This
+	// is the fcworkflow.acme.com false positive: a `http://127.1` probe followed a
+	// 302→200 redirect chain to the login page while the controls captured the raw
+	// 302. Re-fetch the original value a second time and require the two control
+	// responses to AGREE (both marker-free and mutually similar). A flapping endpoint
+	// disagrees across the two fetches and the generic finding is dropped.
+	control2Body, control2Blocked, ok2 := m.fetchBody(ctx, httpClient, controlRaw, ev, "control stability")
+	if !ok2 || control2Blocked {
+		return false
+	}
+	if strings.Contains(strings.ToLower(control2Body), markerLower) {
+		return false
+	}
+	return modkit.BodiesSimilar(controlBody, control2Body)
 }
 
 // fetchBody re-issues a raw request and returns its response body and whether the
@@ -379,7 +404,13 @@ func (m *Module) fetchBody(ctx *httpmsg.HttpRequestResponse, httpClient *http.Re
 	// BuildRequest produces well-formed raw, so wrap directly instead
 	// of re-parsing on this hot path.
 	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
-	resp, _, err := httpClient.Execute(req, http.Options{})
+	// NoClustering: every confirm fetch (reproduce, sibling, control, stability)
+	// must be a genuine network round-trip. The 500ms request-cluster cache keys on
+	// raw request bytes, so a clustered re-fetch of the same request returns the
+	// first response verbatim — a re-sent control would always "reproduce" and the
+	// two stability samples would always match, hiding a flapping endpoint (the
+	// fcworkflow.acme.com non-determinism this confirmation exists to catch).
+	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 	if err != nil {
 		return "", false, false
 	}
@@ -400,19 +431,13 @@ func isBlockedResponse(resp *httputil.ResponseChain) bool {
 	return infra.IsBlockedResponse(resp)
 }
 
-// looksLikeURLParam checks if a parameter name or value suggests URL input.
+// looksLikeURLParam reports whether a parameter looks like a URL sink. It delegates
+// to the shared infra helper so the standard-request-header exclusion (Referer /
+// Origin / Upgrade-Insecure-Requests / … are never fetch sinks, whatever their
+// URL-like name or value — the fcworkflow.acme.com false positives) stays
+// consistent across the SSRF family.
 func looksLikeURLParam(name, value string) bool {
-	nameLower := strings.ToLower(name)
-	urlParamNames := []string{"url", "uri", "link", "src", "href", "dest", "redirect", "path", "file", "page", "target", "callback", "endpoint", "resource", "fetch", "load", "proxy", "request"}
-	for _, n := range urlParamNames {
-		if strings.Contains(nameLower, n) {
-			return true
-		}
-	}
-	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "//") {
-		return true
-	}
-	return false
+	return infra.LooksLikeURLParam(name, value)
 }
 
 // benignSiblingURL is a structurally-identical absolute URL (RFC 5737 TEST-NET-1

@@ -1,9 +1,11 @@
 package ldap_injection
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -103,6 +105,75 @@ func TestScanPerInsertionPoint_NonLDAPParamSkipped(t *testing.T) {
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "a non-LDAP parameter must be skipped")
+}
+
+// TestScanPerInsertionPoint_BooleanStatusFlipNotLDAP: the wildcard `*` produces a
+// large body but on a NON-2xx status (a 500 error render / 302 redirect), while the
+// baseline and control are 200. The old logic (isAccessDenied only screens
+// 401/403/429/503) let a 500/302 wildcard's body delta fire; the status-discipline
+// gate now rejects it — a status flip is not LDAP filter expansion.
+func TestScanPerInsertionPoint_BooleanStatusFlipNotLDAP(t *testing.T) {
+	t.Parallel()
+	big := strings.Repeat("a", 5000)
+	small := strings.Repeat("b", 400)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Query().Get("username") == "*" {
+			w.WriteHeader(http.StatusInternalServerError) // status flip, not filter expansion
+			_, _ = io.WriteString(w, big)
+			return
+		}
+		_, _ = io.WriteString(w, small)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "GET", srv.URL+"/login?username=bob", "")
+	rr = modtest.Response(rr, "text/html", small)
+	ip := modtest.InsertionPoint(t, rr, "username")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a wildcard that flips the status (500/302) must not be reported as boolean-based LDAP injection")
+}
+
+// TestScanPerInsertionPoint_BooleanNonDeterministicNotLDAP: the wildcard produces a
+// large body, but the ORIGINAL value's response flaps between a small and a large
+// body per request (a dynamic search page). The determinism precondition re-fetches
+// the original twice, sees them disagree, and drops the finding — the wildcard delta
+// is dynamic-content noise, not filter expansion.
+func TestScanPerInsertionPoint_BooleanNonDeterministicNotLDAP(t *testing.T) {
+	t.Parallel()
+	big := strings.Repeat("a", 5000)
+	small := strings.Repeat("b", 400)
+	var n int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		v := r.URL.Query().Get("username")
+		switch {
+		case v == "*":
+			_, _ = io.WriteString(w, big)
+		case v == controlPayload:
+			_, _ = io.WriteString(w, small)
+		default:
+			// The original value flaps between small and large per request.
+			if atomic.AddInt64(&n, 1)%2 == 0 {
+				_, _ = io.WriteString(w, big)
+				return
+			}
+			_, _ = io.WriteString(w, small)
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "GET", srv.URL+"/login?username=bob", "")
+	rr = modtest.Response(rr, "text/html", small)
+	ip := modtest.InsertionPoint(t, rr, "username")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a non-deterministic (flapping) endpoint must not yield a boolean-based LDAP finding")
 }
 
 // TestIsLDAPRelatedParam exercises the pure parameter-name gate.

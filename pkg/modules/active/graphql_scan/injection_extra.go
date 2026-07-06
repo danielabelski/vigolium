@@ -18,6 +18,12 @@ const (
 	sqliBase        = "vigoliumzz"
 	sqliTrueSuffix  = "' OR '1'='1"
 	sqliFalseSuffix = "' AND '1'='2"
+	// sqliInertSuffix carries the OR keyword yet is logically FALSE. A genuine
+	// boolean oracle evaluates it as false (its result matches the inert control),
+	// so it must NOT resemble the always-true body. An endpoint that renders the
+	// true body for it is reacting to the `OR` token — a WAF/app keyword differential,
+	// not boolean truth — which would otherwise masquerade as injection.
+	sqliInertSuffix = "' OR '1'='2"
 )
 
 // maxBoolSQLiCandidates caps how many string-arg fields are probed per host.
@@ -95,10 +101,24 @@ func (m *Module) phaseBooleanSQLi(
 			nc := modkit.NormalizeForRatio(ctrlBody, sqliBase)
 			nt := modkit.NormalizeForRatio(trueBody, trueVal)
 			nf := modkit.NormalizeForRatio(falseBody, falseVal)
-			// Classic boolean-blind signature: the always-false condition matches
-			// the inert control (both select nothing extra) while the always-true
-			// condition diverges from it.
-			return modkit.BodiesSimilar(nf, nc) && !modkit.BodiesSimilar(nt, nc), nil
+			// Classic boolean-blind signature: the always-false condition matches the
+			// inert control (both select nothing extra) while the always-true condition
+			// diverges from it. Evaluate this first — it is CPU-only over responses
+			// already fetched, so a non-injectable field short-circuits without the
+			// extra inert probe below.
+			if !modkit.BodiesSimilar(nf, nc) || modkit.BodiesSimilar(nt, nc) {
+				return false, nil
+			}
+			// Keyword discriminator: the OR-keyword-but-false probe must ALSO match the
+			// control — if instead it resembles the true body, the true/false divergence
+			// tracks the `OR` keyword (a WAF/keyword differential), not boolean truth.
+			inertVal := sqliBase + sqliInertSuffix
+			inertBody, ok := send(inertVal)
+			if !ok {
+				return false, nil
+			}
+			ni := modkit.NormalizeForRatio(inertBody, inertVal)
+			return modkit.BodiesSimilar(ni, nc), nil
 		}
 
 		if !confirmRounds(defaultConfirmRounds, booleanDiff) {

@@ -173,7 +173,11 @@ func (m *Module) ScanPerHost(
 		fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 		start := time.Now()
-		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
+		// NoClustering: desync detection times the probe with wall-clock. A clustered
+		// send would read a cached response in ~0ms and mask a genuine delay; more
+		// importantly the reconfirm below re-sends the same probe bytes, which must be a
+		// real round-trip (see confirmTimingDesync).
+		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoClustering: true})
 		elapsed := time.Since(start)
 		if err != nil {
 			// A timeout itself can be an indicator of a backend hanging on the
@@ -256,7 +260,12 @@ func (m *Module) confirmTimingDesync(
 	probeReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	reStart := time.Now()
-	reResp, _, reErr := httpClient.Execute(probeReq, http.Options{})
+	// NoClustering: this reconfirm fires immediately after the first (slow) probe
+	// completed, so it is within the 500ms cluster-cache TTL for the identical probe
+	// bytes. A clustered re-send returns the cached response in ~0ms → reElapsed is not
+	// a timing anomaly → the finding is dropped every time (a false negative). The
+	// reconfirm must be a genuine round-trip to actually reproduce the delay.
+	reResp, _, reErr := httpClient.Execute(probeReq, http.Options{NoClustering: true})
 	reElapsed := time.Since(reStart)
 	ev.reElapsed = reElapsed
 	if reErr == nil {

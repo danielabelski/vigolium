@@ -146,7 +146,7 @@ func TestScanPerRequest_NoFP_ReservedRouteRedirect(t *testing.T) {
 }
 
 // TestScanPerRequest_NoFP_AEMExtensionCanonicalisation reproduces the motivating
-// false positive: an AEM-fronted host (diagnostics.roche.com) that canonicalises
+// false positive: an AEM-fronted host (diagnostics.acme.com) that canonicalises
 // extensionless paths by 302-redirecting /user/N -> /user/N.html. The redirect
 // regex captures "N.html" for each probe — distinct per UID, so the uniformity
 // guard never trips and the baseline differs from every real probe — yet each is

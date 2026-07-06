@@ -357,7 +357,13 @@ func (m *Module) sendTimedPayload(
 	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	start := time.Now()
-	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
+	// NoClustering: this is a timing oracle. The baseline loop sends the original
+	// (no-sleep) value several times back-to-back to model latency/jitter, and the
+	// confirmation re-sends the same payload. The 500ms request-cluster cache keys on
+	// raw request bytes, so a clustered re-send returns the first response's cached
+	// copy in ~0ms — collapsing the jitter estimate and letting a jittery host clear
+	// the threshold (a false positive). Every send must be a genuine round-trip.
+	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true, NoClustering: true})
 	elapsed := time.Since(start)
 	if err != nil {
 		return timedResult{}, err

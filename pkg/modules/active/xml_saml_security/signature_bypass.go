@@ -17,6 +17,40 @@ import (
 // prefix. Used to strip the signature from a SAML assertion/response.
 var signatureRe = regexp.MustCompile(`(?s)<(\w+:)?Signature[\s>].*?</(\w+:)?Signature>`)
 
+// assertionRe matches a SAML <Assertion> element regardless of namespace prefix.
+// Its presence is what makes signature-stripping meaningful: the attack forges a
+// signed <Assertion> the relying party consumes to authenticate a user.
+var assertionRe = regexp.MustCompile(`(?i)<(\w+:)?Assertion[\s>]`)
+
+// hasSAMLAssertion reports whether the decoded XML carries a SAML <Assertion>.
+// A SAMLRequest/AuthnRequest sent to an IdP's SSO endpoint carries an SP request
+// signature but NO assertion — the IdP mints assertions, it never consumes one —
+// so stripping that request signature and still getting the IdP login page is
+// expected behaviour, not an authentication bypass. Requiring an <Assertion>
+// scopes the signature-stripping leg to the only place the attack applies: a
+// Response the SP consumes at its Assertion Consumer Service.
+func hasSAMLAssertion(xml string) bool {
+	return assertionRe.MatchString(xml)
+}
+
+// isAcceptedStatus reports whether status looks like an ACCEPTED authentication
+// outcome (2xx success or a 3xx post-login redirect). A 4xx/5xx baseline means the
+// SP already rejected the original assertion, so there is no accepted state to
+// forge into and nothing to bypass.
+func isAcceptedStatus(status int) bool {
+	return status >= 200 && status < 400
+}
+
+// isServerError reports whether status is a 5xx. A 5xx from the negative control
+// is a server CRASH (the mutated XML — e.g. a garbage Issuer the IdP cannot resolve
+// to a partner — broke request processing), not a deliberate content-validation
+// rejection. A signature-verifying relying party rejects a forged assertion with a
+// controlled 4xx or an auth redirect, never a 500. Reading a 5xx as "content
+// validated" is the fcworkflow/wam.acme.com IdP false positive.
+func isServerError(status int) bool {
+	return status >= 500
+}
+
 // issuerRe / nameIDRe match the text content of the Issuer and NameID elements so
 // the negative control can swap in a wrong identity/issuer.
 var (
@@ -53,6 +87,15 @@ func (m *Module) scanSignatureBypass(
 	httpClient *http.Requester,
 	decoded *DecodedSAML,
 ) *output.ResultEvent {
+	// The signature-stripping / assertion-forgery attack only applies to a document
+	// that carries a signed <Assertion> the relying party consumes to authenticate a
+	// user. An AuthnRequest (a SAMLRequest sent to an IdP's SSO endpoint) has no
+	// assertion, so stripping its SP request signature proves nothing about
+	// authentication — skip it. This is the wam.acme.com/idp/SSO.saml2 false positive.
+	if !hasSAMLAssertion(decoded.XMLContent) {
+		return nil
+	}
+
 	stripped, removed := stripSAMLSignature(decoded.XMLContent)
 	if !removed {
 		return nil // no signature present — nothing to strip
@@ -68,12 +111,25 @@ func (m *Module) scanSignatureBypass(
 	if !r0.ok {
 		return nil
 	}
+	// The baseline must itself be an ACCEPTED state. If the SP already rejected the
+	// original assertion (4xx/5xx), there is no authenticated state to forge into.
+	if !isAcceptedStatus(r0.status) {
+		return nil
+	}
 	rStrip := m.sendSAMLVariant(ctx, ip, httpClient, EncodeSAML(stripped, decoded))
 	rBogus := m.sendSAMLVariant(ctx, ip, httpClient, EncodeSAML(bogus, decoded))
 	if !rStrip.ok || !rBogus.ok {
 		return nil
 	}
 	if !authMatch(rStrip, r0) || authMatch(rBogus, r0) {
+		return nil
+	}
+	// The bogus control must be a DELIBERATE rejection, not a server crash. A 5xx
+	// means the mutated identity broke request processing (e.g. an unknown Issuer the
+	// server can't resolve) — which says nothing about whether signatures are
+	// verified. Only a controlled 4xx / auth-redirect rejection proves the SP
+	// validates assertion content, so a 5xx bogus control is not evidence.
+	if isServerError(rBogus.status) {
 		return nil
 	}
 
@@ -87,6 +143,9 @@ func (m *Module) scanSignatureBypass(
 		return nil
 	}
 	if !authMatch(rStrip2, r0) || authMatch(rBogus2, r0) {
+		return nil
+	}
+	if isServerError(rBogus2.status) {
 		return nil
 	}
 

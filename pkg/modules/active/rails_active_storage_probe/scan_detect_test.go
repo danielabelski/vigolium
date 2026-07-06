@@ -48,7 +48,7 @@ func TestScanPerRequest_DetectsDirectUpload(t *testing.T) {
 }
 
 // TestScanPerRequest_GenericAllowBlankBodyNoFalsePositive reproduces the
-// production false positive on vn.einvoice.grab.com: a generic front-controller
+// production false positive on vn.einvoice.initech.com: a generic front-controller
 // answers OPTIONS on *every* path with a blank body and an over-broad
 // "OPTIONS, TRACE, GET, HEAD, POST" Allow header (plus CORS headers). A real
 // POST-only Active Storage / Action Mailbox route would never advertise
@@ -66,7 +66,7 @@ func TestScanPerRequest_GenericAllowBlankBodyNoFalsePositive(t *testing.T) {
 				return
 			}
 			w.Header().Set("Allow", "OPTIONS, TRACE, GET, HEAD, POST")
-			w.Header().Set("Access-Control-Allow-Origin", "https://vn.einvoice.grab.com")
+			w.Header().Set("Access-Control-Allow-Origin", "https://vn.einvoice.initech.com")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.WriteHeader(http.StatusOK) // blank body

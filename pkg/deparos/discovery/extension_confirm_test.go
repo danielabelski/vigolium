@@ -331,8 +331,8 @@ func catchAllServer() *httptest.Server {
 	}))
 }
 
-// TestConfirmStartURLExtensions_ObservedSeedGatedOnServed is the session.snapchat.com
-// / www.snap.com regression: recon seeds a known-probe path such as
+// TestConfirmStartURLExtensions_ObservedSeedGatedOnServed is the session.hooli.com
+// / www.hooli.com regression: recon seeds a known-probe path such as
 // /Telerik.Web.UI.DialogHandler.aspx (404) or /overview/default.aspx (302) on a
 // host that runs no ASP.NET. The observed start-URL source must NOT confirm .aspx
 // off the ".aspx" suffix alone — only a served (2xx / 401 / 403) seed qualifies.
@@ -437,7 +437,7 @@ func TestProbeCandidateExtensions_CatchAllNotConfirmed(t *testing.T) {
 		"php must NOT be confirmed on a catch-all host")
 }
 
-// TestConfirmExtension_CatchAllHostSuppressesObserved is the snap.com regression:
+// TestConfirmExtension_CatchAllHostSuppressesObserved is the hooli.com regression:
 // a modern SPA/CDN host 200s (and reflects) any path, so an observed .aspx URL
 // (e.g. /overview/default.aspx on a Next.js site, or a seeded
 // /Telerik.Web.UI.DialogHandler.aspx echoed by five unrelated hosts) must NOT
@@ -544,7 +544,7 @@ func TestAllCandidateExts_MatchesConfigDefault(t *testing.T) {
 // TestConfirmExtension_CatchAllSuppressesEveryExtension proves the catch-all guard
 // is extension-agnostic: on a host that 200s any path, NO candidate extension may
 // confirm via either the observed or the fingerprint source. This is the
-// generalization of the snap.com .aspx/.jsp regression to every server-side stack.
+// generalization of the hooli.com .aspx/.jsp regression to every server-side stack.
 func TestConfirmExtension_CatchAllSuppressesEveryExtension(t *testing.T) {
 	server := catchAllServer()
 	defer server.Close()

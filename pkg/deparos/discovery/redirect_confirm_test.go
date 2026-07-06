@@ -42,7 +42,7 @@ func driveRedirect(t *testing.T, coord *PayloadCoordinator, cb *Callbacks, reque
 }
 
 // TestHandleRedirect_PathPreservingDoesNotConfirm is the scim-bridge2.foundation.
-// azure.myteksi.net regression: a SPA/gateway whose root 307'd and which bounced
+// azure.initech.net regression: a SPA/gateway whose root 307'd and which bounced
 // every fuzz-guessed path back to itself (a same-host, path-preserving 301/302)
 // "confirmed" — and queued a full wordlist fuzz for — 7 mutually-exclusive
 // server-side extensions at once, via the redirect branch's hardcoded

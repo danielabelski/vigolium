@@ -2,6 +2,7 @@ package oast
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -67,17 +68,20 @@ type Service struct {
 	blindXSSSrc        string // JS script src for blind XSS payloads
 	enabledBlindXSS    bool   // whether blind XSS probing is active
 
-	// emitMu guards emittedRank, the per-payload finding-coalescing state. A single
-	// planted payload typically produces several callbacks — DNS A + AAAA, multiple
-	// recursive resolvers hitting the authoritative server, then the HTTP fetch leg —
-	// and without coalescing each became its own finding sharing one callback host.
-	// emittedRank maps a callback nonce to the strongest protocol rank already turned
+	// emitMu guards emittedRank, the finding-coalescing state. A single planted
+	// payload typically produces several callbacks — DNS A + AAAA, multiple recursive
+	// resolvers hitting the authoritative server, then the HTTP fetch leg — and
+	// without coalescing each became its own finding sharing one callback host.
+	// emittedRank maps an emission key to the strongest protocol rank already turned
 	// into a finding, so duplicate/weaker callbacks are folded into the existing
 	// finding and a strictly stronger callback upgrades it in place (see
-	// claimEmission). Only payloads that actually call back get an entry, so this
-	// stays small (unlike the every-payload tracker) and needs no eviction.
+	// claimEmission). The key is the callback nonce for high-signal interactions and
+	// module+host+injection point for low-signal Info ones (see oastEmissionKey), so
+	// Info findings additionally coalesce across the many URLs that plant the same
+	// injection point on a host. Only keys that actually call back get an entry, so
+	// this stays small (unlike the every-payload tracker) and needs no eviction.
 	emitMu      sync.Mutex
-	emittedRank map[string]int // nonce → strongest OAST protocol rank already emitted
+	emittedRank map[string]int // emission key → strongest OAST protocol rank already emitted
 }
 
 // New creates a new OAST service. Returns (nil, nil) if the interactsh client
@@ -340,12 +344,20 @@ func (s *Service) handleInteraction(interaction *server.Interaction) {
 		return
 	}
 
-	// Coalesce per payload: a single planted payload fans out into many callbacks
-	// (DNS A/AAAA, several recursive resolvers, then the HTTP fetch leg). Emit at
-	// most one finding per callback nonce — folding duplicate/weaker callbacks into
-	// it and upgrading in place when a strictly stronger protocol confirms the same
-	// payload — so the findings list shows one entry per OAST host, not a pile.
-	emit, upgrade := s.claimEmission(nonce, interaction.Protocol)
+	// Classify first (cheap, no I/O) so the emission key can depend on severity.
+	sev, conf, desc := classifyInteraction(interaction.Protocol, pctx)
+	emitKey := oastEmissionKey(sev, nonce, pctx)
+
+	// Coalesce per emission key. A single planted payload fans out into many
+	// callbacks (DNS A/AAAA, several recursive resolvers, then the HTTP fetch leg);
+	// and — for low-signal Info interactions — a crawler plants the same injection
+	// point across dozens of URLs on one host (e.g. a Referer the target logs and
+	// resolves), producing one near-identical DNS-only finding per URL. Emit at most
+	// one finding per emission key — folding duplicate/weaker callbacks into it and
+	// upgrading in place when a strictly stronger protocol confirms it — so the
+	// findings list shows one entry per OAST host (or, for Info, per host+injection
+	// point), not a pile.
+	emit, upgrade := s.claimEmission(emitKey, interaction.Protocol)
 	if !emit {
 		return
 	}
@@ -356,7 +368,6 @@ func (s *Service) handleInteraction(interaction *server.Interaction) {
 	// of a payload's ~5-6 callbacks ever reaches here.
 	originUUID, origin := s.originRecord(pctx.RequestHash)
 
-	sev, conf, desc := classifyInteraction(interaction.Protocol, pctx)
 	result := &output.ResultEvent{
 		ModuleID: pctx.ModuleID,
 		URL:      pctx.TargetURL,
@@ -377,15 +388,26 @@ func (s *Service) handleInteraction(interaction *server.Interaction) {
 		ModuleType:       database.ModuleTypeOAST,
 		FindingSource:    database.FindingSourceOAST,
 		ModuleShort:      "Out-of-band interaction detected via OAST callback",
-		// Identify the finding by the callback nonce so each distinct payload host is
-		// its own finding (and re-callbacks dedup), independent of the protocol-driven
+		// Identify the finding by its emission key — the callback nonce for high-signal
+		// interactions (each distinct payload host is its own finding, re-callbacks
+		// dedup), or module+host+injection-point for low-signal Info interactions (all
+		// equivalent URLs collapse to one) — independent of the protocol-driven
 		// description/severity that an upgrade changes.
-		DedupKey: "oast:" + nonce,
+		DedupKey: "oast:" + emitKey,
 	}
 
 	// Attach the originating request and human-readable trace anchors so the
 	// finding answers "which request caused this callback?" on its own.
 	enrichOASTResult(result, interaction, pctx, origin)
+
+	// A coalesced Info finding stands in for every equivalent URL on the host, so
+	// make the aggregation explicit — otherwise the single entry (and its one linked
+	// request) reads as a lone observation. The raw oast_interactions table still
+	// records every callback for forensics.
+	if sev == severity.Info {
+		result.ExtractedResults = append(result.ExtractedResults,
+			"scope=host-aggregated (Info OAST interactions coalesced per host + injection point; see oast_interactions for every callback)")
+	}
 
 	// On an upgrade (e.g. the HTTP-fetch confirmation arriving after a DNS lead) the
 	// stronger finding shares the weaker one's nonce-scoped hash, so INSERT-ON-
@@ -421,29 +443,67 @@ func oastProtocolRank(proto string) int {
 	}
 }
 
-// claimEmission records that a callback of protocol proto arrived for nonce and
-// decides whether it should produce (or upgrade) a finding:
+// claimEmission records that a callback of protocol proto arrived for emission
+// key key and decides whether it should produce (or upgrade) a finding:
 //
-//   - first callback for a nonce → (emit=true, upgrade=false): emit a new finding.
-//   - duplicate or weaker-or-equal callback for a payload already reported (the DNS
+//   - first callback for a key → (emit=true, upgrade=false): emit a new finding.
+//   - duplicate or weaker-or-equal callback for a key already reported (the DNS
 //     A/AAAA/resolver flood, or a DNS hit after the HTTP leg) → (false, false):
 //     fold into the existing finding, emit nothing.
 //   - strictly stronger callback than what was already reported (e.g. the HTTP fetch
 //     confirming an earlier DNS lead) → (true, true): the caller replaces the weaker
 //     finding with this stronger one.
-func (s *Service) claimEmission(nonce, proto string) (emit, upgrade bool) {
+//
+// The key is the callback nonce for high-signal interactions and a coalescing
+// key (module+host+injection point) for low-signal Info ones — see
+// oastEmissionKey — so Info findings collapse per host+injection point while
+// confirmed findings keep per-request granularity.
+func (s *Service) claimEmission(key, proto string) (emit, upgrade bool) {
 	rank := oastProtocolRank(proto)
 	s.emitMu.Lock()
 	defer s.emitMu.Unlock()
 	if s.emittedRank == nil {
 		s.emittedRank = make(map[string]int)
 	}
-	prev, seen := s.emittedRank[nonce]
+	prev, seen := s.emittedRank[key]
 	if seen && rank <= prev {
 		return false, false
 	}
-	s.emittedRank[nonce] = rank
+	s.emittedRank[key] = rank
 	return true, seen
+}
+
+// oastEmissionKey chooses the coalescing identity for an out-of-band finding.
+//
+// High-signal interactions (a confirmed HTTP fetch, or an XXE/SQLi/JWT DNS hit on
+// an unguessable per-payload subdomain — all rated above Info) keep per-callback-
+// nonce identity, so every distinct planting request stays its own investigable
+// finding.
+//
+// Low-signal Info interactions — the generic blind-SSRF DNS-only lead and the
+// host-header-reflection case, both of which classifyInteraction rates Info — are
+// coalesced per (module, host, injection point). A crawler hits dozens of URLs on
+// one host, each planting the same injection point (commonly a Referer the target
+// logs and its resolver looks up), so without this every URL yields a near-
+// identical DNS-only finding. At this severity the injection point and host are the
+// whole signal; which of N equivalent URLs planted it is not — so they fold into
+// one finding (the raw oast_interactions table still records every callback).
+func oastEmissionKey(sev severity.Severity, nonce string, pctx PayloadContext) string {
+	if sev != severity.Info {
+		return nonce
+	}
+	param := strings.ToLower(strings.TrimSpace(pctx.ParameterName))
+	return pctx.ModuleID + "|" + oastHost(pctx.TargetURL) + "|" + param
+}
+
+// oastHost extracts the lowercased host[:port] from a target URL for coalescing;
+// on a parse failure or a hostless URL it falls back to the raw (trimmed, lowered)
+// string so distinct targets never collide onto one key.
+func oastHost(target string) string {
+	if u, err := url.Parse(target); err == nil && u.Host != "" {
+		return strings.ToLower(u.Host)
+	}
+	return strings.ToLower(strings.TrimSpace(target))
 }
 
 // originRecord resolves the HTTP record that planted an OAST payload. It prefers

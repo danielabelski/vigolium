@@ -818,12 +818,12 @@ func TestComputeHashAuthHeaderCaseInsensitive(t *testing.T) {
 // log filter: traffic on a host unrelated to the configured target is
 // suppressed, while same/sub-host traffic is logged.
 func TestShouldLogEntryCrossOriginFilter(t *testing.T) {
-	c := New(&mockWriter{}, true, false, false, false, false, "eaccess.mis.teach.stryker.com", "spider")
+	c := New(&mockWriter{}, true, false, false, false, false, "eaccess.mis.teach.globex.com", "spider")
 
-	if c.shouldLogEntry(createTestEntry("https://eaccess.mis.teach.stryker.com/app")) != true {
+	if c.shouldLogEntry(createTestEntry("https://eaccess.mis.teach.globex.com/app")) != true {
 		t.Errorf("same-host entry should be logged")
 	}
-	if c.shouldLogEntry(createTestEntry("https://www.stryker.com/us/en/x.html")) != false {
+	if c.shouldLogEntry(createTestEntry("https://www.globex.com/us/en/x.html")) != false {
 		t.Errorf("cross-origin entry should be suppressed before adoption")
 	}
 }
@@ -834,31 +834,31 @@ func TestShouldLogEntryCrossOriginFilter(t *testing.T) {
 // host, every adopted-host line is dropped from stderr even though records are
 // written. SetTargetHost must flip that.
 func TestSetTargetHostUnsuppressesAdoptedHost(t *testing.T) {
-	c := New(&mockWriter{}, true, false, false, false, false, "eaccess.mis.teach.stryker.com", "spider")
+	c := New(&mockWriter{}, true, false, false, false, false, "eaccess.mis.teach.globex.com", "spider")
 
-	adopted := createTestEntry("https://www.stryker.com/us/en/training.html")
+	adopted := createTestEntry("https://www.globex.com/us/en/training.html")
 	if c.shouldLogEntry(adopted) != false {
 		t.Fatalf("precondition: adopted-host entry should be suppressed before SetTargetHost")
 	}
 
 	// Crawler adopts the off-host redirect target into scope.
-	c.SetTargetHost("www.stryker.com")
+	c.SetTargetHost("www.globex.com")
 
 	if c.shouldLogEntry(adopted) != true {
 		t.Errorf("adopted-host entry should be logged after SetTargetHost")
 	}
-	if c.targetHostValue() != "www.stryker.com" {
-		t.Errorf("targetHostValue() = %q, want %q", c.targetHostValue(), "www.stryker.com")
+	if c.targetHostValue() != "www.globex.com" {
+		t.Errorf("targetHostValue() = %q, want %q", c.targetHostValue(), "www.globex.com")
 	}
 }
 
 // TestSetTargetHostStaticStillSuppressed confirms re-pointing the filter does
 // not override the unconditional static-content suppression.
 func TestSetTargetHostStaticStillSuppressed(t *testing.T) {
-	c := New(&mockWriter{}, true, false, false, false, false, "eaccess.mis.teach.stryker.com", "spider")
-	c.SetTargetHost("www.stryker.com")
+	c := New(&mockWriter{}, true, false, false, false, false, "eaccess.mis.teach.globex.com", "spider")
+	c.SetTargetHost("www.globex.com")
 
-	css := createTestEntry("https://www.stryker.com/assets/app.css")
+	css := createTestEntry("https://www.globex.com/assets/app.css")
 	css.Response.Headers = map[string]string{"content-type": "text/css"}
 	if c.shouldLogEntry(css) != false {
 		t.Errorf("static content on adopted host should still be suppressed")

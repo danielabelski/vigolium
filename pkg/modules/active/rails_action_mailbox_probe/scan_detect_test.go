@@ -47,7 +47,7 @@ func TestScanPerRequest_DetectsMailboxIngress(t *testing.T) {
 }
 
 // TestScanPerRequest_GenericAllowBlankBodyNoFalsePositive reproduces the
-// vn.einvoice.grab.com production false positive: a front-controller answers
+// vn.einvoice.initech.com production false positive: a front-controller answers
 // OPTIONS on every /rails path with a blank body and an over-broad
 // "OPTIONS, TRACE, GET, HEAD, POST" Allow header (plus CORS headers). A real
 // POST-only ingress route never advertises GET/HEAD/TRACE, so the broad Allow
@@ -62,7 +62,7 @@ func TestScanPerRequest_GenericAllowBlankBodyNoFalsePositive(t *testing.T) {
 				return
 			}
 			w.Header().Set("Allow", "OPTIONS, TRACE, GET, HEAD, POST")
-			w.Header().Set("Access-Control-Allow-Origin", "https://vn.einvoice.grab.com")
+			w.Header().Set("Access-Control-Allow-Origin", "https://vn.einvoice.initech.com")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.WriteHeader(http.StatusOK) // blank body

@@ -230,7 +230,11 @@ func buildBaselineRequest(ctx *httpmsg.HttpRequestResponse, ip httpmsg.Insertion
 // thresholdSeconds (whole seconds, matching the resolution of the underlying
 // http.Requester).
 func isResponseSlow(req *httpmsg.HttpRequestResponse, httpClient *http.Requester, thresholdSeconds int) (bool, error) {
-	resp, duration, err := httpClient.Execute(req, http.Options{IgnoreTimeoutTracking: true})
+	// NoClustering: timing-based blind RCE re-sends the identical delay payload across
+	// confirmation rounds. The 500ms request-cluster cache keys on raw request bytes,
+	// so a clustered re-send returns the first response's cached copy with duration ~0
+	// (< the delay threshold), and the confirmation never passes (a false negative).
+	resp, duration, err := httpClient.Execute(req, http.Options{IgnoreTimeoutTracking: true, NoClustering: true})
 	defer func() {
 		if resp != nil {
 			resp.Close()
@@ -305,7 +309,9 @@ func getPayloadsForExtension(request []byte) []string {
 // sendTimedRequest sends a request and checks if response took >= delaySeconds.
 func sendTimedRequest(req *httpmsg.HttpRequestResponse, httpClient *http.Requester) (bool, error) {
 	timeout := false
-	resp, duration, err := httpClient.Execute(req, http.Options{IgnoreTimeoutTracking: true})
+	// NoClustering: see isResponseSlow — a clustered re-send of the identical delay
+	// payload returns a cached ~0ms duration and defeats timing confirmation.
+	resp, duration, err := httpClient.Execute(req, http.Options{IgnoreTimeoutTracking: true, NoClustering: true})
 	if err != nil {
 		if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 			return false, nil

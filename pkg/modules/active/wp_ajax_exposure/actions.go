@@ -11,7 +11,7 @@ type ajaxAction struct {
 	// lowercase) that confirm the response actually came from this plugin's
 	// registered handler. A genuinely wired-up wp_ajax_nopriv_* handler echoes
 	// these even in its error / permission / missing-parameter responses;
-	// a generic CDN / WAF / SPA error page (e.g. the help.grab.com
+	// a generic CDN / WAF / SPA error page (e.g. the help.initech.com
 	// "load-failed … Refresh" page that produced a false positive) contains
 	// none of them. The body is matched case-insensitively via
 	// modkit.MatchAllGroups — every group must have at least one hit, so a

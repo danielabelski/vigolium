@@ -338,7 +338,14 @@ func (m *Module) sendPayload(
 	// re-parsing on this hot path.
 	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
-	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
+	// NoClustering: the boolean-blind confirmation re-sends IDENTICAL requests to
+	// prove stability — the TRUE/FALSE retries (ratio-stable across a second send),
+	// the baseline-drift re-fetch of the original value, and confirmRepeat's repeated
+	// rounds. The 500ms request-cluster cache keys on raw request bytes, so without
+	// this those re-sends return the first response's cached copy and the stability
+	// checks pass trivially even on a non-deterministic (flapping / load-balanced)
+	// endpoint — silently defeating the module's core false-positive defenses.
+	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true, NoClustering: true})
 	if err != nil {
 		return "", responseSignature{}, false, err
 	}

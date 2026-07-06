@@ -59,7 +59,7 @@ func TestScanPerRequest_NextStaticBundleSkipped(t *testing.T) {
 	// and touches sessionStorage / cookies / an Authorization header — none of
 	// which is a real server getStaticProps auth fetch.
 	body := `t.getStaticProps;var e=window.sessionStorage;document.cookie;h.set("Authorization",x)`
-	ctx := makeJSCtx("/snapchat-dot-com/_next/static/chunks/main-93dbaebda72da021.js", body)
+	ctx := makeJSCtx("/hooli-dot-com/_next/static/chunks/main-93dbaebda72da021.js", body)
 	require.True(t, m.CanProcess(ctx))
 
 	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})

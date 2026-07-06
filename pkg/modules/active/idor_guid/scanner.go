@@ -206,8 +206,14 @@ func (m *Module) tryPredictedID(
 	// A finding is reported when:
 	// 1. The predicted ID returns 200 OK
 	// 2. The response body length > 100 (not empty/trivial)
-	// 3. The status matches the original but body content differs (different resource)
-	if respStatus == 200 && len(respBody) > 100 && respStatus == baselineStatus && respBody != baselineBody {
+	// 3. The status matches the original but the body differs SUBSTANTIALLY (a
+	//    genuinely different resource). An exact byte inequality (respBody !=
+	//    baselineBody) triggers on any single differing byte — a CSRF nonce, a
+	//    timestamp, a request-id echo — so an authenticated page with per-request
+	//    tokens looks like a "different object" on every predicted id. Requiring a
+	//    substantial difference (below the token-similarity floor) rules that out; a
+	//    real cross-object reference returns different DATA, not a re-nonced same page.
+	if respStatus == 200 && len(respBody) > 100 && respStatus == baselineStatus && !modkit.BodiesSimilar(respBody, baselineBody) {
 		// Content gate: a predicted-id response that is itself a login / SSO
 		// challenge (or an access-denied notice) is NOT a distinct object — it is
 		// the generic unauthenticated shell every protected endpoint returns, and

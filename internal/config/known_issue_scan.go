@@ -171,6 +171,13 @@ var perAssetGroupModules = []string{
 	"software-version-header",
 	"security-headers-missing",
 	"permissions-policy-detect",
+	// Sensitive data leaked in response headers: the constant "Sensitive Data in
+	// Response Headers" fact reported once per response that carries a high-entropy /
+	// key-shaped custom header — collapse to one per-host hygiene finding with every
+	// distinct leaked header unioned onto the survivor. Info tier and value-preserving
+	// (unlike env-secret-exposure / secret-detect, which stay value-keyed so a distinct
+	// extracted secret keeps its own row).
+	"sensitive-header-leak",
 	// Endpoint / param observation: candidate lists, not vulns.
 	"api-spec-detect",
 	"api-version-detect",
@@ -181,6 +188,11 @@ var perAssetGroupModules = []string{
 	"wasm-module-detect",
 	"rails-action-cable-detect",
 	"rails-active-storage-detect",
+	// Sensitive data in URL query params: constant module_name, fires once per crawled
+	// URL that carries a key/token — collapse to one per-host hygiene finding (distinct
+	// params unioned on). Unlike env-secret-exposure, these are client-visible query
+	// fields, not extracted secrets, so they group rather than stay value-keyed.
+	"sensitive-url-params",
 	// Rails health/info endpoint exposed (/up and friends): the same "Rails internals
 	// reachable" fact reported once per matched path on a host.
 	"rails-info-exposure",
@@ -189,6 +201,20 @@ var perAssetGroupModules = []string{
 	// Per-response header / hygiene (Low): one finding per crawled page.
 	"csp-weakness-audit",
 	"cors-headers-detect",
+	// Clickjacking "framable page" verdict, once per page missing frame protection —
+	// name carries a per-page detail, so by-module drops it to collapse per host.
+	"clickjacking-detect",
+	// Reverse tabnabbing (target=_blank without rel=noopener): the same page-hygiene
+	// issue reported once per page carrying an unsafe cross-origin link. Constant
+	// module_name, single Low class — collapse to one per-host finding, every affected
+	// page kept on the survivor (MatchedAt union). Sibling of clickjacking-detect.
+	"reverse-tabnabbing-detect",
+	// Nginx path-escape behavior: the same "this host's Nginx normalizes escaped path
+	// segments" fact observed once per probed path — collapse per host, paths unioned.
+	"nginx-path-escape",
+	// Cache-Auth Misconfiguration: cacheable response with user data missing a Vary,
+	// one per cacheable-auth URL — sibling of cache-data-leak.
+	"cache-auth-misconfiguration",
 	// Permissive CORS on one host, demonstrated via several probe techniques
 	// (reflected / null / subdomain / prefix / suffix / port / scheme bypass) — each
 	// fires as its own row with a distinct probe value, but they are all the same
@@ -223,19 +249,58 @@ var perAssetGroupModules = []string{
 	"ssti-detection",
 	"input-behavior-probe",
 	"smart-behavior-detection",
+
+	// --- Confirmed per-URL/param findings of ONE class whose module_name is unstable ---
+	//
+	// The perRuleGroupModules (b) shape, but their module_name embeds a per-finding token
+	// (payload / accepting parameter), so by-rule can't fold them — only dropping the name
+	// (by-module) collapses them per host. Single class at one severity, so the name-drop
+	// conflates nothing; every route/param and value is preserved on the survivor.
+	//   - crlf-injection: module_name embeds the injected CRLF payload.
+	//   - api-key-url-exposure: creds accepted in a URL param (sensitive-url-params sibling);
+	//     module_name embeds the accepting header, value is a descriptive note not a secret.
+	"crlf-injection",
+	"api-key-url-exposure",
 }
 
 // perRuleGroupModules are the modules grouped per (module, rule_name, severity,
-// host) — see FindingGroupingConfig.ByRule. The lone member is secret-detect:
-// its single module_id fronts every Kingfisher rule, so plain per-module grouping
-// would wrongly merge unrelated secrets (an AWS key, a Slack token, a Looker
-// client id) into one finding, while plain per-value grouping leaves a single
-// noisy rule — e.g. "Looker Client ID" matching every content hash in a minified
-// bundle's chunk-hash map — as dozens of near-identical findings. By-rule keying
-// folds the latter to one finding (all matched values unioned on) while keeping
-// the former apart.
+// host) — see FindingGroupingConfig.ByRule. Keeping the rule (module_name) in the
+// key folds repeats of ONE rule/variant per host while keeping DISTINCT ones apart.
+// Two sub-families qualify, for opposite reasons:
+//
+//	(a) one module_id fronts many genuinely-DIFFERENT rules — by-module would merge
+//	    unrelated findings; the rule in the key keeps them apart.
+//	(b) one module_id fires the SAME class on many URLs/params with the vector or
+//	    technique in module_name — the per-URL repeats fold, the vectors stay apart.
+//
+// A (b)-shaped over-producer whose module_name instead embeds a per-finding
+// payload/token can't be keyed by rule; those live in perAssetGroupModules under
+// "Confirmed per-URL/param … unstable module_name". Each entry below is tagged (a)/(b):
+//
+//   - secret-detect (a): id fronts every Kingfisher rule; folds a noisy rule (e.g.
+//     "Looker Client ID" matching every chunk hash) while keeping distinct secrets apart.
+//   - host-header-injection (b): module_name carries the spoofed header (X-Forwarded-Host / X-Real-IP / …).
+//   - ldap-injection (b): module_name carries the technique (boolean-based / error-based).
+//   - proxy-header-trust (b): X-Forwarded-* vector in module_name; spans Medium+High.
+//   - express-trust-proxy-misconfig (b): the Express sibling — X-Forwarded-* header in module_name.
+//   - aspnet-viewstate-scan (b): four fixed ViewState issues (Cookieless / Verbose Error /
+//     MAC Disabled / Event Validation Disabled), per ASPX page; spans Medium+High.
+//   - csti-detection (b): one uniform module_name — either bucket folds it identically;
+//     kept here with the injection family.
+//
+// (Severity is in the key, so a (b) module's High and Medium variants never merge.)
+// Evidence is preserved, not dropped: the survivor keeps every matched URL (capped by
+// MaxURLs) and the duplicates' request/response pairs as AdditionalEvidence. This lives
+// in the storage-time grouping pass, not the module — collapsing inside the module would
+// report only the first vulnerable route/param and hide the rest.
 var perRuleGroupModules = []string{
 	"secret-detect",
+	"host-header-injection",
+	"ldap-injection",
+	"proxy-header-trust",
+	"csti-detection",
+	"express-trust-proxy-misconfig",
+	"aspnet-viewstate-scan",
 }
 
 // defaultFindingGrouping is the effective grouping config when none is set in

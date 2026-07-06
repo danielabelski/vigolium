@@ -1,12 +1,19 @@
 package input_behavior_probe
 
-// probeHeaderNames are HTTP headers to inject probe values into.
+// probeHeaderNames are HTTP headers to inject probe values into. Kept to routing /
+// forwarding / SSRF-adjacent headers whose values a server may actually act on
+// (fetch, route, trust as client IP). Standard navigation/identity headers —
+// Referer, Origin, Via, From — were removed: fuzzing them with values like
+// localhost / null / %0d%0a perturbs the app's CSRF/CORS/redirect logic, producing a
+// deterministic body/status differential that confirmChange still reports as a
+// "behavior change" even though nothing was injected into a sink (the ssrf_detection
+// Referer false-positive class). Origin-driven CORS is covered by cors_misconfiguration.
 var probeHeaderNames = []string{
-	"Referer", "X-Original-URL", "Profile", "X-Arbitrary",
-	"X-HTTP-DestinationURL", "X-Forwarded-Proto", "Origin",
+	"X-Original-URL", "Profile", "X-Arbitrary",
+	"X-HTTP-DestinationURL", "X-Forwarded-Proto",
 	"X-Forwarded-Host", "X-Forwarded-Server", "X-Host",
-	"Proxy-Host", "Destination", "Proxy", "Via", "Host",
-	"From", "True-Client-IP", "X-Real-IP", "X-Originating-IP",
+	"Proxy-Host", "Destination", "Proxy", "Host",
+	"True-Client-IP", "X-Real-IP", "X-Originating-IP",
 	"CF-Connecting_IP", "Forwarded",
 }
 

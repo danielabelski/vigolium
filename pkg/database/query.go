@@ -860,6 +860,36 @@ func CountFindingsBySeverity(ctx context.Context, db *DB, projectUUID string, ho
 	return result, nil
 }
 
+// CountRecordsByColumn returns http_record counts grouped by a single column
+// (one of method, status_code, response_content_type), filtered by project
+// (empty = every row, e.g. a --glob-db merge). Keys are the column values as
+// text. Powers the traffic listing's status/method/content-type summary.
+func CountRecordsByColumn(ctx context.Context, db *DB, projectUUID, column string) (map[string]int64, error) {
+	switch column {
+	case "method", "status_code", "response_content_type":
+	default:
+		return nil, fmt.Errorf("CountRecordsByColumn: unsupported column %q", column)
+	}
+	var rows []struct {
+		Key   string `bun:"key"`
+		Count int64  `bun:"count"`
+	}
+	q := db.NewSelect().
+		Model((*HTTPRecord)(nil)).
+		ColumnExpr("CAST(? AS TEXT) AS key, COUNT(*) AS count", bun.Ident(column))
+	if projectUUID != "" {
+		q = q.Where("project_uuid = ?", projectUUID)
+	}
+	if err := q.GroupExpr(column).Scan(ctx, &rows); err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		out[r.Key] = r.Count
+	}
+	return out, nil
+}
+
 // CountFindingsByAgenticScan returns finding counts grouped by severity for
 // one agentic-scan run. Severity strings are lowercased/trimmed so callers
 // get a canonical key set regardless of how the finding was inserted.

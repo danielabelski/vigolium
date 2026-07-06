@@ -66,7 +66,7 @@ func TestScanPerRequest_DetectsAuthorArchive(t *testing.T) {
 }
 
 // TestScanPerRequest_NoFP_AuthorIDEcho reproduces the AEM-style self-redirect FP
-// (the diagnostics.roche.com class): a non-WordPress host canonicalises
+// (the diagnostics.acme.com class): a non-WordPress host canonicalises
 // /?author=N to /author/N.html, echoing the requested id back with an extension.
 // Each probe yields a distinct value (N.html), defeating the uniformity guard,
 // yet none is a leaked username — the id-echo guard must drop them all.

@@ -206,7 +206,12 @@ func (m *Module) fetch(httpClient *http.Requester, url string) (body string, hea
 	if err != nil {
 		return "", nil, 0, false
 	}
-	resp, _, err := httpClient.Execute(rr, http.Options{})
+	// NoClustering: the scanner fetches the same path a second time to prove the
+	// signature reproduces (so a one-off/proxied artifact can't create a finding). The
+	// 500ms request-cluster cache keys on raw request bytes, so a clustered second
+	// fetch returns the first response's cached copy and "reproduces" trivially — even
+	// for a transient artifact (a false positive). Both fetches must be genuine.
+	resp, _, err := httpClient.Execute(rr, http.Options{NoClustering: true})
 	if err != nil {
 		return "", nil, 0, false
 	}

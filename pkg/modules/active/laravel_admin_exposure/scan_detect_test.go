@@ -152,7 +152,7 @@ func TestScanPerRequest_NoFP_SalesforceLoginShell(t *testing.T) {
 	assert.Empty(t, res, "a Salesforce login shell with no Laravel framework token must not yield a finding")
 }
 
-// topicRoute renders the easylens.snapchat.com content page that caused the
+// topicRoute renders the easylens.hooli.com content page that caused the
 // Filament false positive: a SEO topic route where /topic/<slug> reflects the
 // slug word into the <h1>, JSON-LD, breadcrumb, and canonical <link>. The word
 // "Filament" therefore appears all over /topic/filament even though no Filament
@@ -160,15 +160,15 @@ func TestScanPerRequest_NoFP_SalesforceLoginShell(t *testing.T) {
 // ("filament-panels", "/filament/assets/", "fi-sidebar") are present.
 func topicRoute(slug string) string {
 	return `<!DOCTYPE html><html><head><title>` + slug + ` Lenses - Easy Lens</title>` +
-		`<link rel="canonical" href="https://easylens.snapchat.com/topic/` + slug + `" />` +
+		`<link rel="canonical" href="https://easylens.hooli.com/topic/` + slug + `" />` +
 		`<script type="application/ld+json">{"@type":"CollectionPage","name":"` + slug + ` Lenses - Easy Lens",` +
-		`"url":"https://easylens.snapchat.com/topic/` + slug + `"}</script></head>` +
-		`<body><main><h1>Explore ` + slug + ` Lenses on Snapchat</h1>` +
+		`"url":"https://easylens.hooli.com/topic/` + slug + `"}</script></head>` +
+		`<body><main><h1>Explore ` + slug + ` Lenses on Hooli</h1>` +
 		`<nav aria-label="breadcrumb"><a href="/">Home</a> / ` + slug + `</nav></main></body></html>`
 }
 
 // TestScanPerRequest_NoFP_SlugReflectingTopicRoute reproduces the
-// easylens.snapchat.com Filament false positive: the module walked the observed
+// easylens.hooli.com Filament false positive: the module walked the observed
 // /topic/ context path and probed /topic/filament, which — being a slug-reflecting
 // content route — returned 200 with the word "Filament" echoed throughout. The old
 // bare "filament"/"Filament" markers self-matched that reflected slug. Dropping
@@ -235,7 +235,7 @@ func TestScanPerRequest_DetectsFilamentPanel(t *testing.T) {
 	assert.Contains(t, strings.ToLower(res[0].Info.Name), "filament")
 }
 
-// TestScanPerRequest_NoFP_ReflectedLoginWall reproduces the einvoice.grab.com
+// TestScanPerRequest_NoFP_ReflectedLoginWall reproduces the einvoice.initech.com
 // false positive: a path-routing app serves the SAME login page for every
 // sub-path and reflects the requested path into the <form action>. The old code
 // matched the generic /admin "admin" marker against the reflected

@@ -1,6 +1,7 @@
 package base64_data_detect
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
@@ -257,12 +258,15 @@ func TestDecodeBase64Blob(t *testing.T) {
 	}
 }
 
-func TestDecodeForDisplay_SkipsBinary(t *testing.T) {
+// dm decodes a single base64 blob into a decodedMatch for tests.
+func dm(s string) decodedMatch { return decodeMatches([]string{s})[0] }
+
+func TestDisplayableDecoded_SkipsBinary(t *testing.T) {
 	// rO0ABXNy... is a Java serialized object header: it decodes to bytes that
 	// are not valid UTF-8 text, so no decoded line should be offered.
-	assert.Empty(t, decodeForDisplay("rO0ABXNyABFqYXZhLmxhbmcuQm9vbGVhbtA="))
+	assert.Empty(t, displayableDecoded(dm("rO0ABXNyABFqYXZhLmxhbmcuQm9vbGVhbtA=")))
 	// JSON decodes to readable text.
-	assert.Equal(t, `{"alg":"HS256","typ":"JWT"}`, decodeForDisplay("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"))
+	assert.Equal(t, `{"alg":"HS256","typ":"JWT"}`, displayableDecoded(dm("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")))
 }
 
 func TestIsDisplayableText(t *testing.T) {
@@ -274,7 +278,7 @@ func TestIsDisplayableText(t *testing.T) {
 }
 
 func TestBuildExtracted_IncludesDecodedLineAndPreview(t *testing.T) {
-	extracted, preview := buildExtracted("request", []string{"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"})
+	extracted, preview := buildExtracted("request", decodeMatches([]string{"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"}))
 	require.NotEmpty(t, extracted)
 	assert.Equal(t, "Source: request", extracted[0])
 
@@ -293,7 +297,7 @@ func TestBuildExtracted_IncludesDecodedLineAndPreview(t *testing.T) {
 }
 
 func TestBuildExtracted_BinaryHasNoDecodedLine(t *testing.T) {
-	extracted, preview := buildExtracted("response", []string{"rO0ABXNyABFqYXZhLmxhbmcuQm9vbGVhbtA="})
+	extracted, preview := buildExtracted("response", decodeMatches([]string{"rO0ABXNyABFqYXZhLmxhbmcuQm9vbGVhbtA="}))
 	assert.Empty(t, preview)
 	for _, line := range extracted {
 		assert.NotContains(t, line, "(decoded)")
@@ -323,4 +327,54 @@ func TestScanPerRequest_URLSafeBlobDecodedEndToEnd(t *testing.T) {
 	assert.Contains(t, decodedLine, `sessionState=x>?>?>?"}`)
 	// The decoded preview should also surface in the finding description.
 	assert.Contains(t, reqResult.Info.Description, "Decoded preview:")
+}
+
+func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+func mustScanResp(t *testing.T, m *Module, ctx *httpmsg.HttpRequestResponse) *output.ResultEvent {
+	t.Helper()
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	return findResultBySource(results, "Source: response")
+}
+
+// TestStructuralSignatureCoalescesRotatingJSON is the grouping fix: a framework
+// token like {"nonce":...} that rotates its value on every page must collapse to a
+// single finding identity across URLs on a host, while a differently-shaped blob
+// keeps its own identity.
+func TestStructuralSignatureCoalescesRotatingJSON(t *testing.T) {
+	m := New()
+
+	a := mustScanResp(t, m, makeHTTPCtx("/p1", `x="`+b64(`{"nonce":"AAAAAAAAAAAA"}`)+`"`))
+	b := mustScanResp(t, m, makeHTTPCtx("/p2", `x="`+b64(`{"nonce":"BBBBBBBBBBBB"}`)+`"`))
+	require.NotNil(t, a)
+	require.NotNil(t, b)
+	require.NotEmpty(t, a.DedupKey, "JSON blob should get a structural dedup key")
+	assert.Equal(t, a.DedupKey, b.DedupKey, "same JSON shape + host should coalesce")
+	assert.Equal(t, a.ID(), b.ID(), "coalesced findings share one identity hash")
+
+	// A different JSON shape is a distinct signal → distinct identity.
+	c := mustScanResp(t, m, makeHTTPCtx("/p3", `x="`+b64(`{"apiKey":"secret-value-here-1234"}`)+`"`))
+	require.NotNil(t, c)
+	assert.NotEqual(t, a.DedupKey, c.DedupKey, "different JSON shape must not coalesce")
+}
+
+func TestStructuralSignatureBailsOnNonJSON(t *testing.T) {
+	// A non-JSON blob (an HTTPS URL) must NOT coalesce — its distinct value may be
+	// the signal, so it keeps the default content-based identity.
+	if _, ok := structuralSignature(decodeMatches([]string{b64("https://example.com/secret-path-value")})); ok {
+		t.Fatal("non-JSON blob should not produce a structural signature")
+	}
+	if _, ok := structuralSignature(decodeMatches([]string{"not-decodable"})); ok {
+		t.Fatal("undecodable blob should bail")
+	}
+	if _, ok := structuralSignature(nil); ok {
+		t.Fatal("empty matches should bail")
+	}
+	// A JSON object yields a stable, value-independent signature.
+	sig1, ok1 := structuralSignature(decodeMatches([]string{b64(`{"nonce":"one"}`)}))
+	sig2, ok2 := structuralSignature(decodeMatches([]string{b64(`{"nonce":"two-different"}`)}))
+	if !ok1 || !ok2 || sig1 != sig2 {
+		t.Fatalf("same JSON shape should share a signature: %q(%v) vs %q(%v)", sig1, ok1, sig2, ok2)
+	}
 }

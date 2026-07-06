@@ -36,6 +36,11 @@ func TestLooksLikeURLParam(t *testing.T) {
 		{"plain name and value", "id", "12345", false},
 		{"name substring not url-ish", "username", "bob", false},
 		{"empty", "", "", false},
+		// Standard request headers are never fetch sinks, however URL-like they look.
+		{"referer header with url value", "Referer", "https://site.example/login", false},
+		{"origin header with url value", "Origin", "https://site.example", false},
+		{"upgrade-insecure-requests substring-matches request", "Upgrade-Insecure-Requests", "1", false},
+		{"user-agent header", "User-Agent", "Mozilla/5.0", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

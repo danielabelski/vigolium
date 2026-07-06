@@ -275,7 +275,7 @@ func (m *Module) probeEndpoint(
 		// set is a subset of {POST, OPTIONS}. A generic web-server / front-controller
 		// catch-all answers OPTIONS on *every* path with a broad
 		// "OPTIONS, TRACE, GET, HEAD, POST" Allow and a blank body — the production
-		// false positive on vn.einvoice.grab.com. Reject any Allow set that also
+		// false positive on vn.einvoice.initech.com. Reject any Allow set that also
 		// advertises read/other methods (GET/HEAD/TRACE/PUT/...): that is a server
 		// default, not a mounted Rails route.
 		if !allowAdvertisesIngress(allowHeader) {

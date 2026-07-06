@@ -152,6 +152,52 @@ func TestScanPerRequest_NoFalsePositive_PublicAtWebRoot(t *testing.T) {
 	assert.Empty(t, res, "an escape that resolves to a path already served publicly at the web root must not be reported")
 }
 
+// TestScanPerRequest_NoFalsePositive_WildcardSPAShell reproduces a reported
+// /api../source false positive on a wildcard SPA host: the app serves one
+// identical Angular index.html shell for EVERY unknown path (/, /api../source,
+// /api../<random> and a random web-root directory all return it), while the one
+// real API route /api/source answers 403. On the live WAF/CDN-fronted host the
+// per-suffix differential controls each flaked to a non-2xx and fail-closed
+// toward "escaped", so the finding slipped through. This test models that: the
+// wildcard probe, the in-alias /api/source, the random-suffix and the
+// clean-canonical controls are all defeated (non-2xx), so ONLY the positive
+// catch-all/SPA-shell guard — which samples the site root and a random web-root
+// directory independently — can drop it.
+func TestScanPerRequest_NoFalsePositive_WildcardSPAShell(t *testing.T) {
+	t.Parallel()
+	const shell = "<!doctype html><html lang=\"en\" data-beasties-container><head><title>Acme Portal</title></head><body><app-root></app-root></body></html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		switch {
+		// The one real API route answers 403 (defeats the in-alias differential,
+		// which fails closed on a non-2xx control — exactly the live host).
+		case p == "/api/source":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":403,"message":"forbidden"}`))
+			return
+		// The wildcard probe and the fragile per-suffix controls (random suffix
+		// under the escaped prefix, clean-canonical /source) are throttled to a
+		// 404 — the scan-time flake that disabled every existing gate.
+		case strings.Contains(p, "-vigolium-wp"):
+		case strings.HasPrefix(p, "/api../") && p != "/api../source":
+		case p == "/source":
+		default:
+			// Everything else — the hit /api../source, the site root "/", and the
+			// random web-root directory the catch-all guard probes — is the shell.
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(shell))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("Not Found"))
+	}))
+	defer srv.Close()
+
+	res, err := New().ScanPerRequest(modtest.Request(t, srv.URL+"/api/list"), modtest.Requester(t), &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a wildcard SPA shell served for every path must not be reported even when the differential controls are throttled")
+}
+
 // TestScanPerRequest_NoFalsePositive_TransientOffBySlash reproduces a one-shot
 // 200: only the very first alias-traversal request succeeds, then 404s. The
 // multi-round stability gate must drop it.

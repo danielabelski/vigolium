@@ -112,7 +112,7 @@ func (m *Module) ScanPerRequest(
 	// same empty 200 looks identical but proves no function-level bypass. This is
 	// the dominant false positive — fronting CDNs, XSRF/login bounces, and JSP
 	// `.jspa` action handlers all answer unauthenticated requests with an empty 200
-	// (e.g. stryker-agile.atlassian.net /secure/ConfigureReport.jspa: empty 200 for
+	// (e.g. globex-agile.atlassian.net /secure/ConfigureReport.jspa: empty 200 for
 	// both GET and POST). With no privileged content to reproduce, do not test.
 	if len(bytes.TrimSpace(origBody)) == 0 {
 		return nil, nil
@@ -120,7 +120,7 @@ func (m *Module) ScanPerRequest(
 
 	// Skip static asset / binary responses (images, fonts, media, archives, JS,
 	// CSS). These are CDN-served files, not privileged "endpoints": an Akamai /
-	// Scene7 image route such as /is/image/stryker/System Image returns 200 to
+	// Scene7 image route such as /is/image/globex/System Image returns 200 to
 	// everyone by design, and stripping or switching auth trivially yields the same
 	// bytes — never an authorization bypass. The admin-path heuristic misfires on
 	// these (here "/system" matched inside the "System Image" filename segment),
@@ -430,7 +430,7 @@ func (m *Module) testMethodSwitching(
 			// A switched-method response with an empty body is not evidence that the
 			// privileged function executed. A 2xx with no content is the signature of an
 			// edge gateway or action handler swallowing the request — the
-			// stryker-agile.atlassian.net /secure/ConfigureReport.jspa report returned an
+			// globex-agile.atlassian.net /secure/ConfigureReport.jspa report returned an
 			// empty 200 for POST identical to the GET. Require actual content before
 			// flagging a method-switch bypass.
 			if len(bytes.TrimSpace(candBody)) == 0 {

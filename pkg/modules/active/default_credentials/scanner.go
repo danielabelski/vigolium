@@ -270,7 +270,12 @@ func (m *Module) sendCredentials(
 	// rawReq is well-formed raw, so wrap directly instead of re-parsing on this hot path.
 	fuzzedReq := httpmsg.NewRequestResponseRaw(rawReq, ctx.Service())
 
-	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
+	// NoClustering: confirmCredentialSuccess re-sends the SAME credentials to prove the
+	// success verdict reproduces (deterministic, not a one-off differential). The 500ms
+	// request-cluster cache keys on raw request bytes, so a clustered re-send returns
+	// the first response's cached copy and "reproduces" trivially — even for a transient
+	// success (a false positive). Every credential send must be a genuine round-trip.
+	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true, NoClustering: true})
 	if err != nil {
 		return credentialResponse{}, err
 	}

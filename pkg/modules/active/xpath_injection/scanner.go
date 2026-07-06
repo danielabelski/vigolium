@@ -54,6 +54,18 @@ var (
 	}
 )
 
+// stringInert / numericInert carry the OR keyword yet are logically FALSE (they
+// OR in a contradiction, so the predicate collapses to the original clause). A
+// genuine XPath oracle evaluates them as false — they render the false/baseline
+// page, never the always-true page. An endpoint that instead renders the TRUE
+// page for them is reacting to the mere presence of the `or` token (a WAF or
+// keyword-matching differential), not to boolean truth, and the boolean leg would
+// otherwise misread that keyword differential as an injection.
+const (
+	stringInert  = `' or '1'='2`
+	numericInert = ` or 1=2`
+)
+
 // Module implements the XPath Injection active scanner.
 type Module struct {
 	modkit.BaseActiveModule
@@ -181,6 +193,20 @@ func (m *Module) scanErrorBased(
 // dynamic-content noise; requiring a true/false difference rules out a
 // non-injectable parameter (where all four responses are identical). A SPA / catch-
 // all shell returns the same page for everything, so it fails this closed.
+//
+// Three additional gates defend the weakest, most FP-prone leg against differentials
+// that are not XPath:
+//
+//   - Determinism: the endpoint must answer the ORIGINAL value the same way twice
+//     on a stable 2xx. Many login/workflow endpoints instead flap between a 200 page
+//     and a 302 redirect (rotating session tokens) independent of our input; on
+//     those the "true/false differential" is that flapping, not injected logic.
+//   - Status discipline: a real oracle returns 200 for BOTH branches (same page
+//     shape, different content). A 200↔302/4xx/5xx split across branches is a status
+//     flip (auth redirect, error page), not the query result reacting.
+//   - Inert control: an OR-keyword-but-logically-false payload must NOT reproduce the
+//     TRUE page. If it does, the endpoint keys off the `or` token (a WAF/keyword
+//     differential), not boolean truth.
 func (m *Module) scanBoolean(
 	ctx *httpmsg.HttpRequestResponse,
 	ip httpmsg.InsertionPoint,
@@ -188,23 +214,44 @@ func (m *Module) scanBoolean(
 	target, base string,
 ) *output.ResultEvent {
 	pairs := stringBoolPairs
+	inert := stringInert
 	if infra.IsNumericValue(base) {
 		pairs = numericBoolPairs
+		inert = numericInert
 	}
 
-	t1, ok1 := m.sendOK(ctx, ip, httpClient, base+pairs[0].truthy)
-	t2, ok2 := m.sendOK(ctx, ip, httpClient, base+pairs[1].truthy)
-	f1, ok3 := m.sendOK(ctx, ip, httpClient, base+pairs[0].falsy)
-	f2, ok4 := m.sendOK(ctx, ip, httpClient, base+pairs[1].falsy)
+	// Boolean matrix: two independent always-true and always-false payloads. Every
+	// probe must be a usable 2xx — a branch flipping to a 302/4xx/5xx is a status
+	// artifact (auth redirect, error page), not the injected logic. Then require
+	// operand agreement within each branch and a real true/false differential.
+	t1, ok1 := m.sendUsable(ctx, ip, httpClient, base+pairs[0].truthy)
+	t2, ok2 := m.sendUsable(ctx, ip, httpClient, base+pairs[1].truthy)
+	f1, ok3 := m.sendUsable(ctx, ip, httpClient, base+pairs[0].falsy)
+	f2, ok4 := m.sendUsable(ctx, ip, httpClient, base+pairs[1].falsy)
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return nil
 	}
-
-	// Independent-operand agreement (multi-round) + a real true/false differential.
-	if !modkit.BodiesSimilar(t1, t2) || !modkit.BodiesSimilar(f1, f2) {
+	if !modkit.BodiesSimilar(t1, t2) || !modkit.BodiesSimilar(f1, f2) || modkit.BodiesSimilar(t1, f1) {
 		return nil
 	}
-	if modkit.BodiesSimilar(t1, f1) {
+
+	// Determinism precondition (only worth paying once a clean differential exists):
+	// the endpoint must answer the ORIGINAL value the same way twice on a stable 2xx.
+	// Many login/workflow endpoints instead flap between a 200 page and a 302 redirect
+	// (rotating session tokens) independent of our input; on those the differential
+	// above is that flapping, not injected logic — fail closed.
+	b1, bok1 := m.sendUsable(ctx, ip, httpClient, base)
+	b2, bok2 := m.sendUsable(ctx, ip, httpClient, base)
+	if !bok1 || !bok2 || !modkit.BodiesSimilar(b1, b2) {
+		return nil
+	}
+
+	// Inert control: an OR-keyword-but-logically-false payload must render the
+	// false/baseline page, never the TRUE page. If it reproduces the TRUE page, the
+	// differential tracks the `or` keyword rather than boolean truth — reject. A
+	// blocked/failed/non-2xx inert probe (sendUsable ok=false) proves nothing and is
+	// ignored (that check fails open).
+	if ib, iok := m.sendUsable(ctx, ip, httpClient, base+inert); iok && modkit.BodiesSimilar(ib, t1) {
 		return nil
 	}
 
@@ -216,6 +263,39 @@ func (m *Module) scanBoolean(
 		})
 }
 
+// sendStatus issues a request with value at the insertion point and returns the
+// body, HTTP status code, whether it was a WAF/CDN block, and whether the request
+// succeeded. The status lets the boolean leg enforce that a differential is a
+// 200-vs-200 content difference rather than a status flip.
+//
+// The boolean leg sends with NoClustering so every probe is a genuine network
+// round-trip. The 500ms request-cluster cache keys on raw request bytes, so
+// without this the determinism precondition (the original value fetched twice)
+// would compare a response against its own cached copy and never observe a
+// flapping endpoint — the exact non-determinism the gate exists to reject.
+func (m *Module) sendStatus(
+	ctx *httpmsg.HttpRequestResponse,
+	ip httpmsg.InsertionPoint,
+	httpClient *http.Requester,
+	value string,
+) (body string, status int, blocked bool, ok bool) {
+	raw := ip.BuildRequest([]byte(value))
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
+	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
+	if err != nil {
+		return "", 0, false, false
+	}
+	defer resp.Close()
+	if infra.IsBlockedResponse(resp) {
+		return "", 0, true, true
+	}
+	sc := 0
+	if resp.Response() != nil {
+		sc = resp.Response().StatusCode
+	}
+	return resp.Body().String(), sc, false, true
+}
+
 // send issues a request with value at the insertion point and returns the body,
 // whether it was a WAF/CDN block, and whether the request succeeded.
 func (m *Module) send(
@@ -224,32 +304,22 @@ func (m *Module) send(
 	httpClient *http.Requester,
 	value string,
 ) (body string, blocked bool, ok bool) {
-	raw := ip.BuildRequest([]byte(value))
-	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
-	resp, _, err := httpClient.Execute(req, http.Options{})
-	if err != nil {
-		return "", false, false
-	}
-	defer resp.Close()
-	if infra.IsBlockedResponse(resp) {
-		return "", true, true
-	}
-	return resp.Body().String(), false, true
+	body, _, blocked, ok = m.sendStatus(ctx, ip, httpClient, value)
+	return body, blocked, ok
 }
 
-// sendOK is send() reduced to (body, ok): a blocked or failed request is not ok,
-// so the boolean oracle never draws a conclusion from a block page.
-func (m *Module) sendOK(
+// sendUsable sends value and reports the body plus whether the response is USABLE
+// as a boolean-oracle branch: a non-blocked 2xx. A failed, WAF-blocked, or non-2xx
+// (status-flip) response is not a content differential the injected logic could
+// produce, so the boolean leg treats it as unusable.
+func (m *Module) sendUsable(
 	ctx *httpmsg.HttpRequestResponse,
 	ip httpmsg.InsertionPoint,
 	httpClient *http.Requester,
 	value string,
 ) (string, bool) {
-	body, blocked, ok := m.send(ctx, ip, httpClient, value)
-	if !ok || blocked {
-		return "", false
-	}
-	return body, true
+	body, status, blocked, ok := m.sendStatus(ctx, ip, httpClient, value)
+	return body, ok && !blocked && infra.Is2xx(status)
 }
 
 // result builds the finding for a confirmed XPath injection at ip.

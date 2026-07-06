@@ -254,7 +254,12 @@ func (m *Module) sendTimedPayload(
 	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	start := time.Now()
-	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
+	// NoClustering: this is a timing oracle. The slow/fast payloads are each re-sent
+	// across confirmation rounds; the 500ms request-cluster cache keys on raw request
+	// bytes, so a clustered re-send of the slow payload returns the first response's
+	// cached copy in ~0ms — below slowMinDuration — and blind SSTI can essentially
+	// never be confirmed (a false negative). Every send must be a genuine round-trip.
+	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true, NoClustering: true})
 	elapsed := time.Since(start)
 
 	if err != nil {

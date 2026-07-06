@@ -2,9 +2,11 @@ package base64_data_detect
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -86,7 +88,8 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 			if !isMediaContentType(ct) {
 				if matches := findBase64Matches(body); len(matches) > 0 {
 					if rhm == nil || rhm.ShouldCheck3(urlx, ctx.Request().Method(), ctx.Request().BodyToString(), "", "", "b64-resp") {
-						extracted, preview := buildExtracted("response", matches)
+						decoded := decodeMatches(matches)
+						extracted, preview := buildExtracted("response", decoded)
 						results = append(results, &output.ResultEvent{
 							ModuleID:         ModuleID,
 							Host:             urlx.Host,
@@ -94,6 +97,7 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 							Matched:          urlx.String(),
 							Request:          string(ctx.Request().Raw()),
 							ExtractedResults: extracted,
+							DedupKey:         structuralDedupKey(urlx.Host, "response", decoded),
 							Info: output.Info{
 								Name:        "Base64 Encoded Data in Response",
 								Description: describeBase64("response", preview),
@@ -112,7 +116,8 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		raw := string(ctx.Request().Raw())
 		if matches := findBase64Matches(raw); len(matches) > 0 {
 			if rhm == nil || rhm.ShouldCheck3(urlx, ctx.Request().Method(), ctx.Request().BodyToString(), "", "", "b64-req") {
-				extracted, preview := buildExtracted("request", matches)
+				decoded := decodeMatches(matches)
+				extracted, preview := buildExtracted("request", decoded)
 				results = append(results, &output.ResultEvent{
 					ModuleID:         ModuleID,
 					Host:             urlx.Host,
@@ -120,6 +125,7 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 					Matched:          urlx.String(),
 					Request:          raw,
 					ExtractedResults: extracted,
+					DedupKey:         structuralDedupKey(urlx.Host, "request", decoded),
 					Info: output.Info{
 						Name:        "Base64 Encoded Data in Request",
 						Description: describeBase64("request", preview),
@@ -159,17 +165,89 @@ func findBase64Matches(s string) []string {
 	return unique
 }
 
+// decodedMatch pairs a raw base64 match with its decoded bytes so a single decode
+// pass feeds both the human-readable extracted lines (buildExtracted) and the
+// structural dedup key (structuralSignature). ok is false when the blob could not
+// be decoded.
+type decodedMatch struct {
+	raw     string
+	decoded string
+	ok      bool
+}
+
+// decodeMatches decodes each base64 match exactly once, so callers that need both
+// the decoded text and its structure don't decode the same blobs twice.
+func decodeMatches(matches []string) []decodedMatch {
+	out := make([]decodedMatch, len(matches))
+	for i, m := range matches {
+		dec, ok := decodeBase64Blob(m)
+		out[i] = decodedMatch{raw: m, decoded: dec, ok: ok}
+	}
+	return out
+}
+
+// structuralDedupKey returns an explicit finding-identity key that groups base64
+// findings by the JSON shape of their decoded blobs on a host, or "" to fall back
+// to the default content hash. The motivating noise: SPA frameworks (e.g.
+// Salesforce Lightning) embed a rotating token like {"nonce":"<changes-per-page>"}
+// in every response, so a crawler produces one near-identical Info finding per URL,
+// differing only by the token value. Keying on (host, source, JSON-shape) collapses
+// those to a single finding while a blob with a different shape — a genuinely
+// different encoded payload — keeps its own identity. Returns "" unless EVERY match
+// decodes to a JSON object, so opaque/binary/non-JSON blobs (where a distinct value
+// may itself be the signal) are never coalesced.
+func structuralDedupKey(host, source string, matches []decodedMatch) string {
+	sig, ok := structuralSignature(matches)
+	if !ok {
+		return ""
+	}
+	return "b64:" + host + ":" + source + ":" + sig
+}
+
+// structuralSignature builds a value-independent signature from a set of decoded
+// base64 matches when every one is a JSON object, and reports ok=false otherwise.
+// The signature is the sorted multiset of each object's sorted top-level key set,
+// so two responses whose blobs share the same JSON shape collapse regardless of the
+// (rotating) values, while a differing shape stays distinct.
+func structuralSignature(matches []decodedMatch) (string, bool) {
+	if len(matches) == 0 {
+		return "", false
+	}
+	sigs := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if !m.ok {
+			return "", false
+		}
+		trimmed := strings.TrimSpace(m.decoded)
+		if !strings.HasPrefix(trimmed, "{") {
+			return "", false
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+			return "", false
+		}
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		sigs = append(sigs, "{"+strings.Join(keys, ",")+"}")
+	}
+	sort.Strings(sigs)
+	return strings.Join(sigs, ";"), true
+}
+
 // buildExtracted builds the ExtractedResults lines for a set of matches and
 // returns the first decoded value as a short preview. Each match yields a raw
 // line and, when the blob decodes to displayable text, an extra "(decoded)" line
 // so the plaintext appears directly in the finding.
-func buildExtracted(source string, matches []string) (extracted []string, preview string) {
+func buildExtracted(source string, matches []decodedMatch) (extracted []string, preview string) {
 	extracted = make([]string, 0, len(matches)*2+1)
 	extracted = append(extracted, "Source: "+source)
-	for _, match := range matches {
-		prefix := identifyPrefix(match)
-		extracted = append(extracted, fmt.Sprintf("%s: %s", prefix, modkit.Truncate(match, 80)))
-		decoded := decodeForDisplay(match)
+	for _, m := range matches {
+		prefix := identifyPrefix(m.raw)
+		extracted = append(extracted, fmt.Sprintf("%s: %s", prefix, modkit.Truncate(m.raw, 80)))
+		decoded := displayableDecoded(m)
 		if decoded == "" {
 			continue
 		}
@@ -192,15 +270,14 @@ func describeBase64(source, preview string) string {
 	return desc
 }
 
-// decodeForDisplay decodes a base64 blob into a single-line, displayable string,
-// or returns "" when it can't be decoded to text (e.g. binary Java serialized
-// objects) so the finding only ever shows readable plaintext.
-func decodeForDisplay(match string) string {
-	decoded, ok := decodeBase64Blob(match)
-	if !ok {
+// displayableDecoded renders an already-decoded base64 blob as a single-line,
+// displayable string, or returns "" when it isn't decodable to text (e.g. binary
+// Java serialized objects) so the finding only ever shows readable plaintext.
+func displayableDecoded(m decodedMatch) string {
+	if !m.ok {
 		return ""
 	}
-	collapsed := collapseWhitespace(decoded)
+	collapsed := collapseWhitespace(m.decoded)
 	if !isDisplayableText(collapsed) {
 		return ""
 	}
