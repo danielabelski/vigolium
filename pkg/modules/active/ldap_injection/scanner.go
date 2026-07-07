@@ -113,6 +113,13 @@ func (m *Module) ScanPerInsertionPoint(
 		return nil, errors.Wrap(err, "failed to get URL")
 	}
 
+	// Reject media/JS URLs, OPTIONS/CONNECT, and CDN-edge infra paths (/cdn-cgi/):
+	// none route to an LDAP-backed application, and a CDN challenge endpoint returns
+	// an opaque per-request body that fools the wildcard differential.
+	if !infra.IsValidForInjectionVulns(urlx, ctx) {
+		return nil, nil
+	}
+
 	// Only test parameters whose name suggests LDAP usage
 	if !isLDAPRelatedParam(ip.Name()) {
 		return nil, nil
@@ -187,11 +194,11 @@ func (m *Module) ScanPerInsertionPoint(
 		resp.Close()
 	}
 
-	// Boolean-based detection is a body-size differential, so skip it on an
-	// unreliable surface — a cache/CDN-fronted response (HIT/MISS swings) or a large
-	// rendered HTML page (per-request dynamic content) manufactures phantom
-	// wildcard-vs-control deltas. The error-based pass above is a token match and is
-	// unaffected, so it still runs on these surfaces.
+	// Boolean-based detection is a body-size differential, so skip it on an unreliable
+	// surface — a cache/CDN-fronted response (HIT/MISS swings), a large rendered HTML
+	// page (per-request dynamic content), or an opaque high-entropy body (encrypted
+	// CDN/challenge blob) all manufacture phantom wildcard-vs-control deltas. The
+	// error-based pass above is a token match and is unaffected, so it still runs.
 	if modkit.DifferentialSurfaceUnreliable(ctx.Response()) {
 		return results, nil
 	}
@@ -380,6 +387,14 @@ func (m *Module) probeSignature(
 		return responseSignature{}, "", false
 	}
 	defer resp.Close()
+
+	// A WAF/CDN block, auth gate, or rate-limit page — even one served with a 200
+	// status — is not an LDAP result page. Treating it as a usable probe would let
+	// the edge's content manufacture a wildcard-vs-control differential, so report it
+	// as unusable (the boolean leg aborts rather than trusting the block body).
+	if infra.IsBlockedResponse(resp) {
+		return responseSignature{}, "", false
+	}
 
 	body := resp.Body().String()
 	sig := newResponseSignature(resp.Response().StatusCode, body)

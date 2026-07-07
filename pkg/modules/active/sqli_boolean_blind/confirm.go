@@ -8,7 +8,10 @@ import (
 // confirmRounds is how many independent rounds (with fresh random operands)
 // each confirmation factor is replayed. More rounds = stronger guarantee that
 // the boolean condition — not request-to-request noise — drives the response.
-const confirmRounds = 2
+// Three independent operands (mirroring the xpath_injection boolean oracle) make
+// it far harder for per-request dynamic content to line every TRUE round into one
+// cluster and every FALSE round into another by chance.
+const confirmRounds = 3
 
 // confirmLogic runs a multi-round, multi-factor logic battery in the breakout
 // boundary that detection matched. It is the primary false-positive killer for

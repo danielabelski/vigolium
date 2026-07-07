@@ -71,6 +71,13 @@ func (m *Module) ScanPerInsertionPoint(
 		return nil, errors.Wrap(err, "failed to get URL")
 	}
 
+	// Reject media/JS URLs, OPTIONS/CONNECT, and CDN-edge infra paths (/cdn-cgi/):
+	// none route to a NoSQL-backed application, and a CDN challenge endpoint returns
+	// an opaque per-request body that fools the boolean/size differential.
+	if !infra.IsValidForInjectionVulns(urlx, ctx) {
+		return nil, nil
+	}
+
 	// Dedup check
 	rhm := m.rhm.Get(scanCtx.DedupMgr())
 	if rhm != nil {
@@ -391,27 +398,63 @@ func (m *Module) testTimeBasedPayload(
 		return nil, nil
 	}
 
-	fuzzedValue := ip.BaseValue() + payload.value
-	fuzzedRaw := ip.BuildRequest([]byte(fuzzedValue))
+	// The three probes exercise the SAME $where JS-eval path; only the sleep argument
+	// differs. Their payloads are loop-invariant, so build them once. The high-sleep
+	// payload is also the finding's evidence pair.
+	controlVal := ip.BaseValue() + whereSleep(timeBasedControlMs)
+	lowVal := ip.BaseValue() + whereSleep(timeBasedLowMs)
+	highVal := ip.BaseValue() + whereSleep(timeBasedHighMs)
+	fuzzedRaw := ip.BuildRequest([]byte(highVal))
 
-	var lastDelay time.Duration
+	// probe measures one sleep magnitude, reporting whether the response is unusable
+	// as a timing sample (a WAF/CDN block or a NoSQL error surface, on which latency
+	// proves nothing).
+	probe := func(value string) (dur time.Duration, unusable bool, err error) {
+		d, body, blocked, err := m.measureDuration(ctx, ip, httpClient, value)
+		if err != nil {
+			return 0, false, err
+		}
+		return d, blocked || containsNoSQLError(body), nil
+	}
+
+	var lastControl, lastLow, lastHigh time.Duration
 	for i := 0; i < timeBasedConfirmationRounds; i++ {
-		probeDuration, body, blocked, err := m.measureDuration(ctx, ip, httpClient, fuzzedValue)
+		control, bad, err := probe(controlVal)
 		if err != nil {
 			return nil, err
 		}
-		// A 401/403/429/503 or WAF/CDN challenge on the sleep payload injects its
-		// own latency that masquerades as a time delay — drop, don't confirm.
-		if blocked {
+		if bad {
 			return nil, nil
 		}
-		if containsNoSQLError(body) {
+		low, bad, err := probe(lowVal)
+		if err != nil {
+			return nil, err
+		}
+		if bad {
 			return nil, nil
 		}
-		if !analyzeTimeDelay(baselineDuration, probeDuration) {
+		high, bad, err := probe(highVal)
+		if err != nil {
+			return nil, err
+		}
+		if bad {
 			return nil, nil
 		}
-		lastDelay = probeDuration - baselineDuration
+
+		// Coarse floor: the high sleep must clear the absolute threshold over the
+		// control (guards a control that itself came back oddly slow). Then require
+		// the delay to scale with the injected duration over the control — a
+		// constant-expensive $where scan delays the control just as much, so nothing
+		// scales, and a spike on only the high probe leaves the low sleep flat.
+		if !analyzeTimeDelay(control, high) {
+			return nil, nil
+		}
+		if !infra.ScaledDelayConfirmed(control, low, high,
+			time.Duration(timeBasedLowMs)*time.Millisecond, time.Duration(timeBasedHighMs)*time.Millisecond,
+			timeScaleDenom, timeOvershootFactor) {
+			return nil, nil
+		}
+		lastControl, lastLow, lastHigh = control, low, high
 	}
 
 	ev := modkit.NewEvidenceCollector()
@@ -423,13 +466,15 @@ func (m *Module) testTimeBasedPayload(
 		Matched:            urlx.String(),
 		Request:            string(fuzzedRaw),
 		FuzzingParameter:   ip.Name(),
-		ExtractedResults:   []string{payload.value},
+		ExtractedResults:   []string{whereSleep(timeBasedHighMs), whereSleep(timeBasedControlMs)},
 		AdditionalEvidence: ev.Entries(),
 		Info: output.Info{
 			Name: "NoSQL Operator Injection",
 			Description: fmt.Sprintf(
-				"Time-based injection confirmed over %d rounds (baseline %dms, last probe delayed by %dms) — %s via parameter %q",
-				timeBasedConfirmationRounds, baselineDuration.Milliseconds(), lastDelay.Milliseconds(), payload.desc, ip.Name(),
+				"Time-based injection confirmed over %d rounds; the response delay scales with the injected $where "+
+					"sleep duration (final round: no-sleep %dms, %dms-sleep %dms, %dms-sleep %dms) — %s via parameter %q",
+				timeBasedConfirmationRounds, lastControl.Milliseconds(), timeBasedLowMs, lastLow.Milliseconds(),
+				timeBasedHighMs, lastHigh.Milliseconds(), payload.desc, ip.Name(),
 			),
 			// Time-based inference is prone to backend-delay false positives
 			// (unlike the auth-bypass/boolean paths) — flag as suspect.
@@ -440,11 +485,20 @@ func (m *Module) testTimeBasedPayload(
 		},
 		Metadata: map[string]any{
 			"baseline_ms":         baselineDuration.Milliseconds(),
-			"delay_ms":            lastDelay.Milliseconds(),
-			"sleep_ms":            timeBasedSleepMs,
+			"control_ms":          lastControl.Milliseconds(),
+			"low_sleep_ms":        timeBasedLowMs,
+			"high_sleep_ms":       timeBasedHighMs,
 			"confirmation_rounds": timeBasedConfirmationRounds,
 		},
 	}, nil
+}
+
+// whereSleep builds a MongoDB $where sleep payload for the given millisecond
+// duration. Used by the time-based leg to probe several sleep magnitudes (including
+// a no-sleep control) on the identical $where JS-eval path so the delay's scaling
+// with the injected duration can be verified.
+func whereSleep(ms int) string {
+	return fmt.Sprintf(`{"$where":"sleep(%d)"}`, ms)
 }
 
 // measureDuration executes a single request with the given fuzzed value and

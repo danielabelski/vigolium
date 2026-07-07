@@ -80,6 +80,8 @@ func (m *Module) ScanPerRequest(
 	// content (ads, recommendations, rotating blocks) manufacture phantom TRUE/FALSE
 	// differentials. Boolean-blind detection is entirely a body differential, so
 	// skip the whole request on such a surface.
+	// Covers cache/CDN-fronted surfaces, large dynamic HTML, and opaque high-entropy
+	// bodies (encrypted CDN/challenge blobs) — all unreliable for a body differential.
 	if modkit.DifferentialSurfaceUnreliable(ctx.Response()) {
 		return results, nil
 	}

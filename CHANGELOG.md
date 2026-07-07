@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.2.3] - 2026-07-07
+
+False-positive hardening for the injection modules plus search-flag ergonomics. No new modules (registry stays at 198 active + 115 passive).
+
+### Added
+
+- **`--exclude-search` / `--exclude-header` / `--exclude-body` on `finding`, `traffic`, `db ls`** — inverse of the search flags; drop any row where the term appears. `--exclude-search` is repeatable (AND-combined).
+
+### Changed
+
+- **`--search` / `--header` / `--body` now span the full request/response corpus** (URL, path, headers, body — and linked records for `finding`), not just URL/path.
+- **XPath boolean oracle hardened** — three operand pairs (was two) plus symmetric OR-false/AND-true inert controls; `sqli-boolean-blind` confirmation raised to three rounds.
+
+### Fixed
+
+- **Time-based injection FPs** — new `infra.ScaledDelayConfirmed` requires the delay to scale with the injected sleep over a no-sleep control, across `sqli-time-blind`, `command-injection-timing`, and `nosqli-operator-injection`.
+- **CDN/challenge FPs** — `infra.LooksOpaqueBody` (entropy) and `infra.IsCDNInfraPath` (`/cdn-cgi/`) make the differential and injection modules fail closed on opaque, non-deterministic edge responses; `xpath-injection` also skips standard request headers, and `ldap-injection` rejects block pages served with a 200.
+
 ## [v0.2.2] - 2026-07-07
 
 A false-positive-hardening and read-command ergonomics release on top of v0.2.1 — no new modules (registry stays at 198 active + 115 passive). It fixes two shared root causes behind a class of differential/blind false positives — confirmation legs that "reproduced" against a cached response, and non-deterministic endpoints whose status flips were misread as injection — and tightens signature-stripping, OAST callback fan-out, and hygiene-finding noise.

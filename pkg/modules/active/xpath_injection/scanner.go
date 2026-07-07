@@ -33,37 +33,51 @@ var xpathErrorRe = regexp.MustCompile(`(?i)(` +
 // expression, provoking an engine error when the value reaches an XPath query.
 var errorBreakers = []string{`'`, `"`, `']`, `')`, `'|`}
 
-// boolPair is one always-true / always-false payload pair. Two pairs with
-// different operands are used so a confirmed injection must reproduce across
-// independent values (multi-round), ruling out dynamic-content coincidence.
+// boolPair is one always-true / always-false payload pair. THREE pairs with
+// different operands are used so a confirmed injection must reproduce across three
+// independent values, ruling out dynamic-content coincidence: a per-request
+// changing body (a CDN challenge, a rotating token page) will not line three
+// distinct always-true operands into one cluster and three distinct always-false
+// operands into another by chance.
 type boolPair struct {
 	truthy string
 	falsy  string
 }
 
 // stringBoolPairs break out of a single-quoted XPath string context; numericBoolPairs
-// suit an unquoted numeric predicate.
+// suit an unquoted numeric predicate. Each pair uses a distinct operand so agreement
+// within a branch is agreement across independent values, not a repeated payload.
 var (
 	stringBoolPairs = []boolPair{
 		{truthy: `' or '1'='1`, falsy: `' and '1'='2`},
 		{truthy: `' or '7'='7`, falsy: `' and '3'='4`},
+		{truthy: `' or '9'='9`, falsy: `' and '8'='7`},
 	}
 	numericBoolPairs = []boolPair{
 		{truthy: ` or 1=1`, falsy: ` and 1=2`},
 		{truthy: ` or 7=7`, falsy: ` and 3=4`},
+		{truthy: ` or 9=9`, falsy: ` and 8=7`},
 	}
 )
 
-// stringInert / numericInert carry the OR keyword yet are logically FALSE (they
-// OR in a contradiction, so the predicate collapses to the original clause). A
-// genuine XPath oracle evaluates them as false — they render the false/baseline
-// page, never the always-true page. An endpoint that instead renders the TRUE
-// page for them is reacting to the mere presence of the `or` token (a WAF or
-// keyword-matching differential), not to boolean truth, and the boolean leg would
-// otherwise misread that keyword differential as an injection.
-const (
-	stringInert  = `' or '1'='2`
-	numericInert = ` or 1=2`
+// inertControls are payloads that carry an XPath boolean keyword yet are logically
+// INERT — they leave the original predicate's truth value unchanged, so a genuine
+// oracle renders the false/baseline page for them, NEVER the always-true page:
+//
+//   - OR-false (' or '1'='2): ORs in a contradiction → predicate collapses to the
+//     original clause.
+//   - AND-true (' and '1'='1): ANDs in a tautology → predicate collapses to the
+//     original clause.
+//
+// They probe opposite keywords (`or` vs `and`) with opposite logic, yet must reach
+// the same non-true outcome. An endpoint that renders the TRUE page for EITHER is
+// reacting to the mere presence of the keyword (a WAF or keyword-matching
+// differential), not to boolean truth — the boolean leg would otherwise misread that
+// keyword differential as an injection. Requiring BOTH keywords to stay non-true
+// gives symmetric coverage that a single OR-only control missed.
+var (
+	stringInertControls  = []string{`' or '1'='2`, `' and '1'='1`}
+	numericInertControls = []string{` or 1=2`, ` and 1=1`}
 )
 
 // Module implements the XPath Injection active scanner.
@@ -113,6 +127,15 @@ func (m *Module) ScanPerInsertionPoint(
 		return nil, nil
 	}
 
+	// A fixed browser request header (Accept-Language, User-Agent, Accept, ...) is
+	// attacker-settable but never an XPath sink — no application concatenates it into
+	// an XPath expression. On a CDN/challenge endpoint its value is reflected into a
+	// per-request opaque body that fools the boolean oracle (the evr-kr.roche.com
+	// Accept-Language /cdn-cgi false positive). Skip standard request headers.
+	if ip.Type() == httpmsg.INS_HEADER && infra.IsStandardRequestHeader(ip.Name()) {
+		return nil, nil
+	}
+
 	rhm := m.rhm.Get(scanCtx.DedupMgr())
 	if rhm != nil {
 		if !rhm.ShouldCheckInsertionPoint(urlx, ctx.Request(), ip.Name(), ip.BaseValue(), fmt.Sprintf("%d", ip.Type())) {
@@ -132,6 +155,13 @@ func (m *Module) ScanPerInsertionPoint(
 		if ctx.Response() != nil {
 			baselineBody = ctx.Response().BodyToString()
 		}
+	}
+
+	// An XPath backend renders text/markup; an opaque high-entropy body (a compressed
+	// or encrypted CDN/challenge blob) is not an XPath surface, and its per-request
+	// content churn is exactly what fools the boolean oracle. Fail closed on it.
+	if infra.LooksOpaqueBody(baselineBody) {
+		return nil, nil
 	}
 
 	// Leg 1: error-based (strongest signal).
@@ -187,26 +217,30 @@ func (m *Module) scanErrorBased(
 	return nil
 }
 
-// scanBoolean runs the boolean oracle: two independent always-true payloads must
-// agree, two independent always-false payloads must agree, and the true and false
-// responses must differ. Requiring agreement across different operands rules out
-// dynamic-content noise; requiring a true/false difference rules out a
-// non-injectable parameter (where all four responses are identical). A SPA / catch-
-// all shell returns the same page for everything, so it fails this closed.
+// scanBoolean runs the boolean oracle. To be believed, the parameter must behave
+// like a real XPath boolean predicate under FIVE independent confirmations, all of
+// which a non-XPath differential (dynamic content, a keyword-matching WAF, a status
+// flip) fails:
 //
-// Three additional gates defend the weakest, most FP-prone leg against differentials
-// that are not XPath:
-//
-//   - Determinism: the endpoint must answer the ORIGINAL value the same way twice
-//     on a stable 2xx. Many login/workflow endpoints instead flap between a 200 page
-//     and a 302 redirect (rotating session tokens) independent of our input; on
-//     those the "true/false differential" is that flapping, not injected logic.
-//   - Status discipline: a real oracle returns 200 for BOTH branches (same page
-//     shape, different content). A 200↔302/4xx/5xx split across branches is a status
-//     flip (auth redirect, error page), not the query result reacting.
-//   - Inert control: an OR-keyword-but-logically-false payload must NOT reproduce the
-//     TRUE page. If it does, the endpoint keys off the `or` token (a WAF/keyword
-//     differential), not boolean truth.
+//   - Multi-operand agreement: THREE independent always-true payloads must all land
+//     on one page and THREE independent always-false payloads on another. Three
+//     distinct operands clustering by truth value (not by payload) is the signature
+//     of boolean evaluation; per-request dynamic content will not align three
+//     different always-true values into one cluster and three different always-false
+//     values into another by chance.
+//   - True/false differential: the true and false clusters must differ — a catch-all
+//     SPA/shell that returns one page for everything fails this closed.
+//   - Status discipline: every probe must be a usable 2xx (via sendUsable). A branch
+//     flipping to a 302/4xx/5xx is a status artifact (auth redirect, error page), not
+//     the query result reacting.
+//   - Determinism: the endpoint must answer the ORIGINAL value the same way twice on
+//     a stable 2xx, ruling out endpoints that flap between pages independent of input.
+//   - Symmetric inert controls: an OR-keyword-but-false payload AND an
+//     AND-keyword-but-true payload must each render a NON-true page. Either one
+//     reproducing the true page means the endpoint keys off the keyword (WAF/keyword
+//     differential), not boolean truth. Testing both `or` and `and` keywords catches
+//     a keyword reaction on either token, which the former single OR-only control let
+//     through.
 func (m *Module) scanBoolean(
 	ctx *httpmsg.HttpRequestResponse,
 	ip httpmsg.InsertionPoint,
@@ -214,26 +248,40 @@ func (m *Module) scanBoolean(
 	target, base string,
 ) *output.ResultEvent {
 	pairs := stringBoolPairs
-	inert := stringInert
+	inertControls := stringInertControls
 	if infra.IsNumericValue(base) {
 		pairs = numericBoolPairs
-		inert = numericInert
+		inertControls = numericInertControls
 	}
 
-	// Boolean matrix: two independent always-true and always-false payloads. Every
-	// probe must be a usable 2xx — a branch flipping to a 302/4xx/5xx is a status
-	// artifact (auth redirect, error page), not the injected logic. Then require
-	// operand agreement within each branch and a real true/false differential.
-	t1, ok1 := m.sendUsable(ctx, ip, httpClient, base+pairs[0].truthy)
-	t2, ok2 := m.sendUsable(ctx, ip, httpClient, base+pairs[1].truthy)
-	f1, ok3 := m.sendUsable(ctx, ip, httpClient, base+pairs[0].falsy)
-	f2, ok4 := m.sendUsable(ctx, ip, httpClient, base+pairs[1].falsy)
-	if !ok1 || !ok2 || !ok3 || !ok4 {
+	// Boolean matrix: three independent always-true and three always-false payloads.
+	// Every probe must be a usable 2xx; then require agreement within each branch and
+	// a real true/false differential.
+	trueBodies := make([]string, 0, len(pairs))
+	falseBodies := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		tb, tok := m.sendUsable(ctx, ip, httpClient, base+p.truthy)
+		if !tok {
+			return nil
+		}
+		trueBodies = append(trueBodies, tb)
+	}
+	for _, p := range pairs {
+		fb, fok := m.sendUsable(ctx, ip, httpClient, base+p.falsy)
+		if !fok {
+			return nil
+		}
+		falseBodies = append(falseBodies, fb)
+	}
+	// Each branch must be internally consistent across its independent operands, and
+	// the two branches must genuinely differ.
+	if !allBodiesSimilar(trueBodies) || !allBodiesSimilar(falseBodies) {
 		return nil
 	}
-	if !modkit.BodiesSimilar(t1, t2) || !modkit.BodiesSimilar(f1, f2) || modkit.BodiesSimilar(t1, f1) {
+	if modkit.BodiesSimilar(trueBodies[0], falseBodies[0]) {
 		return nil
 	}
+	truePage := trueBodies[0]
 
 	// Determinism precondition (only worth paying once a clean differential exists):
 	// the endpoint must answer the ORIGINAL value the same way twice on a stable 2xx.
@@ -246,21 +294,40 @@ func (m *Module) scanBoolean(
 		return nil
 	}
 
-	// Inert control: an OR-keyword-but-logically-false payload must render the
-	// false/baseline page, never the TRUE page. If it reproduces the TRUE page, the
-	// differential tracks the `or` keyword rather than boolean truth — reject. A
-	// blocked/failed/non-2xx inert probe (sendUsable ok=false) proves nothing and is
-	// ignored (that check fails open).
-	if ib, iok := m.sendUsable(ctx, ip, httpClient, base+inert); iok && modkit.BodiesSimilar(ib, t1) {
-		return nil
+	// Symmetric inert controls: each logically-inert payload (OR-false, AND-true) must
+	// render a NON-true page. If a usable inert probe reproduces the TRUE page, the
+	// differential tracks the keyword rather than boolean truth — reject. A
+	// blocked/failed/non-2xx inert probe (ok=false) proves nothing and is ignored
+	// (fails open, so a transient block on a control cannot manufacture a rejection).
+	for _, inert := range inertControls {
+		if ib, iok := m.sendUsable(ctx, ip, httpClient, base+inert); iok && modkit.BodiesSimilar(ib, truePage) {
+			return nil
+		}
 	}
 
 	return m.result(ctx, target, ip,
-		fmt.Sprintf("Parameter %q behaves as an XPath boolean oracle: two independent always-true payloads produced matching responses, two independent always-false payloads produced a different matching response, and the true/false responses differ — the injected boolean logic controls the query result.", ip.Name()),
+		fmt.Sprintf("Parameter %q behaves as an XPath boolean oracle: three independent always-true payloads produced matching responses, three independent always-false payloads produced a different matching response, the true/false responses differ, and two symmetric inert controls (OR-false, AND-true) did not reproduce the true page — the injected boolean logic controls the query result.", ip.Name()),
 		[]string{
 			"true_payload=" + base + pairs[0].truthy,
 			"false_payload=" + base + pairs[0].falsy,
 		})
+}
+
+// allBodiesSimilar reports whether every body in bodies is textually similar to the
+// first (so the whole slice forms one cluster). An empty or single-element slice is
+// trivially similar. The first body's signature is built once and reused across the
+// comparisons.
+func allBodiesSimilar(bodies []string) bool {
+	if len(bodies) < 2 {
+		return true
+	}
+	sig := modkit.BodySignature(bodies[0])
+	for _, b := range bodies[1:] {
+		if !modkit.BodiesSimilarSig(sig, b) {
+			return false
+		}
+	}
+	return true
 }
 
 // sendStatus issues a request with value at the insertion point and returns the

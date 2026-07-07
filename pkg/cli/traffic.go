@@ -86,11 +86,16 @@ var (
 	trafficSearch  []string
 	trafficHeader  string
 	trafficBody    string
-	trafficSource  string
-	trafficSort    string
-	trafficAsc     bool
-	trafficLimit   int
-	trafficOffset  int
+
+	trafficExcludeSearch []string
+	trafficExcludeHeader string
+	trafficExcludeBody   string
+
+	trafficSource string
+	trafficSort   string
+	trafficAsc    bool
+	trafficLimit  int
+	trafficOffset int
 
 	// Display-only flags (trafficCmd.Flags only)
 	trafficTree     bool
@@ -135,9 +140,12 @@ func init() {
 	pf.StringVar(&trafficPath, "path", "", "Filter by URL path pattern")
 	pf.StringVar(&trafficFrom, "from", "", "Show records after this date (YYYY-MM-DD or RFC3339)")
 	pf.StringVar(&trafficTo, "to", "", "Show records before this date (YYYY-MM-DD or RFC3339)")
-	pf.StringArrayVar(&trafficSearch, "search", nil, "Search across URLs and paths (repeatable; each term further narrows, AND-combined)")
+	pf.StringArrayVar(&trafficSearch, "search", nil, "Search across URL, path, and the raw request/response (headers + body); repeatable, AND-combined (each term further narrows)")
 	pf.StringVar(&trafficHeader, "header", "", "Search within HTTP header names and values")
 	pf.StringVar(&trafficBody, "body", "", "Search within HTTP request/response body content")
+	pf.StringArrayVar(&trafficExcludeSearch, "exclude-search", nil, "Exclude records where the term appears in the URL, path, or raw request/response (repeatable; dropped if ANY term matches — the inverse of --search)")
+	pf.StringVar(&trafficExcludeHeader, "exclude-header", "", "Exclude records whose HTTP header names/values contain the term (inverse of --header)")
+	pf.StringVar(&trafficExcludeBody, "exclude-body", "", "Exclude records whose request/response body contains the term (inverse of --body)")
 	pf.StringVar(&trafficSource, "source", "", "Filter by record source (e.g. scanner, ingest-cli, ingest-server, ingest-proxy, seed)")
 	pf.StringVar(&trafficSort, "sort", "created_at", "Sort by: uuid, created_at, sent_at, method, status, time")
 	pf.BoolVar(&trafficAsc, "asc", false, "Sort in ascending order (default: descending)")
@@ -283,22 +291,25 @@ func buildTrafficFilters(fuzzyTerm string) (database.QueryFilters, error) {
 	}
 
 	return database.QueryFilters{
-		ProjectUUID:  projectUUID,
-		HostPattern:  trafficHost,
-		Methods:      trafficMethods,
-		StatusCodes:  trafficStatus,
-		PathPattern:  trafficPath,
-		Source:       trafficSource,
-		DateFrom:     dateFrom,
-		DateTo:       dateTo,
-		FuzzyTerm:    fuzzyTerm,
-		SearchTerms:  trafficSearch,
-		HeaderSearch: trafficHeader,
-		BodySearch:   trafficBody,
-		Limit:        limit,
-		Offset:       trafficOffset,
-		SortBy:       trafficSort,
-		SortAsc:      trafficAsc,
+		ProjectUUID:         projectUUID,
+		HostPattern:         trafficHost,
+		Methods:             trafficMethods,
+		StatusCodes:         trafficStatus,
+		PathPattern:         trafficPath,
+		Source:              trafficSource,
+		DateFrom:            dateFrom,
+		DateTo:              dateTo,
+		FuzzyTerm:           fuzzyTerm,
+		SearchTerms:         trafficSearch,
+		HeaderSearch:        trafficHeader,
+		BodySearch:          trafficBody,
+		ExcludeTerms:        trafficExcludeSearch,
+		ExcludeHeaderSearch: trafficExcludeHeader,
+		ExcludeBodySearch:   trafficExcludeBody,
+		Limit:               limit,
+		Offset:              trafficOffset,
+		SortBy:              trafficSort,
+		SortAsc:             trafficAsc,
 	}, nil
 }
 
@@ -318,6 +329,11 @@ func printActiveTrafficFilters(filters database.QueryFilters, fuzzyTerm string) 
 	s.addInts("status", filters.StatusCodes)
 	s.add("header", filters.HeaderSearch)
 	s.add("body", filters.BodySearch)
+	if len(filters.ExcludeTerms) > 0 {
+		s.addQuoted("exclude-search", strings.Join(filters.ExcludeTerms, " "))
+	}
+	s.add("exclude-header", filters.ExcludeHeaderSearch)
+	s.add("exclude-body", filters.ExcludeBodySearch)
 	s.add("source", filters.Source)
 	if filters.DateFrom != nil {
 		s.add("from", filters.DateFrom.Format("2006-01-02"))

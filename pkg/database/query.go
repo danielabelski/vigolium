@@ -56,6 +56,12 @@ type QueryFilters struct {
 	HeaderSearch string   // Search in headers
 	BodySearch   string   // Search in request/response body
 
+	// Negative / exclusion search — drop rows where the term appears in the same
+	// corpus the positive counterpart scans.
+	ExcludeTerms        []string // Repeatable, AND-combined: a row is dropped if ANY term matches (inverse of SearchTerms)
+	ExcludeHeaderSearch string   // Drop rows whose header/raw corpus contains the term (inverse of HeaderSearch)
+	ExcludeBodySearch   string   // Drop rows whose body/raw corpus contains the term (inverse of BodySearch)
+
 	// Pagination
 	Limit  int
 	Offset int
@@ -73,14 +79,57 @@ func (f QueryFilters) EffectiveSearchTerms() []string {
 	if len(terms) == 0 && f.SearchTerm != "" {
 		terms = []string{f.SearchTerm}
 	}
+	return nonBlank(terms)
+}
+
+// EffectiveExcludeTerms returns the exclusion search terms with blanks dropped,
+// so callers can loop the result directly. Each term becomes an independent
+// NOT (...) conjunct — a row is dropped if ANY term matches.
+func (f QueryFilters) EffectiveExcludeTerms() []string {
+	return nonBlank(f.ExcludeTerms)
+}
+
+// nonBlank returns the input with empty strings dropped.
+func nonBlank(in []string) []string {
 	var out []string
-	for _, t := range terms {
+	for _, t := range in {
 		if t != "" {
 			out = append(out, t)
 		}
 	}
 	return out
 }
+
+// Search-corpus predicates — the single source of truth for "what --search
+// scans" on each table. The positive (--search/--header/--body) and negative
+// (--exclude-*) forms share one predicate so they can never drift: positive
+// callers pass the bare string, negative callers prefix "NOT ". COALESCE is
+// used throughout so the negated form is NULL-safe (a bare NOT (NULL LIKE ?)
+// evaluates to NULL and would wrongly drop the row); it is a no-op for the
+// positive form because search terms are always non-blank.
+const (
+	// recordSearchPredicate scans http_records: URL, path, and the raw
+	// request/response corpus (headers + body). Four ? placeholders.
+	recordSearchPredicate = "(COALESCE(r.url, '') LIKE ? OR COALESCE(r.path, '') LIKE ? OR " +
+		"COALESCE(CAST(r.raw_request AS TEXT), '') LIKE ? OR COALESCE(CAST(r.raw_response AS TEXT), '') LIKE ?)"
+
+	// rawCorpusPredicate scans just the raw request/response corpus, backing
+	// --header/--body and their inverses. Two ? placeholders.
+	rawCorpusPredicate = "(COALESCE(CAST(r.raw_request AS TEXT), '') LIKE ? OR COALESCE(CAST(r.raw_response AS TEXT), '') LIKE ?)"
+
+	// findingSearchPredicate scans a finding's own fields plus its linked HTTP
+	// records (via the finding_records junction). The record columns sit inside
+	// EXISTS, which is boolean and never NULL, so they need no COALESCE. Twelve
+	// ? placeholders: 7 finding fields then 5 record fields.
+	findingSearchPredicate = "((COALESCE(f.module_name, '') LIKE ? OR COALESCE(f.module_short, '') LIKE ? OR COALESCE(f.description, '') LIKE ? OR " +
+		"COALESCE(f.module_id, '') LIKE ? OR COALESCE(f.matched_at, '') LIKE ? OR COALESCE(f.request, '') LIKE ? OR COALESCE(f.response, '') LIKE ?)" +
+		" OR EXISTS (SELECT 1 FROM finding_records fr2" +
+		" INNER JOIN http_records r ON r.uuid = fr2.record_uuid" +
+		" WHERE fr2.finding_id = f.id AND (" +
+		" r.url LIKE ? OR r.path LIKE ? OR r.hostname LIKE ?" +
+		" OR CAST(r.raw_request AS TEXT) LIKE ? OR CAST(r.raw_response AS TEXT) LIKE ?" +
+		")))"
+)
 
 // QueryBuilder builds filtered database queries
 type QueryBuilder struct {
@@ -257,11 +306,19 @@ func (qb *QueryBuilder) applyFilters(query *bun.SelectQuery) {
 		}
 	}
 
-	// Search across URL and path. Multiple terms are AND-combined: every term
-	// must match, so repeating --search progressively narrows the results.
+	// Search across URL, path, and the raw request/response corpus (headers +
+	// body live in raw_request/raw_response). Multiple terms are AND-combined:
+	// every term must match somewhere, so repeating --search narrows the results.
 	for _, term := range qb.filters.EffectiveSearchTerms() {
-		searchPattern := "%" + term + "%"
-		query.Where("(r.url LIKE ? OR r.path LIKE ?)", searchPattern, searchPattern)
+		p := "%" + term + "%"
+		query.Where(recordSearchPredicate, p, p, p, p)
+	}
+
+	// Exclusion search: drop records where ANY term appears anywhere --search
+	// scans (the inverse predicate). Each term is an independent NOT conjunct.
+	for _, term := range qb.filters.EffectiveExcludeTerms() {
+		p := "%" + term + "%"
+		query.Where("NOT "+recordSearchPredicate, p, p, p, p)
 	}
 
 	// Header and body searches scan raw_request/raw_response — these contain
@@ -269,6 +326,10 @@ func (qb *QueryBuilder) applyFilters(query *bun.SelectQuery) {
 	// via the same strategy (FTS5 when available, CAST LIKE fallback).
 	qb.applyRawCorpusSearch(query, qb.filters.HeaderSearch)
 	qb.applyRawCorpusSearch(query, qb.filters.BodySearch)
+
+	// Exclusion counterparts: drop records whose raw corpus contains the term.
+	qb.applyRawCorpusExclude(query, qb.filters.ExcludeHeaderSearch)
+	qb.applyRawCorpusExclude(query, qb.filters.ExcludeBodySearch)
 }
 
 // applyRawCorpusSearch adds a substring filter over the raw_request/raw_response
@@ -280,9 +341,19 @@ func (qb *QueryBuilder) applyRawCorpusSearch(query *bun.SelectQuery, term string
 	if term == "" {
 		return
 	}
-	searchPattern := "%" + term + "%"
-	query.Where("(CAST(r.raw_request AS TEXT) LIKE ? OR CAST(r.raw_response AS TEXT) LIKE ?)",
-		searchPattern, searchPattern)
+	p := "%" + term + "%"
+	query.Where(rawCorpusPredicate, p, p)
+}
+
+// applyRawCorpusExclude drops rows whose raw_request/raw_response corpus contains
+// the term — the inverse of applyRawCorpusSearch (same predicate, negated). A
+// blank term is a no-op.
+func (qb *QueryBuilder) applyRawCorpusExclude(query *bun.SelectQuery, term string) {
+	if term == "" {
+		return
+	}
+	p := "%" + term + "%"
+	query.Where("NOT "+rawCorpusPredicate, p, p)
 }
 
 // applySorting applies sorting to the query
@@ -692,14 +763,26 @@ func (fqb *FindingsQueryBuilder) applyFindingFilters(query *bun.SelectQuery) {
 		}
 	}
 
-	// Search across module name/short, description, module_id, matched_at.
-	// Multiple terms are AND-combined: every term must match somewhere, so
-	// repeating --search progressively narrows to the exact finding.
+	// Search across the finding's own fields (module metadata, matched location,
+	// request/response snippet) AND the linked HTTP records' url/path/host and
+	// raw request/response corpus. Multiple terms are AND-combined: every term
+	// must match somewhere, so repeating --search progressively narrows.
 	for _, term := range fqb.filters.EffectiveSearchTerms() {
 		p := "%" + term + "%"
-		query.Where(
-			"(f.module_name LIKE ? OR f.module_short LIKE ? OR f.description LIKE ? OR f.module_id LIKE ? OR f.matched_at LIKE ?)",
-			p, p, p, p, p)
+		query.Where(findingSearchPredicate,
+			p, p, p, p, p, p, p, // finding fields
+			p, p, p, p, p) // record fields
+	}
+
+	// Exclusion search: drop findings where ANY term matches the same corpus
+	// --search scans (the inverse predicate). Each term is an independent NOT
+	// conjunct; the record side uses EXISTS so a finding is dropped when a linked
+	// record matches.
+	for _, term := range fqb.filters.EffectiveExcludeTerms() {
+		p := "%" + term + "%"
+		query.Where("NOT "+findingSearchPredicate,
+			p, p, p, p, p, p, p, // finding fields
+			p, p, p, p, p) // record fields
 	}
 
 	// Fuzzy search across finding fields and associated HTTP records
@@ -767,6 +850,27 @@ func (fqb *FindingsQueryBuilder) applyFindingFilters(query *bun.SelectQuery) {
 	if fqb.filters.BodySearch != "" {
 		bp := "%" + fqb.filters.BodySearch + "%"
 		query.Where(`EXISTS (SELECT 1 FROM finding_records fr2
+			INNER JOIN http_records r ON r.uuid = fr2.record_uuid
+			WHERE fr2.finding_id = f.id AND (
+				CAST(r.raw_request AS TEXT) LIKE ? OR CAST(r.raw_response AS TEXT) LIKE ?
+			))`, bp, bp)
+	}
+
+	// Exclusion counterparts: drop findings that have a linked record whose raw
+	// corpus contains the term (NOT EXISTS — a NULL corpus column simply doesn't
+	// match, so no COALESCE guard is needed here).
+	if fqb.filters.ExcludeHeaderSearch != "" {
+		hp := "%" + fqb.filters.ExcludeHeaderSearch + "%"
+		query.Where(`NOT EXISTS (SELECT 1 FROM finding_records fr2
+			INNER JOIN http_records r ON r.uuid = fr2.record_uuid
+			WHERE fr2.finding_id = f.id AND (
+				CAST(r.raw_request AS TEXT) LIKE ? OR CAST(r.raw_response AS TEXT) LIKE ?
+			))`, hp, hp)
+	}
+
+	if fqb.filters.ExcludeBodySearch != "" {
+		bp := "%" + fqb.filters.ExcludeBodySearch + "%"
+		query.Where(`NOT EXISTS (SELECT 1 FROM finding_records fr2
 			INNER JOIN http_records r ON r.uuid = fr2.record_uuid
 			WHERE fr2.finding_id = f.id AND (
 				CAST(r.raw_request AS TEXT) LIKE ? OR CAST(r.raw_response AS TEXT) LIKE ?

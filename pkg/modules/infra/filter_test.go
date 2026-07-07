@@ -46,6 +46,10 @@ func TestIsValidForInjectionVulns(t *testing.T) {
 		{"json file rejected", "GET", "/data.json", false},
 		{"zip archive rejected", "GET", "/archive.zip", false},
 		{"media URL with OPTIONS still rejected", "OPTIONS", "/icon.svg", false},
+		{"cloudflare challenge-platform rejected", "POST", "/cdn-cgi/challenge-platform/h/b/fo/123", false},
+		{"cloudflare trace rejected", "GET", "/cdn-cgi/trace", false},
+		{"cdn-cgi bare path rejected", "GET", "/cdn-cgi", false},
+		{"app path containing cdn-cgi substring allowed", "GET", "/app/cdn-cgi-report", true},
 	}
 
 	for _, tc := range cases {

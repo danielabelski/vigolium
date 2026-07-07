@@ -81,6 +81,12 @@ Filters (shared with `traffic` / `db ls`): `--host --path --method --status
 --severity --min-severity --from/--to --search --scan-uuid --agentic-scan
 --module-type -n/--limit --offset --sort --asc`.
 
+`--search`/`--header`/`--body` now span the full request/response corpus (URL,
+path, headers, and body). Each has an inverse: `--exclude-search` (repeatable,
+AND-combined — a row is dropped if ANY term appears), `--exclude-header`, and
+`--exclude-body`. Compose them, e.g. keep API traffic but drop noise:
+`vigolium traffic --search api --exclude-search /health --exclude-body heartbeat`.
+
 Output shape:
 ```json
 { "project_uuid": "...", "total": 39, "offset": 0, "limit": 100,

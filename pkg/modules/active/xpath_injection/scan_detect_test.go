@@ -1,8 +1,12 @@
 package xpath_injection
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -10,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
 )
@@ -59,24 +64,48 @@ func xpathBooleanFalse(v string) bool {
 		strings.Contains(v, "1=2") || strings.Contains(v, "3=4")
 }
 
-// TestBoolean_DetectsOracle: an XML-auth endpoint where an always-true predicate
-// returns the record and an always-false predicate does not is reported via the
-// boolean oracle. The mock evaluates the boolean VALUE (a tautology vs a
-// contradiction), mirroring a real XPath engine — so an OR-keyword-but-false
-// control (' or '1'='2) correctly renders the false page and does not suppress it.
+// xpathCondRe extracts a trailing  ' <op> '<a>'='<b>  clause from an injected XPath
+// string-context value (e.g. admin' or '1'='1).
+var xpathCondRe = regexp.MustCompile(`'\s*(or|and)\s*'([^']*)'='([^']*)$`)
+
+// xpathRender simulates //user[name='<v>'] over a fixed dataset and returns the page
+// a real XPath engine yields: the always-true page (predicate forced true → all
+// records), the always-false page (forced false → none), or the baseline (the query
+// still keys on name → the single matched record). It is faithful to boolean
+// semantics — an OR-false or AND-true clause is INERT and collapses to the name
+// lookup (baseline) — so the module's symmetric inert controls behave as they would
+// against a real target, rather than being mis-keyed on a substring.
+func xpathRender(v string) string {
+	const (
+		allPage  = "<html><body>directory listing: admin alice bob carol dave erin frank grace heidi</body></html>"
+		nonePage = "<html><body>no matching record found for that query</body></html>"
+		basePage = "<html><body>profile card for the single matched account</body></html>"
+	)
+	m := xpathCondRe.FindStringSubmatch(v)
+	if m == nil {
+		return basePage // no injected clause → plain name lookup
+	}
+	op, a, b := m[1], m[2], m[3]
+	cmp := a == b
+	switch {
+	case op == "or" && cmp:
+		return allPage // name=... OR true → always true → all records
+	case op == "and" && !cmp:
+		return nonePage // name=... AND false → always false → none
+	default:
+		return basePage // OR-false / AND-true → inert → collapses to the name lookup
+	}
+}
+
+// TestBoolean_DetectsOracle: an XML-lookup endpoint that evaluates real XPath boolean
+// logic (three always-true operands all expand to the full record set, three
+// always-false operands all return none, and inert OR-false/AND-true controls
+// collapse to the baseline) is reported via the boolean oracle.
 func TestBoolean_DetectsOracle(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		v := r.URL.Query().Get("id")
 		w.WriteHeader(http.StatusOK)
-		switch {
-		case xpathBooleanTrue(v): // always-true injection
-			_, _ = w.Write([]byte("<html><body>Welcome — all records: alice, bob, carol</body></html>"))
-		case xpathBooleanFalse(v): // always-false injection
-			_, _ = w.Write([]byte("<html><body>No matching record found</body></html>"))
-		default: // baseline
-			_, _ = w.Write([]byte("<html><body>record: " + v + "</body></html>"))
-		}
+		_, _ = w.Write([]byte(xpathRender(r.URL.Query().Get("id"))))
 	}))
 	defer srv.Close()
 
@@ -87,6 +116,69 @@ func TestBoolean_DetectsOracle(t *testing.T) {
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.Len(t, res, 1, "expected a boolean-oracle XPath finding")
+}
+
+// TestNoFalsePositive_LiteralKeyedDifferential: an endpoint that keys on the literal
+// comparison (a tautology 'N'='N vs a contradiction 'N'='M) but IGNORES the
+// surrounding operator renders the "many" page for an AND-true payload too. The old
+// single OR-false control missed this (OR-false renders "few"); the symmetric AND-true
+// control catches it — the differential tracks the literal, not boolean truth.
+func TestNoFalsePositive_LiteralKeyedDifferential(t *testing.T) {
+	t.Parallel()
+	// RE2 has no backreferences, so capture both operands and compare them in Go.
+	cmpRe := regexp.MustCompile(`'(\d)'='(\d)`) // 'N'='M
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.URL.Query().Get("id")
+		w.WriteHeader(http.StatusOK)
+		m := cmpRe.FindStringSubmatch(v)
+		switch {
+		case m != nil && m[1] == m[2]: // tautology 'N'='N — keyed on the literal, not the operator
+			_, _ = w.Write([]byte("<html><body>MANY results: a b c d e f g h i j</body></html>"))
+		case m != nil: // contradiction 'N'='M
+			_, _ = w.Write([]byte("<html><body>FEW: no rows</body></html>"))
+		default:
+			_, _ = w.Write([]byte("<html><body>BASE: profile</body></html>"))
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/lookup?id=admin")
+	ip := modtest.InsertionPoint(t, rr, "id")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a literal-keyed (operator-ignoring) differential must not be reported")
+}
+
+// TestNoFalsePositive_InconsistentAcrossOperands: an endpoint whose result set tracks
+// the operand VALUE rather than boolean truth (operands 1/7 return one set, operand 9
+// another) must not be flagged. A real XPath tautology makes the operand irrelevant,
+// so three independent always-true operands must agree; here the third disagrees. The
+// old two-operand matrix would have passed on operands 1 and 7 alone.
+func TestNoFalsePositive_InconsistentAcrossOperands(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.URL.Query().Get("id")
+		w.WriteHeader(http.StatusOK)
+		switch {
+		case strings.Contains(v, "1'='1") || strings.Contains(v, "7'='7"):
+			_, _ = w.Write([]byte("<html><body>result set alpha: rows 1 through 10 listed here</body></html>"))
+		case strings.Contains(v, "9'='9"):
+			_, _ = w.Write([]byte("<html><body>totally different beta payload: xyzzy plugh</body></html>"))
+		default:
+			_, _ = w.Write([]byte("<html><body>empty or baseline view</body></html>"))
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/lookup?id=admin")
+	ip := modtest.InsertionPoint(t, rr, "id")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a value-tracking differential that disagrees across operands must not be reported")
 }
 
 // TestNoFalsePositive_KeywordDifferential: a WAF/keyword endpoint that reacts to
@@ -181,4 +273,100 @@ func TestNoFalsePositive_StaticErrorPage(t *testing.T) {
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "a page that always shows the error must not be flagged")
+}
+
+// requestWithHeader builds a GET request that carries one extra header, so a header
+// insertion point (INS_HEADER) named after it can be exercised.
+func requestWithHeader(t *testing.T, rawURL, name, value string) *httpmsg.HttpRequestResponse {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	port := 80
+	if p := u.Port(); p != "" {
+		port, err = strconv.Atoi(p)
+		require.NoError(t, err)
+	} else if u.Scheme == "https" {
+		port = 443
+	}
+	svc, err := httpmsg.NewService(u.Hostname(), port, u.Scheme)
+	require.NoError(t, err)
+	target := u.RequestURI()
+	if target == "" {
+		target = "/"
+	}
+	raw := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\n%s: %s\r\n\r\n", target, u.Host, name, value)
+	req := httpmsg.NewHttpRequestWithService(svc, []byte(raw))
+	return httpmsg.NewHttpRequestResponse(req, nil)
+}
+
+// TestNoFalsePositive_StandardRequestHeader: a boolean-oracle-shaped endpoint keyed
+// on the Accept-Language header must NOT be flagged — a fixed browser header is never
+// an XPath sink. This is the evr-kr.roche.com /cdn-cgi Accept-Language false positive
+// (the header gate rejects it even before the CDN-path gate would).
+func TestNoFalsePositive_StandardRequestHeader(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.Header.Get("Accept-Language")
+		w.WriteHeader(http.StatusOK)
+		switch {
+		case xpathBooleanTrue(v):
+			_, _ = w.Write([]byte("<html><body>all records: alice, bob, carol</body></html>"))
+		case xpathBooleanFalse(v):
+			_, _ = w.Write([]byte("<html><body>No matching record found</body></html>"))
+		default:
+			_, _ = w.Write([]byte("<html><body>record: home</body></html>"))
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := requestWithHeader(t, srv.URL+"/lookup", "Accept-Language", "en-US")
+	ip := modtest.InsertionPoint(t, rr, "Accept-Language")
+	require.Equal(t, httpmsg.INS_HEADER, ip.Type(), "expected a header insertion point")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "XPath must not be tested on a standard browser request header")
+}
+
+// highEntropyBlob returns 2048 bytes cycling all 256 values XOR seed (entropy ≈ 8),
+// modeling a per-request encrypted CDN/challenge body. Distinct seeds yield distinct,
+// dissimilar blobs so the mock forms a boolean-oracle-shaped differential that would
+// otherwise fire.
+func highEntropyBlob(seed byte) []byte {
+	b := make([]byte, 2048)
+	for i := range b {
+		b[i] = byte(i) ^ seed
+	}
+	return b
+}
+
+// TestNoFalsePositive_OpaqueBody: an endpoint whose responses are opaque, per-request
+// high-entropy blobs (encrypted CDN challenge content) must NOT be flagged even when
+// the true/false blobs differ — an opaque body is no XPath surface, and its content
+// churn is what fools the boolean oracle. Uses a query param so the opaque-body gate,
+// not the header gate, is what rejects it.
+func TestNoFalsePositive_OpaqueBody(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.URL.Query().Get("id")
+		w.WriteHeader(http.StatusOK)
+		switch {
+		case xpathBooleanTrue(v):
+			_, _ = w.Write(highEntropyBlob(0x11))
+		case xpathBooleanFalse(v):
+			_, _ = w.Write(highEntropyBlob(0x22))
+		default:
+			_, _ = w.Write(highEntropyBlob(0x33))
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/lookup?id=admin")
+	ip := modtest.InsertionPoint(t, rr, "id")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an opaque high-entropy body must not be reported as XPath injection")
 }

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -84,6 +85,35 @@ func TestScanPerRequest_DetectsBooleanSQLi(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "expected a boolean-blind SQLi finding against a boolean sink")
 	assert.Equal(t, "id", res[0].FuzzingParameter)
+}
+
+// TestScanPerRequest_SkipsOpaqueBody ensures an opaque, high-entropy captured
+// baseline (an encrypted CDN/challenge blob served with a 200 and no cache header —
+// which the cache/large-HTML surface gate does not catch) short-circuits the whole
+// scan before any probe is sent: a boolean differential on such churn is per-request
+// noise, never SQL logic.
+func TestScanPerRequest_SkipsOpaqueBody(t *testing.T) {
+	t.Parallel()
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = w.Write([]byte("whatever"))
+	}))
+	defer srv.Close()
+
+	// 2 KB body cycling all 256 byte values → entropy ≈ 8 bits/byte (opaque).
+	blob := make([]byte, 2048)
+	for i := range blob {
+		blob[i] = byte(i)
+	}
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/item?id=1")
+	rr = modtest.Response(rr, "text/plain", string(blob))
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an opaque high-entropy baseline must not yield a boolean SQLi finding")
+	assert.Zero(t, atomic.LoadInt32(&hits), "opaque-body gate must short-circuit before any probe is sent")
 }
 
 // TestScanPerRequest_NoFalsePositive_Static ensures a constant page never yields

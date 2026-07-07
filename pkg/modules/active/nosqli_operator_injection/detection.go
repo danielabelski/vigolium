@@ -19,20 +19,30 @@ var nosqlErrorPatterns = []*regexp.Regexp{
 }
 
 const (
-	// timeBasedSleepMs is the value passed to MongoDB's sleep() in the $where
-	// payload. MongoDB sleep() takes milliseconds, so 10000 == 10 seconds. A
-	// delay that large is well beyond any realistic network jitter or ambient
-	// endpoint slowness, so a consistent hit is strong evidence of injection.
-	timeBasedSleepMs = 10000
-	// timeDelayThresholdMs is the minimum delta (ms) over baseline required to
-	// count a single probe as delayed. Set to 70% of the injected sleep so we
-	// still flag the hit if the server does partial/jittery scheduling but
-	// won't fire on generic slowness.
+	// The time-based leg injects MongoDB $where sleeps of two magnitudes PLUS a
+	// no-sleep control, all exercising the SAME $where JS-eval path, and requires the
+	// measured delay to SCALE with the injected duration. Measuring each sleep's delay
+	// as a delta over the sleep(0) control (not over the no-injection baseline) is the
+	// decisive false-positive killer: a constant-expensive $where path (full-collection
+	// JS scan) or sustained backend slowness delays the control as much as the sleeps,
+	// so its delta doesn't scale — only a genuine controllable sleep adds a delay
+	// proportional to the injected value. MongoDB sleep() takes milliseconds.
+	timeBasedControlMs = 0     // no-sleep control on the same $where path
+	timeBasedLowMs     = 3000  // small sleep — must still add a proportional delay
+	timeBasedHighMs    = 10000 // large sleep — well beyond realistic jitter
+	// timeDelayThresholdMs is the minimum delta (ms) over the control the HIGH probe
+	// must clear as a coarse floor (70% of the high sleep) before the scaling checks
+	// apply.
 	timeDelayThresholdMs = 7000
-	// timeBasedConfirmationRounds is how many consecutive probes must each
-	// exceed the threshold before the finding is reported. Guards against a
-	// single unusually slow response being misread as injection.
-	timeBasedConfirmationRounds = 3
+	// timeScaleDenom: each sleep must add >= its requested duration / timeScaleDenom
+	// over the no-sleep control (half, allowing for scheduling/network overhead).
+	timeScaleDenom = 2
+	// timeOvershootFactor caps how far the high sleep's added delay may exceed its
+	// requested duration; a fixed upstream stall adds far more than the sleep asked.
+	timeOvershootFactor = 3
+	// timeBasedConfirmationRounds is how many independent rounds must ALL show the
+	// scaling relationship. Guards against a one-off spike on any single probe.
+	timeBasedConfirmationRounds = 2
 	sizeIncreasePercent         = 50  // percent body size increase to consider data exfiltration
 	sizeIncreaseMinBytes        = 200 // minimum absolute increase in bytes
 

@@ -187,6 +187,14 @@ const (
 	sleepLow  = 2
 	// timeRounds is how many independent confirmation rounds must all pass.
 	timeRounds = 2
+
+	// minScaleDenom / maxOvershootFactor tune infra.ScaledDelayConfirmed for this
+	// module: each sleep must add >= its requested duration / minScaleDenom over the
+	// no-sleep control, and the high sleep may overshoot its requested duration by at
+	// most maxOvershootFactor× (see that helper for why delta-over-control scaling is
+	// the decisive false-positive killer).
+	minScaleDenom      = 2
+	maxOvershootFactor = 4
 )
 
 // confirmTiming confirms a time-based blind SQLi across multiple rounds and
@@ -259,16 +267,15 @@ func (m *Module) confirmTiming(
 		if low.blocked {
 			return nil, nil
 		}
-		// The low sleep must itself add a partial delay (rules out a one-off
-		// spike on the high request)...
-		if low.elapsed < time.Duration(sleepLow)*time.Second/2 {
-			return nil, nil
-		}
-		// ...and the high−low differential must track the requested (high−low)
-		// seconds (at least half, allowing for overhead/jitter).
-		observed := high.elapsed - low.elapsed
-		expected := time.Duration(sleepHigh-sleepLow) * time.Second
-		if observed < expected/2 {
+
+		// Credit each sleep only with the delay it added over this round's own no-sleep
+		// control (not the absolute latency), and require the delay to scale with the
+		// requested duration — the decisive false-positive killer for a slow-but-constant
+		// host where the low sleep's absolute latency clears a fixed bar while adding no
+		// real delay. See infra.ScaledDelayConfirmed for the scaling verdict.
+		if !infra.ScaledDelayConfirmed(noSleep.elapsed, low.elapsed, high.elapsed,
+			time.Duration(sleepLow)*time.Second, time.Duration(sleepHigh)*time.Second,
+			minScaleDenom, maxOvershootFactor) {
 			return nil, nil
 		}
 

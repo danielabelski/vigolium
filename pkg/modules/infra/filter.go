@@ -15,12 +15,28 @@ import (
 func Is2xx(status int) bool { return status >= 200 && status < 300 }
 
 // IsValidForInjectionVulns checks if the URL is valid for injection vulnerability testing.
-// Rejects media/JS URLs and OPTIONS/CONNECT methods.
+// Rejects media/JS URLs, OPTIONS/CONNECT methods, and CDN-edge infrastructure paths.
 func IsValidForInjectionVulns(urlx *urlutil.URL, ctx *httpmsg.HttpRequestResponse) bool {
 	if utils.IsMediaAndJSURL(urlx.Path) || ctx.Request().Method() == "OPTIONS" || ctx.Request().Method() == "CONNECT" {
 		return false
 	}
+	if IsCDNInfraPath(urlx.Path) {
+		return false
+	}
 	return true
+}
+
+// IsCDNInfraPath reports whether path lives under a CDN/edge-provider's reserved
+// namespace — served entirely by the edge (Cloudflare, etc.), never routed to the
+// origin application. Cloudflare's `/cdn-cgi/` prefix hosts bot-challenge, RUM,
+// email-decode and trace endpoints whose bodies are opaque, per-request, encrypted
+// blobs; probing them for injection is meaningless and the non-deterministic
+// responses fool boolean/timing oracles (the evr-kr.roche.com /cdn-cgi/challenge-
+// platform XPath false positive). No application injection sink ever lives here, so
+// injection modules skip these paths wholesale.
+func IsCDNInfraPath(path string) bool {
+	p := strings.ToLower(path)
+	return strings.HasPrefix(p, "/cdn-cgi/") || p == "/cdn-cgi"
 }
 
 // urlParamNames are parameter-name fragments that suggest the value is a URL the

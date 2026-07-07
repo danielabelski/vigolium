@@ -153,3 +153,33 @@ func TestConfirmTiming_RejectsFixedDelay(t *testing.T) {
 	assert.Nil(t, res, "a fixed (non-scaling) delay must not be reported as command injection")
 }
 
+// TestConfirmTiming_RejectsHighBaselineJitterSpike reproduces the reported false
+// positive: a slow-but-constant host (~1.2s on every request) where the SMALL sleep
+// adds no delay and only the LARGE sleep coincides with a non-proportional latency
+// spike (network/origin jitter). Absolute-latency checks miss this — the small
+// sleep's latency already clears any fixed sub-second bar — so detection must credit
+// each sleep only with the delay it adds over the same round's no-sleep control.
+func TestConfirmTiming_RejectsHighBaselineJitterSpike(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-second timing test in -short mode")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requestedSleep(r) == sleepHigh {
+			flushAndSleep(w, 4*time.Second) // large payload spikes, non-proportionally
+			return
+		}
+		flushAndSleep(w, 1200*time.Millisecond) // slow-but-constant baseline (0 and low)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/?cmd=host")
+	ip := modtest.InsertionPoint(t, rr, "cmd")
+	tmpl := infra.CmdiSleepTemplates()[0]
+
+	// Threshold below the spike so the high probe "clears" it, yet above the slow
+	// baseline — the exact window in which the old absolute low-latency check passed.
+	res, err := New().confirmTiming(rr, client, ip, tmpl, ip.BaseValue(), 2500*time.Millisecond)
+	require.NoError(t, err)
+	assert.Nil(t, res, "a non-scaling spike on a slow-but-constant host must not be reported")
+}

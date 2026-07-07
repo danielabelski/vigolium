@@ -43,6 +43,14 @@ const (
 	// independent rounds makes such a one-off spike vanishingly unlikely to be
 	// mistaken for an injection.
 	timeRounds = 3
+
+	// minScaleDenom / maxOvershootFactor tune infra.ScaledDelayConfirmed for this
+	// module: each sleep must add >= its requested duration / minScaleDenom over the
+	// no-sleep control, and the high sleep may overshoot its requested duration by at
+	// most maxOvershootFactor× (see that helper for why delta-over-control scaling is
+	// the decisive false-positive killer).
+	minScaleDenom      = 2
+	maxOvershootFactor = 4
 )
 
 // Module implements the time-based (delay-scaling) OS command injection scanner.
@@ -216,16 +224,15 @@ func (m *Module) confirmTiming(
 		if err != nil {
 			return nil, err
 		}
-		// The low sleep must itself add a partial delay (rules out a one-off spike
-		// on the high request)...
-		if low.elapsed < time.Duration(sleepLow)*time.Second/2 {
-			return nil, nil
-		}
-		// ...and the high−low differential must track the requested (high−low)
-		// seconds (at least half, allowing for overhead/jitter).
-		observed := high.elapsed - low.elapsed
-		expected := time.Duration(sleepHigh-sleepLow) * time.Second
-		if observed < expected/2 {
+
+		// Credit each sleep only with the delay it added over this round's own no-sleep
+		// control (not the absolute latency), and require the delay to scale with the
+		// requested duration — the decisive false-positive killer for the reported
+		// ~2.9s-baseline host where only the 6s probe spiked while the 2s probe added
+		// nothing. See infra.ScaledDelayConfirmed for the scaling verdict.
+		if !infra.ScaledDelayConfirmed(noSleep.elapsed, low.elapsed, high.elapsed,
+			time.Duration(sleepLow)*time.Second, time.Duration(sleepHigh)*time.Second,
+			minScaleDenom, maxOvershootFactor) {
 			return nil, nil
 		}
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -176,6 +177,92 @@ func TestTestTimeBasedPayload_BlockedResponseDropped(t *testing.T) {
 	}
 	if res != nil {
 		t.Fatalf("a blocked (403) response must not be reported as time-based NoSQLi, got: %+v", res)
+	}
+}
+
+// sleepArgRe extracts the millisecond argument of an injected $where sleep().
+var sleepArgRe = regexp.MustCompile(`sleep\((\d+)\)`)
+
+// requestedSleepMs returns the sleep(ms) argument in the request body, or 0.
+func requestedSleepMs(r *http.Request) int {
+	b, _ := io.ReadAll(r.Body)
+	m := sleepArgRe.FindStringSubmatch(string(b))
+	if m == nil {
+		return 0
+	}
+	ms, _ := strconv.Atoi(m[1])
+	return ms
+}
+
+// TestTestTimeBasedPayload_DetectsScalingSleep drives the time-based leg against a
+// sink whose delay equals the injected $where sleep duration; the scaling
+// confirmation must report a finding.
+func TestTestTimeBasedPayload_DetectsScalingSleep(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-second timing test in -short mode")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ms := requestedSleepMs(r)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(time.Duration(ms) * time.Millisecond) // delay scales with the injected sleep
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestJSON(t, srv.URL+"/api/users", `{"user":"smith"}`)
+	ip := modtest.InsertionPoint(t, rr, "user")
+	payload := nosqliPayload{value: whereSleep(timeBasedHighMs), detectType: detectTimeDelay, desc: "time-based"}
+
+	res, err := New().testTimeBasedPayload(rr, ip, client, payload)
+	if err != nil {
+		t.Fatalf("testTimeBasedPayload: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected a time-based finding when the delay scales with the injected sleep duration")
+	}
+}
+
+// TestTestTimeBasedPayload_RejectsNonScalingSpike is the key scaling test: a sink
+// that stalls only for the LARGE sleep payload (a WAF/path reacting to the payload,
+// not executing it) — while the no-sleep control and the small sleep return fast —
+// must be rejected. The high probe clears the coarse threshold, but its delay does
+// not scale: the small sleep added nothing over the control.
+func TestTestTimeBasedPayload_RejectsNonScalingSpike(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-second timing test in -short mode")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Only the large payload triggers the stall; the control (sleep(0)) and the
+		// small sleep return fast — a non-proportional spike, not a real sleep.
+		if strings.Contains(string(b), fmt.Sprintf("sleep(%d)", timeBasedHighMs)) {
+			time.Sleep(time.Duration(timeBasedHighMs) * time.Millisecond)
+		}
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestJSON(t, srv.URL+"/api/users", `{"user":"smith"}`)
+	ip := modtest.InsertionPoint(t, rr, "user")
+	payload := nosqliPayload{value: whereSleep(timeBasedHighMs), detectType: detectTimeDelay, desc: "time-based"}
+
+	res, err := New().testTimeBasedPayload(rr, ip, client, payload)
+	if err != nil {
+		t.Fatalf("testTimeBasedPayload: %v", err)
+	}
+	if res != nil {
+		t.Fatalf("a non-scaling spike on only the large payload must not be reported, got: %+v", res)
 	}
 }
 

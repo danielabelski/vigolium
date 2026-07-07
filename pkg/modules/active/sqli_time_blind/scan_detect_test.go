@@ -154,6 +154,38 @@ func TestScanPerRequest_NoFalsePositive_FixedDelay(t *testing.T) {
 	assert.Empty(t, res, "a fixed (non-scaling) delay must not be reported as time-based SQLi")
 }
 
+// TestConfirmTiming_RejectsHighBaselineJitterSpike reproduces the slow-but-constant
+// host false positive: every request is slow (~1.2s) and only the LARGE sleep
+// coincides with a non-proportional latency spike, while the SMALL sleep adds
+// nothing. The old absolute low-latency check missed this (1.2s already clears the
+// ~1s bar); crediting each sleep only with the delay it adds over the same round's
+// no-sleep control rejects it. Driven through confirmTiming directly to exercise one
+// payload instead of the full matrix.
+func TestConfirmTiming_RejectsHighBaselineJitterSpike(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-second timing test in -short mode")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requestedSleep(r) == sleepHigh {
+			flushAndSleep(w, 5*time.Second) // only the large payload spikes, non-proportionally
+			return
+		}
+		flushAndSleep(w, 1200*time.Millisecond) // slow-but-constant baseline (no-sleep AND small sleep)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/item?id=1")
+	ip := modtest.InsertionPoint(t, rr, "id")
+	pair := numericPayloads[0] // mysql " OR SLEEP(%d)--"
+
+	// Threshold below the spike so the high probe clears it, yet above the slow
+	// baseline — the window in which the old absolute low-latency check passed.
+	res, err := New().confirmTiming(rr, client, ip, pair, ip.BaseValue(), 4*time.Second)
+	require.NoError(t, err)
+	assert.Nil(t, res, "a non-scaling spike on a slow-but-constant host must not be reported")
+}
+
 // TestScanPerRequest_NoFalsePositive_BlockedBaseline reproduces the CloudFront
 // false positive: the edge denies every request — including the unmodified
 // baseline — with a 403. A blocked surface has no backend query to time, so the

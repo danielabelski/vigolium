@@ -91,6 +91,25 @@ func TestScanPerInsertionPoint_ChallengePageNotLDAP(t *testing.T) {
 	assert.Empty(t, res, "a WAF/CDN challenge page must not be reported as LDAP injection")
 }
 
+// TestScanPerInsertionPoint_SkipsCDNInfraPath ensures a Cloudflare /cdn-cgi/ edge
+// path is skipped outright — even against a server that WOULD leak an LDAP error —
+// because no LDAP-backed application lives under the CDN's reserved namespace and
+// its challenge bodies fool the differential. The injection-validity gate must
+// short-circuit before any probe is sent.
+func TestScanPerInsertionPoint_SkipsCDNInfraPath(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(ldapErrorEcho("uid"))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/cdn-cgi/challenge-platform/h/b/fo/123?uid=alice")
+	ip := modtest.InsertionPoint(t, rr, "uid")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a /cdn-cgi/ CDN-edge path must be skipped before any LDAP probe")
+}
+
 // TestScanPerInsertionPoint_NonLDAPParamSkipped ensures a parameter whose name
 // does not suggest LDAP usage is skipped without sending any probes.
 func TestScanPerInsertionPoint_NonLDAPParamSkipped(t *testing.T) {

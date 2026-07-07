@@ -27,6 +27,9 @@ var (
 	findingSearch        []string
 	findingHeader        string
 	findingBody          string
+	findingExcludeSearch []string
+	findingExcludeHeader string
+	findingExcludeBody   string
 	findingSource        string
 	findingSort          string
 	findingAsc           bool
@@ -116,9 +119,12 @@ func init() {
 	pf.StringVar(&findingPath, "path", "", "Filter by URL path pattern")
 	pf.StringVar(&findingFrom, "from", "", "Show findings after this date (YYYY-MM-DD or RFC3339)")
 	pf.StringVar(&findingTo, "to", "", "Show findings before this date (YYYY-MM-DD or RFC3339)")
-	pf.StringArrayVar(&findingSearch, "search", nil, "Search across module name, short description, description, module ID, and matched_at (repeatable; each term further narrows, AND-combined)")
+	pf.StringArrayVar(&findingSearch, "search", nil, "Search across the finding's module metadata, matched location, and the linked request/response (headers + body); repeatable, AND-combined (each term further narrows)")
 	pf.StringVar(&findingHeader, "header", "", "Search within HTTP header names and values")
 	pf.StringVar(&findingBody, "body", "", "Search within HTTP request/response body content")
+	pf.StringArrayVar(&findingExcludeSearch, "exclude-search", nil, "Exclude findings where the term appears in the module metadata, matched location, or linked request/response (repeatable; dropped if ANY term matches — the inverse of --search)")
+	pf.StringVar(&findingExcludeHeader, "exclude-header", "", "Exclude findings whose linked request/response headers contain the term (inverse of --header)")
+	pf.StringVar(&findingExcludeBody, "exclude-body", "", "Exclude findings whose linked request/response body contains the term (inverse of --body)")
 	pf.StringVar(&findingSource, "source", "", "Filter by record source (e.g. scanner, ingest-cli)")
 	pf.StringVar(&findingSort, "sort", "found_at", "Sort by: found_at, created_at, severity, module, confidence")
 	pf.BoolVar(&findingAsc, "asc", false, "Sort in ascending order (default: descending)")
@@ -434,28 +440,31 @@ func buildFindingFilters(fuzzyTerm string) (database.QueryFilters, error) {
 	}
 
 	return database.QueryFilters{
-		ProjectUUID:   projectUUID,
-		FindingID:     findingID,
-		HostPattern:   findingHost,
-		Methods:       findingMethods,
-		StatusCodes:   findingStatus,
-		PathPattern:   findingPath,
-		Source:        findingSource,
-		ScanUUID:      findingScanUUID,
-		Severity:      severities,
-		Confidence:    confidences,
-		ModuleType:    findingModuleType,
-		FindingSource: findingFindingSource,
-		DateFrom:      dateFrom,
-		DateTo:        dateTo,
-		FuzzyTerm:     fuzzyTerm,
-		SearchTerms:   findingSearch,
-		HeaderSearch:  findingHeader,
-		BodySearch:    findingBody,
-		Limit:         findingLimit,
-		Offset:        findingOffset,
-		SortBy:        findingSort,
-		SortAsc:       findingAsc,
+		ProjectUUID:         projectUUID,
+		FindingID:           findingID,
+		HostPattern:         findingHost,
+		Methods:             findingMethods,
+		StatusCodes:         findingStatus,
+		PathPattern:         findingPath,
+		Source:              findingSource,
+		ScanUUID:            findingScanUUID,
+		Severity:            severities,
+		Confidence:          confidences,
+		ModuleType:          findingModuleType,
+		FindingSource:       findingFindingSource,
+		DateFrom:            dateFrom,
+		DateTo:              dateTo,
+		FuzzyTerm:           fuzzyTerm,
+		SearchTerms:         findingSearch,
+		HeaderSearch:        findingHeader,
+		BodySearch:          findingBody,
+		ExcludeTerms:        findingExcludeSearch,
+		ExcludeHeaderSearch: findingExcludeHeader,
+		ExcludeBodySearch:   findingExcludeBody,
+		Limit:               findingLimit,
+		Offset:              findingOffset,
+		SortBy:              findingSort,
+		SortAsc:             findingAsc,
 	}, nil
 }
 
@@ -484,6 +493,11 @@ func printActiveFindingFilters(filters database.QueryFilters, fuzzyTerm string) 
 	s.addInts("status", filters.StatusCodes)
 	s.add("header", filters.HeaderSearch)
 	s.add("body", filters.BodySearch)
+	if len(filters.ExcludeTerms) > 0 {
+		s.addQuoted("exclude-search", strings.Join(filters.ExcludeTerms, " "))
+	}
+	s.add("exclude-header", filters.ExcludeHeaderSearch)
+	s.add("exclude-body", filters.ExcludeBodySearch)
 	s.add("source", filters.Source)
 	s.add("scan-uuid", filters.ScanUUID)
 	s.add("agentic-scan", findingAgenticScan)
