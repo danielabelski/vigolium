@@ -290,9 +290,19 @@ func formatFindingGroupLeaf(g *findingPathGroup) string {
 		b.WriteString(" — ")
 		b.WriteString(terminal.White(clicommon.Truncate(short, 70)))
 	}
+	// Trailing "(confidence, module-type)" tag — e.g. "(certain, active)" — so the
+	// leaf shows both how sure the finding is and whether an active or passive
+	// module produced it. Either part is omitted when absent.
+	var tag []string
 	if g.rep.Confidence != "" {
+		tag = append(tag, clicommon.ColorConfidence(g.rep.Confidence))
+	}
+	if g.rep.ModuleType != "" {
+		tag = append(tag, colorModuleType(g.rep.ModuleType))
+	}
+	if len(tag) > 0 {
 		b.WriteString(" (")
-		b.WriteString(clicommon.ColorConfidence(g.rep.Confidence))
+		b.WriteString(strings.Join(tag, ", "))
 		b.WriteString(")")
 	}
 	return b.String()

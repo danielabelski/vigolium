@@ -25,6 +25,145 @@ const (
 	maxConsecutiveDuplicateSegments = 2
 )
 
+// immutableAssetDirMarkers are path fragments that identify a JS framework's
+// content-hashed, immutable client build-output directory. Files there live at
+// hashed names (e.g. /_next/static/chunks/main-5cf96b0d57f7f579.js), so recursive
+// wordlist / observed-name brute forcing under them only replays chunk names
+// harvested from the served bundles back at the server (/_next/static/chunks/<name>/)
+// — pure noise that never reveals a real route. Recursion into these directories,
+// and backup/numeric derivations off files inside them, are suppressed. The bundle
+// files the spider actually found are still fetched and scanned; only new
+// brute-force task generation is skipped. Real endpoints (e.g. /api/...) are
+// unaffected because they never sit under these markers.
+//
+// Only framework-namespaced directories are listed. A generic /static/ (and its
+// /static/js/, /static/css/ subdirs) is deliberately NOT here: older/hand-rolled
+// apps store normal, individually-authored assets there that are worth
+// discovering, so treating it as immutable would skip real content.
+var immutableAssetDirMarkers = []string{
+	"/_next/static/",   // Next.js
+	"/_nuxt/",          // Nuxt
+	"/_app/immutable/", // SvelteKit
+}
+
+// isImmutableAssetDir reports whether urlPath is (or is nested under) a JS
+// framework's immutable, content-hashed build-output directory. This is a cheap
+// path-based fast-path for well-known frameworks; the framework-agnostic signal
+// is looksLikeHashedAsset (content-hash filename detection).
+func isImmutableAssetDir(urlPath string) bool {
+	p := strings.ToLower(urlPath)
+	for _, marker := range immutableAssetDirMarkers {
+		if strings.Contains(p, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// hashedAssetExts are the JS/CSS bundle extensions whose content-hashed forms
+// drive discovery noise. Detection is limited to code/style bundles — the actual
+// noise source — to keep the false-positive risk on hand-authored files near zero.
+var hashedAssetExts = []string{".js", ".mjs", ".cjs", ".css"}
+
+// looksLikeHashedAsset reports whether filename is a content-hash fingerprinted
+// JS/CSS bundle (e.g. main-5cf96b0d57f7f579.js, 938-50137dfb3187f5b2.js,
+// polyfills-c67a75d1b6f99dc8.js, CRA's main.073c9bfa.chunk.js). The tell is a
+// dash/dot/underscore-delimited token of >=8 hex chars that contains at least one
+// a-f letter — the "contains a-f" rule keeps decimal ids, timestamps and version
+// numbers (jquery-3.6.0.min.js, build-20240115.js) from matching. Framework-
+// agnostic: it flags Next.js/Nuxt/Vite/webpack/CRA build output alike without a
+// hardcoded directory list. Byte-scan (no regexp) as it runs per spider link.
+func looksLikeHashedAsset(filename string) bool {
+	base := strings.ToLower(filename)
+	base = strings.TrimSuffix(base, ".map")
+	ext := ""
+	for _, e := range hashedAssetExts {
+		if strings.HasSuffix(base, e) {
+			ext = e
+			break
+		}
+	}
+	if ext == "" {
+		return false
+	}
+	base = base[:len(base)-len(ext)]
+
+	// Scan '-'/'.'/'_'-delimited tokens without allocating a slice.
+	start := 0
+	for i := 0; i <= len(base); i++ {
+		if i == len(base) || base[i] == '-' || base[i] == '.' || base[i] == '_' {
+			if isHexHashToken(base[start:i]) {
+				return true
+			}
+			start = i + 1
+		}
+	}
+	return false
+}
+
+// isHexHashToken reports whether tok is a content-hash token: >=8 chars, all
+// lowercase hex, with at least one a-f letter (so pure-decimal ids don't match).
+func isHexHashToken(tok string) bool {
+	if len(tok) < 8 {
+		return false
+	}
+	sawLetter := false
+	for i := 0; i < len(tok); i++ {
+		switch c := tok[i]; {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+			sawLetter = true
+		default:
+			return false
+		}
+	}
+	return sawLetter
+}
+
+// directoryKey returns the deduplication key for a directory URL. It is the one
+// definition of that recipe: testedDirectories, hashedAssetDirs, and the recursion
+// guards all key off it, so writes and reads stay byte-identical. (OnDirectory
+// Discovered inlines the same two calls because it also needs the cleaned path.)
+func (e *Engine) directoryKey(dirURL *url.URL) string {
+	return dedup.NormalizeURL(e.cleanDirectoryPath(dirURL))
+}
+
+// recordHashedAssetParent notes the immediate parent directory of fileURL as a
+// content-hashed build-output directory when the file is a fingerprinted bundle,
+// so later recursion into that directory is skipped regardless of the order files
+// are discovered. The site root is never recorded — a hashed file at "/" must not
+// suppress root recursion.
+func (e *Engine) recordHashedAssetParent(fileURL *url.URL) {
+	if fileURL == nil {
+		return
+	}
+	lastSlash := strings.LastIndexByte(fileURL.Path, '/')
+	if lastSlash <= 0 {
+		return // file at root (or malformed) — do not suppress root recursion
+	}
+	if !looksLikeHashedAsset(fileURL.Path[lastSlash+1:]) {
+		return
+	}
+	dirURL := &url.URL{Scheme: fileURL.Scheme, Host: fileURL.Host, Path: fileURL.Path[:lastSlash+1]}
+	key := e.directoryKey(dirURL)
+
+	e.hashedAssetDirsMu.Lock()
+	if e.hashedAssetDirs == nil {
+		e.hashedAssetDirs = make(map[string]struct{})
+	}
+	e.hashedAssetDirs[key] = struct{}{}
+	e.hashedAssetDirsMu.Unlock()
+}
+
+// dirHoldsHashedAssets reports whether normalizedDirKey (a directoryKey value) was
+// recorded as a content-hashed build-output directory by recordHashedAssetParent.
+func (e *Engine) dirHoldsHashedAssets(normalizedDirKey string) bool {
+	e.hashedAssetDirsMu.Lock()
+	defer e.hashedAssetDirsMu.Unlock()
+	_, ok := e.hashedAssetDirs[normalizedDirKey] // reading a nil map is safe
+	return ok
+}
+
 // OnDirectoryDiscovered handles directory discovery during scan execution.
 // Creates recursive tasks and numeric fuzzing tasks for discovered directories.
 // Uses MarkSeenIfNew for deduplication - returns early if directory already processed.
@@ -54,6 +193,18 @@ func (e *Engine) OnDirectoryDiscovered(dirPath string, depth uint16) error {
 		return nil
 	}
 
+	// Skip recursion into a JS framework's immutable, content-hashed build-output
+	// directory (e.g. /_next/static/chunks/). Wordlist and observed-name brute
+	// forcing there only replays chunk names harvested from the served bundles
+	// back at the server — pure noise that never surfaces a real route. This is the
+	// known-framework fast-path; the framework-agnostic signal is checked below via
+	// dirHoldsHashedAssets once the dedup key is computed.
+	if isImmutableAssetDir(parsedURL.Path) {
+		logger.Debug("Skipping recursion into immutable asset directory",
+			zap.String("path", dirPath))
+		return nil
+	}
+
 	// Skip recursion if the directory's prefix has been tripped by the breaker.
 	// Avoids queueing wordlist / observed tasks under known trap prefixes.
 	if e.prefixBreaker != nil && e.prefixBreaker.IsDead(parsedURL) {
@@ -67,6 +218,17 @@ func (e *Engine) OnDirectoryDiscovered(dirPath string, depth uint16) error {
 	// Deduplication: normalize URL (sorted param names) for consistent dedup
 	// Use normalized form for dedup check, but keep original cleanedPath for HTTP requests
 	normalizedForDedup := dedup.NormalizeURL(cleanedPath)
+
+	// Skip recursion into any directory observed to hold content-hash fingerprinted
+	// bundles, even when it isn't under a known framework marker (Vite, webpack, CRA
+	// mounted elsewhere, …). recordHashedAssetParent populates this from the actual
+	// filenames the spider found, so the decision is discovery-order independent.
+	if e.dirHoldsHashedAssets(normalizedForDedup) {
+		logger.Debug("Skipping recursion into content-hashed asset directory",
+			zap.String("path", cleanedPath))
+		return nil
+	}
+
 	if !e.testedDirectories.MarkSeenIfNew(normalizedForDedup) {
 		logger.Debug("Directory already processed, skipping",
 			zap.String("path", cleanedPath))
@@ -411,6 +573,10 @@ func (e *Engine) OnFileDiscovered(filePath string, depth uint16, confirmExt bool
 	// Extract and track filename/extension
 	e.extractFileMetadata(filePath, depth, confirmExt)
 
+	// If this is a content-hash fingerprinted bundle, mark its directory as a
+	// build-output dir BEFORE breadcrumb processing so recursion into it is skipped.
+	e.recordHashedAssetParent(parsedFileURL)
+
 	// Extract breadcrumb directories (triggers recursive brute force)
 	e.processFilePathBreadcrumbs(filePath, depth)
 
@@ -491,6 +657,19 @@ func (e *Engine) createFileDerivationTasks(filePath string, _, filename, basePat
 		return
 	}
 
+	parsedURL, _ := url.Parse(filePath)
+
+	// Skip backup/numeric derivations for a content-hash fingerprinted bundle
+	// (main-<hash>.js) or any file under a known framework build dir. These
+	// artifacts are versioned by hash, so .bak variants and numeric mutations of
+	// them can never exist — probing for them is wasted traffic.
+	if parsedURL != nil &&
+		(isImmutableAssetDir(parsedURL.Path) || looksLikeHashedAsset(path.Base(parsedURL.Path))) {
+		logger.Debug("Skipping file derivation for hashed/immutable asset file",
+			zap.String("path", filePath))
+		return
+	}
+
 	derivationCount := 0
 
 	// Extension Variant Task
@@ -507,8 +686,7 @@ func (e *Engine) createFileDerivationTasks(filePath string, _, filename, basePat
 		}
 	}
 
-	// Numeric Mutation Task - use URL without query params
-	parsedURL, _ := url.Parse(filePath)
+	// Numeric Mutation Task - use URL without query params (parsedURL from above)
 	if e.config.Filenames.EnableNumericFuzzing && parsedURL != nil {
 		if _, _, _, found := FindNumericParameter([]byte(parsedURL.Path)); found {
 			// Strip query params for numeric fuzz task

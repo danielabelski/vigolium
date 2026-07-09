@@ -146,6 +146,16 @@ func (m *Module) tryProbe(
 		return nil, nil
 	}
 
+	// Content-type discipline: a genuine S3/Azure bucket listing is an XML
+	// document (application/xml). A universal catch-all / static-website host that
+	// answers every path with a 200 text/html shell — or the gzip/Content-Length:0
+	// transport quirk that captures only a reflecting tail fragment of one — can
+	// carry a stray "<Key>"/"<Name>"/"<Container>" and forge a listing. Reject an
+	// HTML document: the XML listing markers only count in a non-HTML response.
+	if servedAsHTMLDoc(resp.Response().Header.Get("Content-Type")) {
+		return nil, nil
+	}
+
 	body := resp.Body().String()
 	if !bodyContainsAll(body, probe.markers) {
 		return nil, nil

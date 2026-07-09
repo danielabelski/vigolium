@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
-	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	chromium "github.com/vigolium/vigolium/internal/resources/spitolas"
+	"github.com/vigolium/vigolium/pkg/browserprobe"
 	"github.com/vigolium/vigolium/pkg/cftbrowser"
 	"github.com/vigolium/vigolium/pkg/spitolas/internal/config"
 
@@ -67,52 +67,165 @@ func New(cfg *config.Config) (*Browser, error) {
 	return b, nil
 }
 
-// launch starts the browser process.
+// launch starts the browser process, trying each candidate binary in priority
+// order and falling through to the next whenever one fails to actually launch.
+//
+// Order: explicit browser_path → embedded engine binary → system Google Chrome
+// → system Chromium → Chrome for Testing (cached, then downloaded) → rod's own
+// auto-download. A binary that merely prints a version but crashes on real
+// headless startup (e.g. some distro Chromium builds on a KVM guest) is
+// therefore auto-recovered from — the scan falls back to a working browser (in
+// practice Chrome for Testing) instead of failing outright. Only when every
+// candidate fails does this return an aggregated error.
 func (b *Browser) launch() error {
-	l := launcher.New()
+	candidates := b.browserCandidates()
 
-	// Priority: config path > embedded binary > system browser > auto-download
-	var binPath string
-
-	if b.config.BrowserPath != "" {
-		// User-specified browser path takes highest priority
-		binPath = b.config.BrowserPath
-		zap.L().Debug("Using configured browser path", zap.String("path", binPath))
-	} else if embedded, err := b.getEmbeddedBrowserPath(); err == nil {
-		binPath = embedded
-		zap.L().Debug("Using embedded browser", zap.String("path", binPath))
-	} else if sysPath, found := launcher.LookPath(); found && validateBrowserBin(sysPath) {
-		// Validate the system browser actually works — Ubuntu installs snap
-		// stubs at /usr/bin/chromium-browser that aren't real browsers.
-		binPath = sysPath
-		zap.L().Debug("Using system browser", zap.String("path", binPath))
-	} else if extraPath, ok := lookPathExtra(); ok {
-		binPath = extraPath
-		zap.L().Debug("Using system browser (extra path)", zap.String("path", binPath))
-	} else if cftPath, cftErr := cftbrowser.FindCachedBrowser(); cftErr == nil {
-		binPath = cftPath
-		zap.L().Info("Using cached Chrome for Testing", zap.String("path", binPath))
-	} else if cftbrowser.IsSupported() {
-		// No browser found anywhere — download Chrome for Testing on the fly.
-		zap.L().Info("No browser binary found, downloading Chrome for Testing")
-		if dlPath, dlErr := cftbrowser.EnsureBrowser(context.Background()); dlErr == nil {
-			binPath = dlPath
-			zap.L().Info("Using downloaded Chrome for Testing", zap.String("path", binPath))
-		} else {
-			zap.L().Warn("Chrome for Testing download failed, falling back to rod auto-download",
-				zap.Error(dlErr))
+	var attempts []string
+	for _, c := range candidates {
+		binPath, err := c.resolve()
+		if err != nil {
+			zap.L().Debug("browser candidate unavailable, skipping",
+				zap.String("candidate", c.label), zap.Error(err))
+			continue
 		}
-	} else if runtime.GOOS == "linux" && runtime.GOARCH == "arm64" {
-		// rod's launcher auto-download produces broken URLs on linux/arm64
-		// (no hostConf entry, urlPrefix=""), so a fall-through here would hang
-		// on a multi-minute fetchup race that ends in a cryptic error. Fail
-		// fast with an actionable message instead.
-		return fmt.Errorf("no chromium binary found on linux/arm64 — install one with: sudo apt-get install -y chromium")
-	} else {
-		zap.L().Warn("No browser binary found, using auto-download fallback",
-			zap.Error(err))
+
+		l := b.newLauncher(binPath)
+		u, err := l.Launch()
+		if err != nil {
+			// No l.Kill() here: launcher.Launch already kills the process on the
+			// getURL/timeout failure path, and a failed cmd.Start leaves none —
+			// a second Kill would just burn its built-in ~1s sleep for nothing.
+			short := browserprobe.FirstLine(err.Error())
+			zap.L().Warn("browser candidate failed to launch, falling back to next",
+				zap.String("candidate", c.label),
+				zap.String("bin", binPathOrAuto(binPath)),
+				zap.String("error", short))
+			attempts = append(attempts, fmt.Sprintf("%s [%s]: %s", c.label, binPathOrAuto(binPath), short))
+			continue
+		}
+
+		browser := rod.New().ControlURL(u)
+		if err := browser.Connect(); err != nil {
+			l.Kill()
+			zap.L().Warn("browser candidate connected but handshake failed, falling back to next",
+				zap.String("candidate", c.label), zap.Error(err))
+			attempts = append(attempts, fmt.Sprintf("%s [%s]: connect: %v", c.label, binPathOrAuto(binPath), err))
+			continue
+		}
+
+		b.launcher = l
+		b.rodBrowser = browser
+		zap.L().Debug("browser launched",
+			zap.String("candidate", c.label), zap.String("bin", binPathOrAuto(binPath)))
+		return nil
 	}
 
+	if len(attempts) == 0 {
+		hint := ""
+		if isLinuxARM64For(runtime.GOOS, runtime.GOARCH) {
+			hint = " — install one with: sudo apt-get install -y chromium"
+		}
+		return fmt.Errorf("failed to launch browser: no browser binary found%s", hint)
+	}
+	return fmt.Errorf("failed to launch browser: all %d candidate(s) failed: %s",
+		len(attempts), strings.Join(attempts, "; "))
+}
+
+// browserCandidate is one binary to attempt, in priority order. resolve is lazy
+// so expensive providers (the Chrome for Testing download) only run once every
+// cheaper candidate has already failed.
+type browserCandidate struct {
+	label   string
+	resolve func() (string, error) // returns bin path; "" means "let rod auto-download"
+}
+
+// browserCandidates builds the ordered candidate list for the current host. It
+// resolves the platform-varying inputs (system browser binaries, GOOS/GOARCH)
+// and hands them to buildBrowserCandidates, which owns the ordering.
+func (b *Browser) browserCandidates() []browserCandidate {
+	systemBins := systemBrowserBins(browserPreferenceOrderFor(runtime.GOOS), lookPathFound, validateBrowserBin)
+	return buildBrowserCandidates(runtime.GOOS, runtime.GOARCH, b.config.BrowserPath, systemBins, b.getEmbeddedBrowserPath)
+}
+
+// buildBrowserCandidates assembles the ordered candidate list from already-
+// resolved inputs. Platform (goos/goarch), the configured path, the resolved
+// system browser bins, and the embedded-binary resolver are all injected, so the
+// ordering — and the platform-specific tail (the linux/arm64 rod-auto-download
+// skip) — is unit-testable on any host. See launch() for the order rationale.
+func buildBrowserCandidates(goos, goarch, configPath string, systemBins []string, embedded func() (string, error)) []browserCandidate {
+	var cands []browserCandidate
+	add := func(label string, resolve func() (string, error)) {
+		cands = append(cands, browserCandidate{label: label, resolve: resolve})
+	}
+
+	// 1. Explicit configured path — highest priority (e.g. spidering.browser_path).
+	if configPath != "" {
+		add("configured browser_path", func() (string, error) { return configPath, nil })
+	}
+
+	// 2. Embedded engine binary — only resolves for the ungoogled/fingerprint
+	//    engines (or an embed_chromium build); a no-op for the default engine.
+	add("embedded browser", embedded)
+
+	// 3. System browsers, real Chrome first then Chromium. All resolvable
+	//    binaries are enumerated (not just the first match) so a crash-on-launch
+	//    Chromium can fall through to a working Chrome/Chromium, then to CfT.
+	for _, p := range systemBins {
+		add("system browser "+p, func() (string, error) { return p, nil })
+	}
+
+	// cftCandidate wraps a Chrome-for-Testing resolver with the shared
+	// "is there a build for this platform?" guard so the two CfT rungs below
+	// can't drift in how they gate (no build for e.g. linux/arm64).
+	cftCandidate := func(fn func() (string, error)) func() (string, error) {
+		return func() (string, error) {
+			if !cftbrowser.IsSupported() {
+				return "", fmt.Errorf("chrome for testing unsupported on %s/%s", goos, goarch)
+			}
+			return fn()
+		}
+	}
+
+	// 4. Chrome for Testing — a previously cached copy (no network).
+	add("Chrome for Testing (cached)", cftCandidate(cftbrowser.FindCachedBrowser))
+
+	// 5. Chrome for Testing — download on the fly (network, last real resort).
+	//    This is what recovers a host whose only system browser is broken.
+	add("Chrome for Testing (download)", cftCandidate(func() (string, error) {
+		zap.L().Info("No working system browser — downloading Chrome for Testing")
+		return cftbrowser.EnsureBrowser(context.Background())
+	}))
+
+	// 6. rod's built-in auto-download (a browser rod fetches itself). Dropped
+	//    ONLY on linux/arm64, where rod's download URLs are broken and would
+	//    hang on a multi-minute fetch race. This does NOT make arm64 a
+	//    second-class platform: an apt-installed system Chromium (candidate 3)
+	//    — or the embedded ungoogled arm64 engine (candidate 2) — is the
+	//    supported path there, exactly like everywhere else. What arm64 lacks is
+	//    only the *automatic download* rungs (both CfT and rod publish no
+	//    linux/arm64 build), so if no browser is installed launch() returns an
+	//    "install chromium" hint instead of hanging.
+	if !isLinuxARM64For(goos, goarch) {
+		add("rod auto-download", func() (string, error) { return "", nil })
+	}
+
+	return cands
+}
+
+// isLinuxARM64For reports whether goos/goarch is linux/arm64. Only the automatic
+// browser *download* fallbacks are unavailable there (neither rod nor Chrome for
+// Testing ship a linux/arm64 binary); a system-installed Chromium is used
+// normally. Parameterized by GOOS/GOARCH so it's testable on any host.
+func isLinuxARM64For(goos, goarch string) bool {
+	return goos == "linux" && goarch == "arm64"
+}
+
+// newLauncher builds a fresh, fully-configured launcher for a single launch
+// attempt. A launcher.Launcher may only be Launch()ed once, so every candidate
+// gets its own. An empty binPath leaves the binary unset so rod resolves or
+// auto-downloads one.
+func (b *Browser) newLauncher(binPath string) *launcher.Launcher {
+	l := launcher.New()
 	if binPath != "" {
 		l = l.Bin(binPath)
 	}
@@ -167,11 +280,7 @@ func (b *Browser) launch() error {
 			zap.String("fingerprint-brand", "Chrome"))
 	}
 
-	if b.config.Headless {
-		l = l.Headless(true)
-	} else {
-		l = l.Headless(false)
-	}
+	l = l.Headless(b.config.Headless)
 
 	// Set proxy if configured. Force HTTP/1.1 alongside it: intercepting proxies
 	// (Burp, ZAP) routinely mishandle HTTP/2 frame translation, which Chrome
@@ -189,23 +298,15 @@ func (b *Browser) launch() error {
 			zap.String("proxy", b.config.ProxyURL))
 	}
 
-	// Launch the browser
-	u, err := l.Launch()
-	if err != nil {
-		return fmt.Errorf("failed to launch browser: %w", err)
+	return l
+}
+
+// binPathOrAuto renders an empty bin path (rod auto-download) as "auto" for logs.
+func binPathOrAuto(binPath string) string {
+	if binPath == "" {
+		return "auto-download"
 	}
-
-	b.launcher = l
-
-	// Connect to browser
-	browser := rod.New().ControlURL(u)
-	if err := browser.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to browser: %w", err)
-	}
-
-	b.rodBrowser = browser
-
-	return nil
+	return binPath
 }
 
 // applyProxy points the launcher at proxyURL and forces HTTP/1.1 over it.
@@ -517,29 +618,74 @@ func (b *Browser) IsConnected() bool {
 	return b.rodBrowser != nil
 }
 
-// lookPathExtra checks Linux paths that rod's launcher.LookPath misses.
-// Ubuntu's apt-installed chromium-browser package on some releases lays the
-// real binary under /usr/lib/chromium-browser/chromium-browser (with a wrapper
-// or symlink in /usr/bin); the snap version drops a stub at /usr/bin that
-// fails. validateBrowserBin filters out the latter, but we still need a way
-// to find the real binary when LookPath comes up empty.
-func lookPathExtra() (string, bool) {
-	if runtime.GOOS != "linux" {
+// browserPreferenceOrderFor is the OS-specific list of system browser binaries
+// to try, in priority order: real Google Chrome first, then Chromium. (Chrome
+// for Testing is handled separately by browserCandidates, always after these.)
+// Both bare names — resolved via PATH — and absolute fallbacks are listed; the
+// absolute paths cover the apt layout where the real binary lives under
+// /usr/lib/chromium and the snap stub sits in /usr/bin. Duplicates that resolve
+// to the same path are collapsed by systemBrowserBins. Parameterized by GOOS so
+// the ordering can be unit-tested on any host.
+func browserPreferenceOrderFor(goos string) []string {
+	switch goos {
+	case "linux":
+		return []string{
+			// Google Chrome (real).
+			"google-chrome-stable", "google-chrome", "chrome",
+			"/usr/bin/google-chrome-stable", "/usr/bin/google-chrome",
+			// Chromium.
+			"chromium", "chromium-browser",
+			"/usr/bin/chromium", "/usr/bin/chromium-browser",
+			"/snap/bin/chromium",
+			"/usr/lib/chromium/chromium",
+			"/usr/lib/chromium-browser/chromium-browser",
+		}
+	case "darwin":
+		return []string{
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"google-chrome", "chrome",
+			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+			"chromium",
+		}
+	case "windows":
+		return []string{"chrome", "chromium"}
+	default:
+		return []string{"chrome", "chromium"}
+	}
+}
+
+// lookPathFound resolves name via exec.LookPath, returning the absolute path and
+// whether it was found. Split out so systemBrowserBins can be unit-tested with a
+// stubbed lookup.
+func lookPathFound(name string) (string, bool) {
+	p, err := exec.LookPath(name)
+	if err != nil {
 		return "", false
 	}
-	for _, p := range []string{
-		"/usr/lib/chromium/chromium",
-		"/usr/lib/chromium-browser/chromium-browser",
-	} {
-		if _, err := os.Stat(p); err != nil {
+	return p, true
+}
+
+// systemBrowserBins returns the resolvable, validated system browser binaries in
+// the given preference order, deduplicated by resolved path. Real Chrome sorts
+// ahead of Chromium so a working Chrome is preferred, while still enumerating
+// every binary so launch() can fall through a crash-on-launch one. lookPath and
+// validate are injected for testing (production: lookPathFound + validateBrowserBin).
+func systemBrowserBins(order []string, lookPath func(string) (string, bool), validate func(string) bool) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, name := range order {
+		p, ok := lookPath(name)
+		if !ok || seen[p] {
 			continue
 		}
-		if !validateBrowserBin(p) {
+		seen[p] = true // mark before validate so a shared path is validated once
+		if !validate(p) {
 			continue
 		}
-		return p, true
+		out = append(out, p)
 	}
-	return "", false
+	return out
 }
 
 // validateBrowserBin checks if a browser binary is a real browser executable

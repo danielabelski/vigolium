@@ -76,6 +76,30 @@ func TestDetectsElasticsearch(t *testing.T) {
 	assert.Contains(t, got[0], "Elasticsearch")
 }
 
+// TestNoFalsePositiveHTMLCatchAll reproduces the universal catch-all / echo FP
+// class: a host that answers EVERY path with a 200 text/html body (here only a
+// reflecting tail fragment, as a gzip + bogus Content-Length:0 transport quirk
+// would leave) that happens to contain the Docker Registry probe's weak
+// "repositories" marker. Status 200 + the bare word would forge a Docker Registry
+// finding (and reproduce across both rounds, since the catch-all is stable); the
+// content-type discipline (every fingerprinted service answers with JSON, never
+// an HTML document) rejects it.
+func TestNoFalsePositiveHTMLCatchAll(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		// Truncated tail: no <!doctype/<html>, carries the weak "repositories"
+		// token the Docker Registry v2 probe accepts, reflecting the path too.
+		_, _ = w.Write([]byte("</nav><main>route " + r.URL.Path +
+			" — browse our repositories and docs</main></body>"))
+	}))
+	defer srv.Close()
+
+	got := run(t, srv)
+	assert.Empty(t, got, "an HTML catch-all echoing 'repositories' must not be flagged as a Docker Registry")
+}
+
 // A normal web host (HTML for everything, and 401 on API-ish paths) must not match
 // any service signature.
 func TestNoFalsePositiveWebHost(t *testing.T) {

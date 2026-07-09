@@ -15,13 +15,42 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory/same-extension negative-control probes
+// the catch-all disproof issues per candidate. A host that answers every
+// /<dir>/<anything> with the same 200 body (a reflecting/echo server, a SPA
+// fallback, a blanket rewrite) trips at least one round and the candidate is
+// dropped. Two rounds tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type probe struct {
-	path        string
-	name        string
-	markers     []string
+	path    string
+	name    string
+	markers []string
+	// htmlDoc marks a probe whose GENUINE hit is legitimately an HTML document — a
+	// phpinfo() page or a phpMyAdmin login UI. For those, a text/html response is
+	// expected, so the content-type gate is skipped and the catch-all decoy disproof
+	// is the guard instead. When false (the PHP-FPM status endpoints and the /ping
+	// health check, which are only ever served as plaintext), a text/html response is
+	// a catch-all / echo shell and is rejected outright by content-type — the
+	// decisive, truncation-proof guard against the universal-catch-all FP where a
+	// weak marker ("pool:", "pong") survives in the shell's truncated tail.
+	htmlDoc     bool
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
+}
+
+// match reports whether body satisfies this probe's marker set (pure-OR: any
+// single marker hit confirms) and returns the matched substrings for evidence.
+// Centralized so the primary match and the catch-all decoy disproof apply the
+// exact same predicate.
+func (p probe) match(body string) (matched []string, ok bool) {
+	for _, marker := range p.markers {
+		if strings.Contains(body, marker) {
+			matched = append(matched, marker)
+		}
+	}
+	return matched, len(matched) > 0
 }
 
 var probes = []probe{
@@ -30,6 +59,10 @@ var probes = []probe{
 		path:    "/info.php",
 		name:    "PHP Info (info.php)",
 		markers: []string{"PHP Version", "phpinfo()", "Configuration File"},
+		// phpinfo() renders an HTML document, so the content-type gate is skipped and
+		// the catch-all decoy disproof (a random sibling that also carries the markers)
+		// is the guard against the universal-catch-all FP instead.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpinfo() page exposed at /info.php, revealing PHP configuration and server details",
 	},
@@ -37,6 +70,10 @@ var probes = []probe{
 		path:    "/test.php",
 		name:    "PHP Info (test.php)",
 		markers: []string{"PHP Version", "phpinfo()", "Configuration File"},
+		// phpinfo() renders an HTML document, so the content-type gate is skipped and
+		// the catch-all decoy disproof (a random sibling that also carries the markers)
+		// is the guard against the universal-catch-all FP instead.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpinfo() page exposed at /test.php, revealing PHP configuration and server details",
 	},
@@ -44,6 +81,10 @@ var probes = []probe{
 		path:    "/debug.php",
 		name:    "PHP Info (debug.php)",
 		markers: []string{"PHP Version", "phpinfo()", "Configuration File"},
+		// phpinfo() renders an HTML document, so the content-type gate is skipped and
+		// the catch-all decoy disproof (a random sibling that also carries the markers)
+		// is the guard against the universal-catch-all FP instead.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpinfo() page exposed at /debug.php, revealing PHP configuration and server details",
 	},
@@ -51,6 +92,10 @@ var probes = []probe{
 		path:    "/_phpinfo.php",
 		name:    "PHP Info (_phpinfo.php)",
 		markers: []string{"PHP Version", "phpinfo()", "Configuration File"},
+		// phpinfo() renders an HTML document, so the content-type gate is skipped and
+		// the catch-all decoy disproof (a random sibling that also carries the markers)
+		// is the guard against the universal-catch-all FP instead.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpinfo() page exposed at /_phpinfo.php, revealing PHP configuration and server details",
 	},
@@ -58,6 +103,10 @@ var probes = []probe{
 		path:    "/public/phpinfo.php",
 		name:    "PHP Info (public/phpinfo.php)",
 		markers: []string{"PHP Version", "phpinfo()", "Configuration File"},
+		// phpinfo() renders an HTML document, so the content-type gate is skipped and
+		// the catch-all decoy disproof (a random sibling that also carries the markers)
+		// is the guard against the universal-catch-all FP instead.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpinfo() page exposed at /public/phpinfo.php, revealing PHP configuration and server details",
 	},
@@ -65,6 +114,10 @@ var probes = []probe{
 		path:    "/php_info.php",
 		name:    "PHP Info (php_info.php)",
 		markers: []string{"PHP Version", "phpinfo()", "Configuration File"},
+		// phpinfo() renders an HTML document, so the content-type gate is skipped and
+		// the catch-all decoy disproof (a random sibling that also carries the markers)
+		// is the guard against the universal-catch-all FP instead.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpinfo() page exposed at /php_info.php, revealing PHP configuration and server details",
 	},
@@ -72,6 +125,10 @@ var probes = []probe{
 		path:    "/i.php",
 		name:    "PHP Info (i.php)",
 		markers: []string{"PHP Version", "phpinfo()", "Configuration File"},
+		// phpinfo() renders an HTML document, so the content-type gate is skipped and
+		// the catch-all decoy disproof (a random sibling that also carries the markers)
+		// is the guard against the universal-catch-all FP instead.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpinfo() page exposed at /i.php, revealing PHP configuration and server details",
 	},
@@ -110,6 +167,9 @@ var probes = []probe{
 		path:    "/phpmyadmin/",
 		name:    "phpMyAdmin",
 		markers: []string{"phpMyAdmin", "pma_", "PMA_"},
+		// A phpMyAdmin login page is a genuine HTML document, so rely on the catch-all
+		// decoy disproof rather than a content-type gate.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpMyAdmin database management interface exposed, enabling potential database compromise",
 	},
@@ -117,6 +177,9 @@ var probes = []probe{
 		path:    "/pma/",
 		name:    "phpMyAdmin (pma)",
 		markers: []string{"phpMyAdmin", "pma_", "PMA_"},
+		// A phpMyAdmin login page is a genuine HTML document, so rely on the catch-all
+		// decoy disproof rather than a content-type gate.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpMyAdmin exposed at /pma/, enabling potential database compromise",
 	},
@@ -124,6 +187,9 @@ var probes = []probe{
 		path:    "/mysql/",
 		name:    "phpMyAdmin (mysql)",
 		markers: []string{"phpMyAdmin", "pma_", "PMA_"},
+		// A phpMyAdmin login page is a genuine HTML document, so rely on the catch-all
+		// decoy disproof rather than a content-type gate.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpMyAdmin exposed at /mysql/, enabling potential database compromise",
 	},
@@ -131,6 +197,9 @@ var probes = []probe{
 		path:    "/myadmin/",
 		name:    "phpMyAdmin (myadmin)",
 		markers: []string{"phpMyAdmin", "pma_", "PMA_"},
+		// A phpMyAdmin login page is a genuine HTML document, so rely on the catch-all
+		// decoy disproof rather than a content-type gate.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpMyAdmin exposed at /myadmin/, enabling potential database compromise",
 	},
@@ -138,6 +207,9 @@ var probes = []probe{
 		path:    "/dbadmin/",
 		name:    "phpMyAdmin (dbadmin)",
 		markers: []string{"phpMyAdmin", "pma_", "PMA_"},
+		// A phpMyAdmin login page is a genuine HTML document, so rely on the catch-all
+		// decoy disproof rather than a content-type gate.
+		htmlDoc: true,
 		sev:     severity.Medium,
 		desc:    "phpMyAdmin exposed at /dbadmin/, enabling potential database compromise",
 	},
@@ -309,6 +381,18 @@ func (m *Module) probeFile(
 		}
 	}
 
+	// Content-type discipline for the non-HTML probes (survives body truncation — the
+	// header is intact even when a gzip/Content-Length-0 quirk leaves only a partial
+	// body tail): the PHP-FPM status/ping endpoints are ONLY served as plaintext, so a
+	// text/html response is a catch-all / echo shell. A universal reflecting host
+	// answers every path with its themed HTML shell, and a weak marker ("pool:",
+	// "pong") that survives in the shell's truncated tail would otherwise forge a
+	// match. phpinfo() and phpMyAdmin pages ARE genuine HTML documents (htmlDoc), so
+	// they skip this gate and rely on the catch-all decoy disproof below.
+	if !p.htmlDoc && modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil
+	}
+
 	body := resp.Body().String()
 
 	// Check against 404 fingerprint
@@ -343,15 +427,31 @@ func (m *Module) probeFile(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	// Strip the reflected request from the body before marker matching so an echoed
+	// path segment or request-body value cannot satisfy a marker on its own. The
+	// original body is kept for anti-markers and stored evidence.
+	matchBody := modkit.StripReflectedProbePath(body, p.path)
+	if reqBody := ctx.Request().BodyToString(); reqBody != "" {
+		matchBody = modkit.StripReflected(matchBody, reqBody)
 	}
-	if !matched {
+
+	matchedMarkers, ok := p.match(matchBody)
+	if !ok {
+		return nil
+	}
+
+	// Multi-round catch-all disproof: probe several guaranteed-nonexistent siblings
+	// sharing this probe's directory AND extension. If a random same-shape path
+	// returns the same status and also satisfies the marker predicate, the host
+	// serves this content for any path (a reflecting/echo server, a SPA fallback, an
+	// extension-scoped catch-all) and the match proves nothing. A genuinely exposed
+	// endpoint has no such sibling (the decoy 404s), so this costs no true positives,
+	// and it is robust to the body-truncation quirk because the decoy is run through
+	// the same predicate rather than a body-similarity compare.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, decoyRounds, func(b string) bool {
+		_, sibOK := p.match(b)
+		return sibOK
+	}) {
 		return nil
 	}
 

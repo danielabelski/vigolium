@@ -12,6 +12,7 @@ import (
 
 	corestats "github.com/vigolium/vigolium/pkg/core/stats"
 	"github.com/vigolium/vigolium/pkg/database"
+	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/modules"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/terminal"
@@ -57,6 +58,43 @@ func (r *Runner) echoLiveFinding(phaseTag string, result *output.ResultEvent) {
 	line := output.FormatPhaseFindingLine(phaseTag, result)
 	r.writeSessionLog(line)
 	fmt.Fprint(os.Stderr, line)
+}
+
+// FormatBlockNoticeLine renders the one-line WAF/CDN block warning (with a
+// trailing newline) shown when the edge starts filtering scan traffic. It is
+// shared by every scan front-end so the message and the "unrecognized vendor"
+// fallback stay identical whether the scan runs through the Runner or the direct
+// scan-url/scan-request path.
+func FormatBlockNoticeLine(n http.BlockNotice) string {
+	vendor := n.WAFType
+	if vendor == "" || vendor == "generic" {
+		vendor = "WAF/CDN"
+	}
+	return fmt.Sprintf("%s %s %s %s %s %s\n",
+		terminal.BoldYellow(terminal.SymbolWarning),
+		terminal.BoldYellow("[waf-block-detected]"),
+		terminal.HiBlue(n.Host),
+		terminal.Muted("→"),
+		terminal.Yellow(fmt.Sprintf("%s (HTTP %d)", vendor, n.Status)),
+		terminal.Muted("edge is filtering scan traffic — results for this host may be incomplete"))
+}
+
+// attachWAFBlockNotifier wires a one-time-per-host WAF/CDN block warning onto the
+// scan's HTTP requester. The first time any scan request to a host comes back as
+// a captcha / bot-detection / challenge page, a prominent warning is printed to
+// stderr (and the session log) so the operator knows the edge is filtering
+// traffic and results against that host are likely incomplete. Fires across every
+// phase (discovery, spidering, dynamic-assessment) since all traffic flows
+// through the shared requester. No-op in silent mode or without a requester.
+func (r *Runner) attachWAFBlockNotifier(requester *http.Requester) {
+	if r.options.Silent || requester == nil {
+		return
+	}
+	requester.SetBlockNotifier(func(n http.BlockNotice) {
+		line := FormatBlockNoticeLine(n)
+		r.writeSessionLog(line)
+		fmt.Fprint(os.Stderr, line)
+	})
 }
 
 // printPhaseStart prints a phase start message to stderr.

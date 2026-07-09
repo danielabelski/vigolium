@@ -120,6 +120,20 @@ func (m *Module) ScanPerRequest(
 		body := resp.Body().String()
 		ct := resp.Response().Header.Get("Content-Type")
 
+		// Catch-all / echo-server guard: none of these dev-server endpoints serve a
+		// full HTML document — the HMR endpoints stream text/event-stream, sockjs /
+		// info serves JSON, open-in-editor returns a plaintext error. A 200 text/html
+		// body on one of these paths is the host's catch-all / SPA shell served for
+		// literally any path (or, under a gzip + bogus `Content-Length: 0` transport
+		// quirk, a truncated TAIL fragment of it whose weak reflected marker survives
+		// the exact-hash 404 and observed-page guards). The Content-Type header
+		// survives that truncation, so reject an HTML document outright before the
+		// content-type / marker checks below.
+		if modkit.ClassifyContentType(ct) == modkit.ContentClassHTML {
+			resp.Close()
+			continue
+		}
+
 		// Skip if body hash matches 404
 		if notFoundHash != "" && utils.Sha1(body) == notFoundHash {
 			resp.Close()

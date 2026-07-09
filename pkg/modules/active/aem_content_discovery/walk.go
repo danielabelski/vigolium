@@ -209,8 +209,20 @@ func (m *Module) walk(ctx *httpmsg.HttpRequestResponse, httpClient *http.Request
 
 // isJCRJSON reports whether a probe response is a genuine JCR node rendering: a 200
 // with the jcr:primaryType anchor and a JSON shape.
+//
+// Content-type discipline defeats the catch-all/echo body-truncation FP: a
+// DefaultGetServlet .json rendering is application/json, never an HTML *document*.
+// A reflecting/catch-all host (a wildcard dispatcher rewrite, an SPA fallback)
+// answers arbitrary paths with a themed text/html shell, and a gzip + bogus
+// Content-Length:0 quirk can leave only a partial body tail that happens to carry
+// a "jcr:primaryType" substring and begin with "{". The body-starts-with-"{"
+// fallback below would then re-admit that HTML page, so an explicit HTML reject
+// runs first — a real JCR node simply never comes back as text/html.
 func isJCRJSON(res aem.ProbeResult) bool {
 	if !res.OK || res.Status != 200 {
+		return false
+	}
+	if modkit.ClassifyContentType(res.ContentType) == modkit.ContentClassHTML {
 		return false
 	}
 	if !strings.Contains(res.Body, "jcr:primaryType") {

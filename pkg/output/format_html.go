@@ -352,7 +352,7 @@ func logReportTrim(stats reportTrimStats) {
 	if stats.bodiesTruncated == 0 && stats.bodiesDropped == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "  Note: HTML report trimmed %d and omitted %d HTTP bodies (%s) to stay within browser limits; full bodies are in the JSONL export\n",
+	fmt.Fprintf(os.Stderr, "  Note: HTML report trimmed %d and omitted %d HTTP bodies (%s) to stay within browser limits; full raw data is available in the sqlite, jsonl, and fs export formats\n",
 		stats.bodiesTruncated, stats.bodiesDropped, humanizeReportBytes(stats.bytesOmitted))
 }
 

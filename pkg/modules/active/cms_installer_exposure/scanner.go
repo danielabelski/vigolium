@@ -286,6 +286,25 @@ func (m *Module) probeInstaller(
 		return nil
 	}
 
+	// Extension-scoped catch-all / truncated-tail echo gate. A genuine installer
+	// hit is an HTML wizard page, so content-type cannot discriminate it; instead
+	// disprove a wildcard host that answers every /<dir>/<anything>.php with the
+	// same 200 installer-shaped shell. Such a host defeats the root 404 fingerprint
+	// AND the soft-404 gate above — both key on a body hash/length that a per-path
+	// reflection (or a gzip/Content-Length:0 transport quirk leaving only a
+	// reflecting tail fragment) perturbs just enough to slip through. Re-request a
+	// guaranteed-nonexistent decoy under the SAME directory and .php extension: if
+	// it returns the same 200 status and still satisfies the CMS-anchor +
+	// installer-context marker groups, the markers are the host's catch-all, not a
+	// real installer, so drop. A real installer's decoy 404s, leaving the finding.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, 2,
+		func(decoyBody string) bool {
+			_, ok := modkit.MatchAllGroups(decoyBody, p.markers)
+			return ok
+		}) {
+		return nil
+	}
+
 	urlx, _ := ctx.URL()
 	targetURL := urlx.Scheme + "://" + urlx.Host + p.path
 

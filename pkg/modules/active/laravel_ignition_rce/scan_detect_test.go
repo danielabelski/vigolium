@@ -41,6 +41,35 @@ func TestScanPerRequest_DetectsExecuteSolution(t *testing.T) {
 	assert.Contains(t, strings.ToLower(res[0].Info.Name), "laravel ignition rce")
 }
 
+// TestScanPerRequest_TruncatedTailCatchAllNoFalsePositive reproduces the
+// universal catch-all / echo false positive: a host that returns HTTP 200 +
+// text/html for LITERALLY ANY path, serving only a truncated TAIL fragment (no
+// leading <!DOCTYPE/<html>) that reflects the request URI and carries "ignition"
+// as a CONSTANT word in the tail. The reflected-path strip cannot see a constant
+// marker, and truncation defeats every body-similarity guard, so the multi-round
+// decoy catch-all disproof (a random same-directory sibling serves the same
+// marker) must drop every candidate. The genuine Ignition hit is legitimately an
+// HTML error page, so a content-type reject would be wrong here — the decoy is
+// the guard. Without it the Ignition asset probes forge findings.
+func TestScanPerRequest_TruncatedTailCatchAllNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 200 for EVERY path (including the module's random 404 fingerprint probe
+		// and the decoy siblings). Truncated tail: reflects the path, carries the
+		// weak "ignition" marker as a constant, no <!DOCTYPE/<html>.
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`data-route="` + r.URL.Path + `"><link href="/css/ignition-theme.css">`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a truncated-tail catch-all echo host must not yield an Ignition finding")
+}
+
 // TestScanPerRequest_NoFalsePositive ensures a host that 404s every Ignition
 // probe path yields no finding.
 func TestScanPerRequest_NoFalsePositive(t *testing.T) {

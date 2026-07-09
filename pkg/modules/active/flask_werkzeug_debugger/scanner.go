@@ -149,6 +149,20 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
+	// Status discipline against the universal catch-all / echo host. A genuine
+	// Werkzeug traceback / interactive debugger page is rendered only on an error —
+	// a 404 for the random probe path or a 500 from the malformed-JSON probe — so it
+	// carries a 4xx/5xx status, NEVER a 2xx. A catch-all / echo host instead answers
+	// LITERALLY ANY path with a 200 text/html shell; when a gzip + bogus
+	// Content-Length:0 transport quirk truncates the captured body to a tail
+	// fragment, a reflected "Traceback (most recent call last)" / "Werkzeug Debugger"
+	// token can survive in the tail and forge a finding. The soft-404 body
+	// fingerprint below cannot catch a REFLECTING catch-all (distinct head per path),
+	// but the surviving HTTP status can — drop any 2xx here.
+	if status := resp.Response().StatusCode; status >= 200 && status < 300 {
+		return nil
+	}
+
 	body := resp.Body().String()
 
 	var matchedMarkers []string

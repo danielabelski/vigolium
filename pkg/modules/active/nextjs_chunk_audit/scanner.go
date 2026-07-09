@@ -197,6 +197,19 @@ func (m *Module) fetchBytes(
 		return nil, false
 	}
 
+	// Catch-all / echo-server guard: a real Next.js chunk (.js) or its source map
+	// (.map) is served as application/javascript, text/javascript, or
+	// application/json — NEVER a full HTML document. A 200 text/html body for a
+	// chunk path is the host's catch-all / SPA shell served for literally any path
+	// (or, under a gzip + bogus `Content-Length: 0` transport quirk, a truncated
+	// TAIL fragment of it), whose reflected/echoed text can forge a bogus secret or
+	// route-intel match. The Content-Type header survives that truncation, so
+	// classify it and drop an HTML document here. A missing/unknown Content-Type
+	// fails open so a real bundle served without one is still analysed.
+	if modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil, false
+	}
+
 	body := resp.Body().Bytes()
 	if int64(len(body)) > maxBytes {
 		body = body[:maxBytes]

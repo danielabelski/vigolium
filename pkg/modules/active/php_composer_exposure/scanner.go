@@ -15,6 +15,13 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory/same-extension negative-control probes
+// the catch-all disproof issues per candidate. A host that answers every
+// /<dir>/<anything>.<ext> with the same 200 body (a reflecting/echo server, a
+// SPA fallback, a blanket rewrite) trips at least one round and the candidate is
+// dropped. Two rounds tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type probe struct {
 	path string
 	name string
@@ -22,7 +29,16 @@ type probe struct {
 	// contain at least one substring from EVERY group. Composer JSON files share
 	// generic keys ("name","version") with almost any JSON payload, so each probe
 	// anchors on a Composer-specific key and corroborates with a second group.
-	markers     [][]string
+	markers [][]string
+	// htmlDoc marks a probe whose GENUINE hit is legitimately an HTML document (the
+	// /vendor/ directory listing). For every other probe the target is a JSON
+	// manifest, a raw PHP source file, or a plaintext LICENSE — none of which is
+	// ever served as an HTML *document* — so a text/html response is a catch-all /
+	// echo shell and is rejected outright by content-type (see probeFile). This
+	// content-type discipline is the decisive, zero-false-negative guard against the
+	// universal-catch-all FP even when a gzip/Content-Length-0 transport quirk leaves
+	// only a truncated body tail (the Content-Type header survives truncation).
+	htmlDoc     bool
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
@@ -55,6 +71,10 @@ var probes = []probe{
 		path:    "/vendor/",
 		name:    "Vendor Directory Listing",
 		markers: [][]string{{"Index of", "Parent Directory", "autoload"}},
+		// A directory listing is genuinely an HTML document, so the content-type
+		// gate must not reject it; the catch-all disproof (a random sibling under
+		// /vendor/ that also "lists") is what protects this probe instead.
+		htmlDoc: true,
 		sev:     severity.High,
 		desc:    "Composer vendor directory listing enabled, exposing all installed packages",
 	},
@@ -280,6 +300,19 @@ func (m *Module) probeFile(
 		}
 	}
 
+	// Content-type discipline (survives body truncation — the header is intact even
+	// when a gzip/Content-Length-0 quirk leaves only a partial body tail): every
+	// probe except the /vendor/ directory listing targets a JSON manifest, a raw PHP
+	// source file, or a plaintext LICENSE, none of which is EVER served as an HTML
+	// *document*. A universal catch-all / reflecting host answers arbitrary paths
+	// with its themed text/html shell, and a weak marker (`"require"`, `<?php`,
+	// "autoload") that survives in that shell's truncated tail would otherwise forge
+	// a match. Rejecting text/html is the decisive, zero-false-negative guard for
+	// that class — a real Composer artifact simply never comes back as a document.
+	if !p.htmlDoc && modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil
+	}
+
 	body := resp.Body().String()
 
 	// Check against 404 fingerprint
@@ -314,10 +347,36 @@ func (m *Module) probeFile(
 		return nil
 	}
 
+	// Strip the reflected request from the body before marker matching: a host that
+	// echoes the requested path or the request body back into its response would
+	// otherwise let an echoed value satisfy a marker (the path /vendor/autoload.php
+	// echoing "autoload", or a request body carrying `"require"`). The original body
+	// is kept for anti-markers and stored evidence.
+	matchBody := modkit.StripReflectedProbePath(body, p.path)
+	if reqBody := ctx.Request().BodyToString(); reqBody != "" {
+		matchBody = modkit.StripReflected(matchBody, reqBody)
+	}
+
 	// Require every marker group (Composer-specific anchor + corroboration), so a
 	// generic JSON body sharing a key like "name"/"version" cannot match.
-	matchedMarkers, ok := modkit.MatchAllGroups(body, p.markers)
+	matchedMarkers, ok := modkit.MatchAllGroups(matchBody, p.markers)
 	if !ok {
+		return nil
+	}
+
+	// Multi-round catch-all disproof: probe several guaranteed-nonexistent siblings
+	// sharing this probe's directory AND extension (e.g. /vigolium-decoy-*.json for
+	// /composer.json, /vendor/vigolium-decoy-* for /vendor/). If a random same-shape
+	// path returns the same status and also satisfies the marker groups, the host
+	// serves this content for any path (a reflecting/echo server, a SPA fallback, an
+	// extension-scoped catch-all) and the match proves nothing. A genuinely exposed
+	// artifact has no such sibling (the decoy 404s), so this costs no true positives,
+	// and it is robust to the body-truncation quirk because the decoy is run through
+	// the same predicate rather than a body-similarity compare.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, decoyRounds, func(b string) bool {
+		_, sibOK := modkit.MatchAllGroups(b, p.markers)
+		return sibOK
+	}) {
 		return nil
 	}
 

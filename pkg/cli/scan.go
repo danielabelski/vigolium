@@ -306,6 +306,12 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 		scanOpts.HeuristicsCheck = "none"
 	}
 
+	// A hand-picked module selection (--module-id / -m) implies a targeted,
+	// low-noise scan, so auto-skip the broad known-issue-scan pass before phase
+	// selection resolves it. Must run after the strategy sets KnownIssueScanEnabled
+	// and before ApplyNativePhaseSelection consumes SkipPhases.
+	autoSkipKnownIssueScanForModuleSelection(scanOpts)
+
 	if err := runner.ApplyNativePhaseSelection(scanOpts, func() {
 		settings.DynamicAssessment.Extensions.Enabled = true
 	}); err != nil {

@@ -185,6 +185,24 @@ func (m *Module) probeFile(
 		return nil
 	}
 
+	// Content-type discipline (the decisive, zero-false-negative, truncation-proof
+	// guard for this module): every file probed here is a Rails config / source /
+	// log / data artifact — YAML (database.yml, secrets.yml), Ruby source
+	// (puma.rb, schema.rb, seeds.rb), a plaintext log, an encrypted-credentials
+	// blob, a hex key, or a SQLite binary — and NONE of them is ever served as an
+	// HTML *document*. A universal catch-all / echo host that answers arbitrary
+	// paths with its themed text/html shell would otherwise forge a match on a
+	// weak reflected marker ("source"/"gem " for the Gemfile, "port"/"workers"
+	// for puma.rb, "create"/"User" for seeds.rb) that survives in the response.
+	// This class defeats the <html>/<!DOCTYPE> anti-markers and the 404
+	// fingerprint under the gzip + bogus Content-Length:0 transport quirk, which
+	// captures only a truncated TAIL fragment (no leading <!DOCTYPE); the
+	// Content-Type header survives that truncation intact. A genuine Rails config
+	// file never comes back as text/html, so this costs no true positives.
+	if modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil
+	}
+
 	for _, anti := range sf.antiMarkers {
 		if strings.Contains(body, anti) {
 			return nil

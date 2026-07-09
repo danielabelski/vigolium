@@ -256,6 +256,21 @@ func (m *Module) confirmHit(
 	if pr == nil {
 		return "", false
 	}
+	// Content-type discipline for unauth data-leak confirmers: a version / config /
+	// health / data endpoint (/api/server/version, /api/health, /_cluster/health,
+	// ...) returns JSON, plain text, or XML — never a themed HTML *document*. A
+	// reflecting or catch-all host that answers arbitrary paths with its text/html
+	// shell (the roche trace.rawaf-test echo server) would otherwise let a
+	// version-shaped substring in that shell satisfy a version regex — e.g. a
+	// reflected client IP "220.245.126.98" left as "0.245.126.98" by a
+	// gzip/Content-Length:0 body-truncation quirk matching SonarQube's
+	// ^\s*\d+\.\d+ BodyRe. The content-type header survives truncation, so this is
+	// the decisive, false-negative-free guard: a genuine leak endpoint is never
+	// served as an HTML document. (Presence-only confirmers, which may match a
+	// product's HTML UI, are intentionally not gated.)
+	if c.UnauthLeak && modkit.ClassifyContentType(pr.get("content-type")) == modkit.ContentClassHTML {
+		return "", false
+	}
 	version, signals, ok := c.Confirm(pr.status, pr.get, pr.body, pr.bodyLower)
 	if !ok || baselineLikeResponse(baseline, pr) {
 		return "", false

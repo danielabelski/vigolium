@@ -190,6 +190,15 @@ type Engine struct {
 	observedJSDirsMu       sync.Mutex
 	observedJSDirsConsumed atomic.Bool // set once the start-of-scan sweep has read observedJSDirs
 
+	// hashedAssetDirs records directories observed to hold content-hash
+	// fingerprinted asset bundles (e.g. main-5cf96b0d57f7f579.js). Recursion into
+	// such a build-output directory is skipped — brute-forcing there only replays
+	// harvested chunk names back at the server. Keyed by
+	// dedup.NormalizeURL(cleanedDirURL) so lookups match testedDirectories' keys.
+	// See looksLikeHashedAsset / recordHashedAssetParent / OnDirectoryDiscovered.
+	hashedAssetDirs   map[string]struct{}
+	hashedAssetDirsMu sync.Mutex
+
 	// Module system
 	moduleRegistry *module.Registry
 	moduleExecutor *module.Executor

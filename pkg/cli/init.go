@@ -328,7 +328,7 @@ func ensureCoreDeps() error {
 	fmt.Fprintf(os.Stderr, "%s %s\n",
 		terminal.InfoSymbol(),
 		"First-time scan detected — checking mandatory dependencies first...")
-	report := diagnostics.Run(diagnostics.Deps{Settings: settings})
+	report := diagnostics.Run(diagnostics.Deps{Settings: settings, ProbeBrowserLaunch: true})
 
 	chromiumMissing := report.Tools["chromium"] == nil || report.Tools["chromium"].Status != diagnostics.StatusOK
 	nucleiMissing := report.NucleiTemplates == nil || report.NucleiTemplates.Status != diagnostics.StatusOK

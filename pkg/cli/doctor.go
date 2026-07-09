@@ -56,7 +56,7 @@ func runDoctorCmd(cmd *cobra.Command, args []string) error {
 		settings = config.DefaultSettings()
 	}
 
-	deps := diagnostics.Deps{Settings: settings}
+	deps := diagnostics.Deps{Settings: settings, ProbeBrowserLaunch: true}
 
 	// Try to open DB (optional — report error if it fails). The error is
 	// passed through to diagnostics so a postgres connect failure surfaces as

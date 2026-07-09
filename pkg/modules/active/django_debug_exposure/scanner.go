@@ -159,6 +159,20 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
+	// Status discipline against the universal catch-all / echo host. A genuine
+	// Django technical debug page is rendered only on an error — a 404 URL-resolution
+	// failure or a 500 unhandled exception — so it carries a 4xx/5xx status, NEVER a
+	// 2xx. A catch-all / echo host instead answers LITERALLY ANY path with a 200
+	// text/html shell; when a gzip + bogus Content-Length:0 transport quirk truncates
+	// the captured body to a tail fragment, the leading "404 Not Found" anti-marker is
+	// lost while a reflected "Request Method:" / "Django Version:" token survives in
+	// the tail and would forge a finding. The surviving HTTP status still
+	// discriminates — the soft-404 body fingerprint below cannot, because a REFLECTING
+	// catch-all serves a distinct head per path — so drop any 2xx here.
+	if status := resp.Response().StatusCode; status >= 200 && status < 300 {
+		return nil
+	}
+
 	body := resp.Body().String()
 
 	for _, anti := range debugAntiMarkers {

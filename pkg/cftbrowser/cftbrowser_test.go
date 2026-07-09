@@ -23,6 +23,43 @@ func TestPlatformKeyConsistency(t *testing.T) {
 	}
 }
 
+// TestPlatformSupportMatrix pins which OS/arch combinations Chrome for Testing
+// publishes a build for. This is the fallback that recovers a host whose system
+// browser is broken, so the matrix is load-bearing: notably there is NO
+// linux/arm64 build (arm64 Docker, Raspberry Pi, AWS Graviton), so those hosts
+// must rely on a working system Chromium — the browser launch ladder skips rod's
+// own (also-broken) arm64 auto-download and surfaces an install hint instead.
+func TestPlatformSupportMatrix(t *testing.T) {
+	supported := map[string]string{
+		"linux_amd64":   "chrome-linux64/chrome",
+		"darwin_arm64":  "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+		"darwin_amd64":  "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+		"windows_amd64": "chrome-win64/chrome.exe",
+		"windows_386":   "chrome-win32/chrome.exe",
+	}
+	for key, wantBin := range supported {
+		p, ok := platforms[key]
+		if !ok {
+			t.Errorf("expected CfT support for %s", key)
+			continue
+		}
+		if p.BinPath != wantBin {
+			t.Errorf("%s BinPath = %q, want %q", key, p.BinPath, wantBin)
+		}
+	}
+
+	// Explicitly unsupported — no CfT build exists for these.
+	for _, key := range []string{"linux_arm64", "linux_386", "windows_arm64", "openbsd_amd64"} {
+		if _, ok := platforms[key]; ok {
+			t.Errorf("%s should NOT be a supported CfT platform (no upstream build)", key)
+		}
+	}
+
+	if len(platforms) != len(supported) {
+		t.Errorf("platforms map has %d entries, expected exactly %d (matrix drifted)", len(platforms), len(supported))
+	}
+}
+
 func TestParseMissingLib(t *testing.T) {
 	tests := []struct {
 		name   string

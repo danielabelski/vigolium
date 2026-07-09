@@ -150,6 +150,64 @@ func TestScanPerRequest_FlakySinglePatternDropped(t *testing.T) {
 	}
 }
 
+// TestScanPerRequest_NoFP_HTMLReflectedVersion reproduces the roche
+// trace.rawaf-test SonarQube false positive: an echo/catch-all host answers every
+// path with 200 text/html, and the /api/server/version fragment happens to start
+// with a version-shaped string (a reflected client IP left as "0.245.126.98" by a
+// body-truncation quirk) that satisfies SonarQube's ^\s*\d+\.\d+ BodyRe. The
+// content-type discipline for UnauthLeak confirmers must suppress it — a real
+// version endpoint is never served as an HTML document.
+func TestScanPerRequest_NoFP_HTMLReflectedVersion(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		if strings.Contains(r.URL.Path, "version") {
+			// Truncated tail that begins with a reflected-IP-shaped version.
+			_, _ = w.Write([]byte("0.245.126.98\n<div>echo of " + r.URL.Path + "</div>"))
+			return
+		}
+		_, _ = w.Write([]byte("<div>echo of " + r.URL.Path + "</div>"))
+	}))
+	defer srv.Close()
+
+	res, err := New().ScanPerRequest(modtest.Request(t, srv.URL+"/"), modtest.Requester(t), &modkit.ScanContext{})
+	require.NoError(t, err)
+	for _, r := range res {
+		assert.NotEqual(t, "sonarqube", r.Metadata["product"],
+			"an HTML echo page must not be flagged as an unauthenticated SonarQube version leak")
+	}
+}
+
+// TestScanPerRequest_RealSonarQubeVersionStillDetected: a genuine SonarQube
+// version endpoint returns the version as text/plain (not HTML), so the
+// content-type gate lets it through and the leak is still reported.
+func TestScanPerRequest_RealSonarQubeVersionStillDetected(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/server/version" {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("10.4.1.88267"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not-here"))
+	}))
+	defer srv.Close()
+
+	res, err := New().ScanPerRequest(modtest.Request(t, srv.URL+"/"), modtest.Requester(t), &modkit.ScanContext{})
+	require.NoError(t, err)
+	found := false
+	for _, r := range res {
+		if r.Metadata["product"] == "sonarqube" {
+			found = true
+			assert.Equal(t, severity.High, r.Info.Severity)
+		}
+	}
+	assert.True(t, found, "a real text/plain SonarQube version leak must still be detected")
+}
+
 func TestNew(t *testing.T) {
 	t.Parallel()
 	m := New()

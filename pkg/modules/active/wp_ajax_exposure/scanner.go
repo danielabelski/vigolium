@@ -291,11 +291,25 @@ func (m *Module) probeAction(
 
 	lowerBody := strings.ToLower(respBody)
 
+	// Reflected-request strip. A universal catch-all / echo host answers every
+	// admin-ajax POST by mirroring the request back — and the POST body is
+	// "action=<name>", so the action name (and any marker that is a substring of
+	// it, e.g. "revslider" and "show_image" inside "revslider_show_image") appears
+	// in the response even though no plugin handler ran. Under the gzip/
+	// Content-Length:0 transport quirk only a reflecting tail fragment is captured,
+	// so the control-probe and wildcard-shell guards above — which key on the body
+	// head/length — miss it, and the reflected action name forges a plugin token.
+	// Strip the echoed action name before marker matching so a bare reflection can
+	// no longer satisfy a marker; a genuine nopriv handler emits its OWN plugin/
+	// error tokens (plugin name, error code), which are not part of the action name
+	// and survive the strip.
+	markerBody := modkit.StripReflected(lowerBody, strings.ToLower(action.name))
+
 	// Positive confirmation: the response must contain a substring that ties it
 	// to THIS plugin/action. This is the core gate against false positives — a
 	// generic error page contains none of these, while a genuinely exposed
 	// nopriv handler echoes them even in its error/permission responses.
-	matched, ok := modkit.MatchAllGroups(lowerBody, action.markers)
+	matched, ok := modkit.MatchAllGroups(markerBody, action.markers)
 	if !ok {
 		return nil
 	}

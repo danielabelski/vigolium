@@ -110,6 +110,48 @@ if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(baseVersion
 }
 const platformVersion = (tag) => `${baseVersion}-${tag}`;
 
+// --- built-version verification -------------------------------------------
+
+// goreleaser names each archive `vigolium_<version>_<os>_<arch>.tar.gz` from the
+// version it actually built (archives.name_template in .goreleaser.yaml), and
+// `--clean` wipes build/dist at the start of every run — so the archive version
+// is an authoritative, embed-string-proof record of what the binaries in
+// build/dist really are. This is the backstop for the v0.2.3 mis-publish: stale
+// v0.2.2 binaries were repackaged under the 0.2.3 npm version because the only
+// guard (a Makefile substring grep) false-matched a "v0.2.3" string the v0.2.2
+// binary carried in embedded content. Reading the version from the binary is
+// unreliable for the same reason, and executing it triggers first-run init, so
+// verify against the archive name instead. Refuse to pack when build/dist holds
+// binaries built for a different version than the one being published — this runs
+// no matter how build.mjs is invoked (make target or direct `node`).
+function verifyReleaseVersion(expected) {
+  if (!existsSync(DIST_DIR)) return; // findSourceBinary fails later with a clearer message
+  const archiveRe =
+    /^vigolium_(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)_(?:linux|darwin|windows)_(?:amd64|arm64)\.tar\.gz$/;
+  const built = new Set();
+  for (const f of readdirSync(DIST_DIR)) {
+    const m = f.match(archiveRe);
+    if (m) built.add(m[1]);
+  }
+  if (built.size === 0) {
+    console.warn(
+      `\x1b[33m[warn] no goreleaser archives in ${DIST_DIR} — cannot verify the ` +
+        `built version against ${expected}; ensure \`make snapshot\` produced this dist.\x1b[0m`,
+    );
+    return;
+  }
+  if (built.size !== 1 || !built.has(expected)) {
+    fail(
+      `built-version mismatch: build/dist/ was built for [${[...built].sort().join(", ")}] ` +
+        `but this npm publish is version ${expected}. The binaries in build/dist/ are STALE — ` +
+        `packaging them would ship a binary whose \`vigolium version\` reports the wrong number ` +
+        `(the v0.2.3 mis-publish, where v0.2.2 binaries went out as 0.2.3). ` +
+        `Run \`make snapshot\` to rebuild for ${expected} before packing.`,
+    );
+  }
+  info(`verified build/dist/ binaries were built for ${expected}`);
+}
+
 // --- locate goreleaser binaries -------------------------------------------
 
 function findSourceBinary(goos, goarch) {
@@ -296,6 +338,7 @@ function npmPack(pkgDir) {
 // --- main -----------------------------------------------------------------
 
 info(`vigolium npm build — version ${baseVersion}`);
+verifyReleaseVersion(baseVersion);
 if (existsSync(OUT_DIR)) rmSync(OUT_DIR, { recursive: true, force: true });
 mkdirSync(OUT_DIR, { recursive: true });
 

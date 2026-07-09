@@ -16,13 +16,45 @@ import (
 )
 
 type probe struct {
-	path        string
-	name        string
-	markers     []string
+	path    string
+	name    string
+	markers []string
+	// htmlDoc marks a probe whose GENUINE hit is a rendered HTML document (a
+	// storage directory listing). Those cannot use the content-type=HTML rejection
+	// (their real content IS text/html), so they lean on the decoy/status catch-all
+	// confirmation instead. When false (the default) the probe targets a structured
+	// resource — an XML/JSON config, a SQLite binary, raw PHP source — that is never
+	// served as an HTML *document*, so the truncation-proof content-type gate applies.
+	htmlDoc     bool
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
 	refs        []string
+}
+
+// decoyRounds is how many same-directory/same-extension negative-control probes
+// the catch-all disproof issues per candidate. A host that answers every sibling
+// path with the same 200 body (a reflecting/echo server, an SPA fallback, a
+// blanket rewrite) trips at least one round and the candidate is dropped. Two
+// rounds tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
+// accepts reports whether body carries at least one of this probe's markers.
+// Centralized so the primary match and the catch-all decoy disproof run the exact
+// same predicate against the candidate and a decoy sibling.
+func (p probe) accepts(body string) (matched []string, ok bool) {
+	for _, marker := range p.markers {
+		if strings.Contains(body, marker) {
+			matched = append(matched, marker)
+		}
+	}
+	return matched, len(matched) > 0
+}
+
+// markerMatch is the flat-body predicate handed to MultiRoundExtDecoyCatchAll.
+func (p probe) markerMatch(body string) bool {
+	_, ok := p.accepts(body)
+	return ok
 }
 
 var probes = []probe{
@@ -67,6 +99,7 @@ var probes = []probe{
 		path:    "/storage/framework/sessions/",
 		name:    "Storage Sessions Directory",
 		markers: []string{"Index of", "Parent Directory"},
+		htmlDoc: true, // a directory listing is a genuine HTML document
 		sev:     severity.Critical,
 		desc:    "Laravel session storage directory is listable, enabling session hijacking via file download",
 	},
@@ -74,6 +107,7 @@ var probes = []probe{
 		path:    "/storage/framework/views/",
 		name:    "Storage Views Directory",
 		markers: []string{"Index of", "Parent Directory"},
+		htmlDoc: true, // a directory listing is a genuine HTML document
 		sev:     severity.High,
 		desc:    "Laravel compiled views directory is listable, potentially exposing application source and template logic",
 	},
@@ -81,6 +115,7 @@ var probes = []probe{
 		path:    "/storage/framework/cache/",
 		name:    "Storage Cache Directory",
 		markers: []string{"Index of", "Parent Directory"},
+		htmlDoc: true, // a directory listing is a genuine HTML document
 		sev:     severity.High,
 		desc:    "Laravel cache directory is listable, potentially exposing cached data and application state",
 	},
@@ -328,15 +363,36 @@ func (m *Module) probeFile(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	// Content-type discipline for a structured (non-document) probe. An XML/JSON
+	// config, a SQLite binary, or raw PHP source is never served as an HTML
+	// *document*, so a text/html response for it is a catch-all / echo shell —
+	// reject it. Truncation-proof: the Content-Type header survives the gzip +
+	// bogus Content-Length:0 quirk that captures only a partial body, so this holds
+	// even when a weak marker ("name", "version", "bootstrap", an echoed path
+	// segment) survives in the truncated tail after the <html>/<!DOCTYPE anti-marker
+	// in the head is lost. A directory-listing probe (htmlDoc) serves a genuine HTML
+	// document, so it skips this and relies on the decoy catch-all confirmation below.
+	if !p.htmlDoc && modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil
 	}
+
+	// Strip the reflected request path before marker matching so a marker that is
+	// merely a segment of the probe path echoed back cannot self-match our OWN
+	// request. The original body is retained for anti-markers and stored evidence.
+	matchedMarkers, matched := p.accepts(modkit.StripReflectedProbePath(body, p.path))
 	if !matched {
+		return nil
+	}
+
+	// Multi-round catch-all disproof: probe several guaranteed-nonexistent siblings
+	// sharing this probe's directory AND extension. If a random same-shape path
+	// returns the same status and also satisfies the marker predicate, the host
+	// serves this content for ANY path (a reflecting/echo server, an SPA fallback,
+	// an extension-scoped catch-all) and the match proves nothing. A genuinely
+	// exposed file has no such sibling (the decoy 404s), so this costs no true
+	// positives, and it is robust to the body-truncation quirk because the decoy is
+	// run through the same predicate rather than a body-similarity compare.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, decoyRounds, p.markerMatch) {
 		return nil
 	}
 

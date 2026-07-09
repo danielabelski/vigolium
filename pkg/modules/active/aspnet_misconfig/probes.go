@@ -1,6 +1,10 @@
 package aspnet_misconfig
 
-import "github.com/vigolium/vigolium/pkg/types/severity"
+import (
+	"strings"
+
+	"github.com/vigolium/vigolium/pkg/types/severity"
+)
 
 type probe struct {
 	path        string
@@ -9,6 +13,31 @@ type probe struct {
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
+	// jsonBody marks a probe whose genuine hit is a structured JSON/JS document (the
+	// SignalR negotiate JSON, the SignalR hubs script) — never an HTML *document*.
+	// It enables content-type discipline that survives the catch-all/echo body-
+	// truncation FP: a gzip + bogus Content-Length:0 quirk can leave only a partial
+	// body tail (no <!DOCTYPE/<html>), defeating body anti-markers and shell-
+	// similarity guards, but the Content-Type header is intact. A reflecting/catch-
+	// all host that answers ANY path with its themed text/html shell would forge a
+	// match on a weak marker ("connectionId") in that tail; rejecting an HTML
+	// document for a JSON/JS probe is decisive and costs no true positives. The
+	// diagnostic dashboards (trace/elmah/glimpse/hangfire/miniprofiler) genuinely
+	// render HTML, so they leave this false and rely on the decoy catch-all disproof.
+	jsonBody bool
+}
+
+// accepts reports whether body satisfies this probe's marker requirement (any
+// single marker present). Centralized so the primary match and the multi-round
+// catch-all decoy disproof apply the exact same predicate to the candidate and to
+// the negative-control siblings.
+func (p probe) accepts(body string) (matched []string, ok bool) {
+	for _, marker := range p.markers {
+		if strings.Contains(body, marker) {
+			matched = append(matched, marker)
+		}
+	}
+	return matched, len(matched) > 0
 }
 
 var probes = []probe{
@@ -67,6 +96,7 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Low,
 		desc:        "SignalR negotiate endpoint is exposed, revealing real-time communication infrastructure",
+		jsonBody:    true, // negotiate returns a JSON handshake, never an HTML document
 	},
 	{
 		path:        "/signalr/hubs",
@@ -75,5 +105,6 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Low,
 		desc:        "SignalR hubs endpoint is exposed, revealing available real-time communication hubs",
+		jsonBody:    true, // hubs is a generated JavaScript proxy, never an HTML document
 	},
 }

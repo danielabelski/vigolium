@@ -74,3 +74,30 @@ func TestScanPerRequest_NoFalsePositive_SPAShell(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, res, "a 200 catch-all shell echoing Django strings must not be reported")
 }
+
+// TestScanPerRequest_NoFalsePositive_TruncatedTailReflectingCatchAll reproduces the
+// harder variant: a universal catch-all / echo host that returns 200 text/html for
+// LITERALLY ANY path but REFLECTS the request path, so every response has a distinct
+// head — defeating the soft-404 body fingerprint (which compares head bytes) — and
+// the captured body is only a truncated tail fragment: no leading <!DOCTYPE/<html>,
+// so the "404 Not Found" anti-marker is gone while a "Request Method:" /
+// "Django Version:" token survives in the tail. A genuine Django technical debug
+// page is a 4xx/5xx error surface, so the surviving 200 status must reject this.
+func TestScanPerRequest_NoFalsePositive_TruncatedTailReflectingCatchAll(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.WriteHeader(http.StatusOK) // universal 200 for EVERY path & method
+		// Reflected path first (distinct head per path), debug-shaped tokens in the tail.
+		_, _ = w.Write([]byte(r.URL.Path + " <p>Request Method: " + r.Method +
+			"</p><p>Request URL: " + r.URL.Path + "</p><p>Django Version: 4.2.1</p>"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a reflecting 200 catch-all echoing Django debug tokens must not be reported")
+}

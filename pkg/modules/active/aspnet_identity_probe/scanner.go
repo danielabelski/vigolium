@@ -16,6 +16,13 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory negative-control probes the catch-all
+// disproof issues per candidate. A host that answers every /<dir>/<anything> with
+// the same 200 page (a reflecting/echo server, an SPA fallback, a blanket rewrite)
+// trips at least one round and the candidate is dropped. Two rounds tolerate a
+// single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type notFoundFingerprint struct {
 	bodyHash string
 	bodyLen  int
@@ -164,6 +171,17 @@ func (m *Module) probeEndpoint(
 		}
 	}
 
+	// Content-type discipline (survives the body-truncation FP — the header stays
+	// intact when a gzip/Content-Length:0 quirk leaves only a partial body tail):
+	// the token / JWKS / Identity-API probes target JSON documents that are never
+	// served as an HTML *document*. A reflecting or catch-all host that answers an
+	// arbitrary path with its themed text/html shell would otherwise forge a match
+	// on a weak marker ("email", `"errors":{`) surviving in that tail. Rejecting an
+	// HTML document for a JSON probe is decisive and costs no true positives.
+	if p.jsonBody && modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil
+	}
+
 	body := resp.Body().String()
 
 	if fp != nil {
@@ -195,15 +213,34 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	// Strip the reflected request from the body before marker matching: a host that
+	// echoes the requested path back into its response (the catch-all/echo server)
+	// would otherwise let a marker that is itself a path segment satisfy the check
+	// ("ForgotPassword" from /Identity/Account/ForgotPassword). The original body is
+	// kept for anti-markers and the stored evidence.
+	matchBody := modkit.StripReflectedProbePath(body, p.path)
+	if reqBody := ctx.Request().BodyToString(); reqBody != "" {
+		matchBody = modkit.StripReflected(matchBody, reqBody)
 	}
-	if !matched {
+
+	matchedMarkers, ok := p.accepts(matchBody)
+	if !ok {
+		return nil
+	}
+
+	// Multi-round catch-all disproof: probe several guaranteed-nonexistent siblings
+	// under this probe's parent directory. If a random sibling returns the same
+	// status and also satisfies the marker predicate, the host serves this content
+	// for any path — a reflecting/echo server or a wildcard rewrite — so the match
+	// proves nothing (a scaffolded ASP.NET shell carries "__RequestVerificationToken"
+	// on every page). A genuinely exposed endpoint has no such sibling (the decoy
+	// 404s), so this costs no true positives, and it is robust to the body-truncation
+	// quirk because the decoy is run through the same predicate rather than a body-
+	// similarity compare.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, decoyRounds, func(b string) bool {
+		_, sibOK := p.accepts(b)
+		return sibOK
+	}) {
 		return nil
 	}
 

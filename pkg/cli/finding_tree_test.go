@@ -57,12 +57,17 @@ func TestColorSeverityTag(t *testing.T) {
 }
 
 func TestFormatFindingGroupLeaf(t *testing.T) {
-	g := &findingPathGroup{rep: &database.Finding{Severity: "high", ModuleName: "sql-injection-error", ModuleShort: "Error-based SQLi in id param", Confidence: "firm"}}
-	assert.Equal(t, "[HIGH] sql-injection-error — Error-based SQLi in id param (firm)", terminal.StripANSI(formatFindingGroupLeaf(g)))
+	g := &findingPathGroup{rep: &database.Finding{Severity: "high", ModuleName: "sql-injection-error", ModuleShort: "Error-based SQLi in id param", Confidence: "firm", ModuleType: database.ModuleTypeActive}}
+	assert.Equal(t, "[HIGH] sql-injection-error — Error-based SQLi in id param (firm, active)", terminal.StripANSI(formatFindingGroupLeaf(g)))
 
-	// Falls back to the representative finding's description when no short desc.
-	g2 := &findingPathGroup{rep: &database.Finding{Severity: "low", ModuleName: "m", Confidence: "tentative", Description: "desc here"}}
-	assert.Equal(t, "[LOW] m — desc here (tentative)", terminal.StripANSI(formatFindingGroupLeaf(g2)))
+	// Falls back to the representative finding's description when no short desc,
+	// and shows the passive module type beside the confidence.
+	g2 := &findingPathGroup{rep: &database.Finding{Severity: "low", ModuleName: "m", Confidence: "tentative", Description: "desc here", ModuleType: database.ModuleTypePassive}}
+	assert.Equal(t, "[LOW] m — desc here (tentative, passive)", terminal.StripANSI(formatFindingGroupLeaf(g2)))
+
+	// No module type recorded → just the confidence, unchanged.
+	g3 := &findingPathGroup{rep: &database.Finding{Severity: "low", ModuleName: "m", Confidence: "firm", Description: "d"}}
+	assert.Equal(t, "[LOW] m — d (firm)", terminal.StripANSI(formatFindingGroupLeaf(g3)))
 }
 
 func TestGroupPathFindings_CollapsesTitleAndDedupsURLs(t *testing.T) {

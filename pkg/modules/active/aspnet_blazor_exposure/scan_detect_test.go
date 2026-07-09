@@ -58,6 +58,32 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host with no Blazor endpoints must not yield a finding")
 }
 
+// TestScanPerRequest_NoFP_TruncatedHTMLReflector reproduces the roche
+// trace.rawaf-test catch-all: every path returns 200 text/html echoing the
+// request, but a gzip/Content-Length:0 quirk left only a truncated tail (no
+// leading <!DOCTYPE/<html>), so the anti-markers are gone yet weak Blazor markers
+// ("assembly", "resources", "_framework", "Blazor", "connectionId") survive. The
+// JSON/JS/WASM boot resources are never served as an HTML document, so the
+// content-type gate must suppress every finding.
+func TestScanPerRequest_NoFP_TruncatedHTMLReflector(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		// Tail fragment of a request-echo page: weak markers present, no head.
+		_, _ = w.Write([]byte(`<tr><td>path</td><td>` + r.URL.Path + `</td></tr>` +
+			`<div>assembly resources mainAssemblyName Blazor _framework connectionId negotiateVersion</div>`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<tr>echo</tr>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a truncated text/html echo page must not be flagged as an exposed Blazor resource")
+}
+
 // TestCanProcess_RequiresResponse verifies the module only runs when a baseline
 // response is attached.
 func TestCanProcess_RequiresResponse(t *testing.T) {

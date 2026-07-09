@@ -62,6 +62,34 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host with no exposed PHP debug endpoints must not yield findings")
 }
 
+// TestScanPerRequest_TruncatedCatchAllNoFinding models the universal catch-all /
+// echo server false positive: the host returns HTTP 200 + text/html for LITERALLY
+// ANY path with a body that reflects the request URI (so the 404 fingerprint and
+// modkit.ResemblesObservedPage never fire) and carries the weak debug markers in a
+// TRUNCATED TAIL (no leading <!DOCTYPE/<html>, mimicking the gzip/Content-Length-0
+// quirk that strips the head). Two guards keep this empty: the content-type gate
+// drops the plaintext-only PHP-FPM/ping probes ("pool:", "pong") since a catch-all's
+// text/html can never be a genuine FPM status page, and the multi-round decoy
+// catch-all drops the phpinfo()/phpMyAdmin probes (whose genuine hit IS HTML) because
+// a random sibling returns the same 200 + markers.
+func TestScanPerRequest_TruncatedCatchAllNoFinding(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("catch-all shell reflecting " + r.URL.Path +
+			" -- tail fragment leaking PHP Version 8.2 phpinfo() Configuration File and pool: pong here"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "distinct home page body")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a universal catch-all echo server must not forge a PHP debug finding")
+}
+
 // TestCanProcess validates the host-liveness gate: a request without a
 // response must not be processed.
 func TestCanProcess(t *testing.T) {

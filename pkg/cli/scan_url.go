@@ -462,6 +462,15 @@ func runScanWithRR(rr *httpmsg.HttpRequestResponse, target, method string) error
 	}
 	defer cleanup()
 
+	// Warn once per host when the edge WAF/CDN starts filtering scan traffic.
+	// The Runner-backed path wires this in RunNativeScan; this direct path builds
+	// its own requester, so it needs the same hook to not silently miss it.
+	if !globalSilent {
+		httpRequester.SetBlockNotifier(func(n http.BlockNotice) {
+			fmt.Fprint(os.Stderr, runner.FormatBlockNoticeLine(n))
+		})
+	}
+
 	// Get modules
 	active, passive := getFilteredModules(resolvedModules, scanURLNoPassive)
 

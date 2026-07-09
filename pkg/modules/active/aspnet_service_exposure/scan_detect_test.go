@@ -61,6 +61,61 @@ func TestScanPerRequest_DetectsASMXWSDL(t *testing.T) {
 	require.NotEmpty(t, res, "expected a WSDL disclosure finding for an .asmx endpoint serving ?WSDL")
 }
 
+// TestScanPerRequest_CatchAllEchoNoFalsePositive reproduces the universal
+// catch-all / echo-server FP: the host answers LITERALLY ANY path with 200 +
+// text/html and the SAME reflecting page whose body is only a truncated tail (no
+// <!DOCTYPE/<html> — the gzip + Content-Length:0 quirk) that happens to carry weak
+// service markers ("EntityType", "Index of", "Parent Directory", ".asmx") plus the
+// reflected request path. The 404 fingerprint cannot see it (the reflected path
+// makes every response distinct) and the observed-page guard cannot (the tail
+// differs from the home page). The content-type discipline (OData XML) and the
+// multi-round decoy catch-all (HTML directory listings) must together yield NO
+// finding.
+func TestScanPerRequest_CatchAllEchoNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(
+			`<div class="listing"><edmx:Edmx>EntityType</edmx:Edmx> Index of Parent Directory ` +
+				`Service.asmx catalog.svc</div><span>route: ` + r.URL.Path + `</span>`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html>home</html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a universal catch-all/echo host must not forge a service-exposure finding")
+}
+
+// TestScanPerRequest_DetectsServicesListing confirms a REAL IIS/SharePoint
+// directory listing at its own path (all other paths, including decoy siblings,
+// 404) still fires — the decoy catch-all disproof must not over-suppress a genuine
+// listing.
+func TestScanPerRequest_DetectsServicesListing(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/Services/" {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html><body><h1>Index of /Services/</h1><a href="../">Parent Directory</a><a>Catalog.svc</a></body></html>`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("404 page not found - unique-baseline-marker"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html>home</html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "a genuine Services directory listing must still be reported")
+}
+
 // TestScanPerRequest_NoFalsePositive ensures a host with no exposed services
 // (all probes 404) produces no finding.
 func TestScanPerRequest_NoFalsePositive(t *testing.T) {

@@ -71,6 +71,38 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host with no exposed Composer files must not yield a finding")
 }
 
+// TestScanPerRequest_TruncatedCatchAllNoFinding models the universal catch-all /
+// echo server false positive: the host returns HTTP 200 + text/html for LITERALLY
+// ANY path with a body that reflects the request URI (so the 404 fingerprint and
+// modkit.ResemblesObservedPage — which key on per-path body variance — never fire)
+// and carries the weak Composer markers in a TRUNCATED TAIL (no leading
+// <!DOCTYPE/<html>, mimicking the gzip/Content-Length-0 quirk that strips the head
+// so the anti-markers cannot match). Two independent guards must keep this empty:
+// the content-type=text/html rejection drops the JSON/PHP/text probes (composer.json,
+// *.php, LICENSE), and the multi-round decoy catch-all drops the /vendor/ directory
+// listing (whose genuine hit is legitimately HTML). Without either guard a weak
+// marker surviving in the tail would forge a finding.
+func TestScanPerRequest_TruncatedCatchAllNoFinding(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// text/html for every path, no <!DOCTYPE/<html> head (truncated tail), body
+		// reflects the path (defeats fingerprint + observed-page similarity) and
+		// carries the weak markers a naive detector would fire on.
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("catch-all shell reflecting " + r.URL.Path +
+			` -- tail fragment with "require": {} and autoload_real and Index of leaking here`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "distinct home page body")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a universal catch-all echo server must not forge a Composer finding")
+}
+
 // TestCanProcess covers the custom CanProcess gate: a request needs a response.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

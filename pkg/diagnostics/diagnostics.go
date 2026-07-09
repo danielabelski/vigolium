@@ -16,6 +16,7 @@ import (
 
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/audit/bin"
+	"github.com/vigolium/vigolium/pkg/browserprobe"
 	"github.com/vigolium/vigolium/pkg/cftbrowser"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/deparos/jsscan"
@@ -23,6 +24,11 @@ import (
 	"github.com/vigolium/vigolium/pkg/piolium"
 	"github.com/vigolium/vigolium/pkg/queue"
 )
+
+// browserLaunchProbe smoke-launches a resolved browser binary to prove it can
+// actually render, not just print a version. Indirected through a var so tests
+// can stub it (a real probe spawns a headless browser). See checkChromium.
+var browserLaunchProbe = browserprobe.Launchable
 
 // validReasoningEfforts is the set of values accepted by olium's reasoning_effort knob.
 var validReasoningEfforts = map[string]struct{}{
@@ -100,6 +106,12 @@ type Deps struct {
 	DBErr    error
 	Queue    queue.Queue
 	Settings *config.Settings
+	// ProbeBrowserLaunch, when set, makes the chromium check actually launch the
+	// resolved browser headless (catching a binary that passes --version but
+	// crashes on real startup). It spawns a browser process (~1-2s), so only the
+	// one-shot CLI paths (doctor, first-run init) enable it; the server
+	// /diagnostics endpoint leaves it off to stay a cheap, poll-safe readout.
+	ProbeBrowserLaunch bool
 }
 
 // AuditPathStatus describes one of the two driver paths under "Audit mode"
@@ -172,6 +184,9 @@ func Run(deps Deps) *Report {
 		)
 	}
 	r.Tools["chromium"] = checkTool("chromium", chromiumFallbacks)
+	if deps.ProbeBrowserLaunch {
+		r.Tools["chromium"] = probeChromium(r.Tools["chromium"])
+	}
 	r.Tools["bun"] = checkTool("bun", []string{config.ExpandPath("~/.bun/bin/bun")})
 	r.Tools["npm"] = checkTool("npm", nil)
 	r.Tools["agent-browser"] = checkTool("agent-browser", nil)
@@ -212,8 +227,9 @@ func Run(deps Deps) *Report {
 	}
 	// Still nothing? Attach a package-manager-specific install hint so the
 	// user can either grab a system chromium or fall back to the bundled
-	// Chrome for Testing download.
-	if t := r.Tools["chromium"]; t != nil && t.Status != StatusOK {
+	// Chrome for Testing download. A launch-failure downgrade already carries a
+	// more specific tip (see probeChromium), so don't clobber it.
+	if t := r.Tools["chromium"]; t != nil && t.Status != StatusOK && t.Tip == "" {
 		t.Tip = chromiumInstallHint()
 	}
 
@@ -907,6 +923,38 @@ func chromiumInstallHint() string {
 	default:
 		return "run `vigolium doctor --fix --only chrome` to download Chrome for Testing"
 	}
+}
+
+// probeChromium hardens a resolved chromium ToolCheck by actually launching the
+// binary headless. A binary on PATH that prints a version is NOT proof it runs:
+// some distro Chromium builds crash on real headless startup (e.g. SIGTRAP on a
+// KVM guest) and a downloaded Chrome can miss a shared library — both pass a
+// `--version` check yet fail every spider. When the launch probe fails, the row
+// is downgraded to a warning so the Chrome-for-Testing fallback (and the
+// `--fix --only chrome` install) takes over instead of the doctor reporting a
+// browser that will fail at scan time. A row that wasn't resolved, or has no
+// path, is returned unchanged.
+func probeChromium(t *ToolCheck) *ToolCheck {
+	if t == nil || t.Status != StatusOK || t.Path == "" {
+		return t
+	}
+	if err := browserLaunchProbe(t.Path); err != nil {
+		return &ToolCheck{
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("%s found but failed to launch headless", t.Path),
+			Details: append(append([]string{}, t.Details...),
+				fmt.Sprintf("launch probe failed: %v", err),
+				"a --version check passes but the browser crashes on real startup"),
+			// A launch-failure needs a different remedy than "not found": the
+			// system browser is present but broken, so installing more of the
+			// same won't help — download a known-good Chrome for Testing (or
+			// point spidering.browser_path at a working browser). Set here so
+			// the generic install hint below doesn't override it.
+			Tip: "system browser crashes on launch — run `vigolium doctor --fix --only chrome` to download a working Chrome for Testing, or set `spidering.browser_path` to a working browser",
+		}
+	}
+	t.Details = append(t.Details, "launch probe: ok")
+	return t
 }
 
 func checkTool(name string, fallbacks []string) *ToolCheck {

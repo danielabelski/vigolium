@@ -17,7 +17,15 @@ import (
 // text/html, exposing the interactive API explorer.
 func TestScanPerRequest_DetectsBrowsableAPI(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A real DRF browsable API renders only at its own registered routes; an
+		// unknown sibling 404s. Serve the explorer HTML at the two probed endpoints
+		// and 404 the guaranteed-nonexistent decoy siblings so the catch-all guard
+		// does not (correctly) suppress this genuine finding.
+		if r.URL.Path != "/api/users/" && r.URL.Path != "/api/" {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte("<html><head><link href=\"/static/rest_framework/css/bootstrap.css\">" +
 			"</head><body class=\"django-rest-framework\"><div id=\"content-main\">" +
@@ -54,6 +62,33 @@ func TestScanPerRequest_GenericLayoutTokenNoFinding(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "generic layout tokens without a DRF anchor must not yield a finding")
+}
+
+// TestScanPerRequest_NoFalsePositive_TruncatedTailCatchAll pins the universal
+// catch-all / echo false positive. The host answers LITERALLY ANY path (including
+// the guaranteed-nonexistent decoy siblings) with the SAME 200 text/html shell,
+// and the captured body is only a truncated tail fragment: no leading
+// <!DOCTYPE/<html> head (so the "404 Not Found" anti-marker is gone) with the
+// request path reflected up front and a "django-rest-framework" token surviving in
+// the tail. Since the genuine browsable API is itself HTML, content-type cannot
+// discriminate — only the decoy catch-all guard can (a real browsable API serves
+// the DRF anchor solely at its own route, whereas this host serves it everywhere).
+func TestScanPerRequest_NoFalsePositive_TruncatedTailCatchAll(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.WriteHeader(http.StatusOK) // same 200 shell for EVERY path & method
+		_, _ = w.Write([]byte(r.URL.Path + `"><div class="django-rest-framework">` +
+			`<ul class="breadcrumb api-breadcrumb"><li>browsable-api</li></ul></div>`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/api/users/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a universal 200 catch-all echoing DRF markers must not be reported")
 }
 
 // TestScanPerRequest_NoFalsePositive ensures a plain JSON API (no browsable

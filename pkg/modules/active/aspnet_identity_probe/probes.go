@@ -1,6 +1,10 @@
 package aspnet_identity_probe
 
-import "github.com/vigolium/vigolium/pkg/types/severity"
+import (
+	"strings"
+
+	"github.com/vigolium/vigolium/pkg/types/severity"
+)
 
 type probe struct {
 	path        string
@@ -9,6 +13,33 @@ type probe struct {
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
+	// jsonBody marks a probe whose genuine hit is a structured JSON document (an
+	// OAuth/OIDC token error, a JWKS key set, an ASP.NET Core Identity API reply) —
+	// never an HTML *document*. It enables the content-type discipline that survives
+	// the catch-all/echo body-truncation FP: a gzip + bogus Content-Length:0 quirk
+	// can leave the scanner with only a partial body tail (no <!DOCTYPE/<html>), so
+	// body anti-markers ("<html") and shell-similarity guards are defeated — but the
+	// Content-Type header is intact. A reflecting/catch-all host that answers ANY
+	// path with its themed text/html shell then forges a match on a weak JSON marker
+	// ("email", `"errors":{`) sitting in that tail. Rejecting an HTML document for a
+	// probe whose real reply is JSON is the decisive, zero-false-negative guard.
+	// Probes whose genuine hit legitimately IS an HTML page (a scaffolded Identity
+	// UI, the authorize error/login page) leave this false and rely on the decoy
+	// catch-all disproof instead.
+	jsonBody bool
+}
+
+// accepts reports whether body satisfies this probe's marker requirement (any
+// single marker present). Centralized so the primary match and the multi-round
+// catch-all decoy disproof apply the exact same predicate to the candidate and to
+// the negative-control siblings.
+func (p probe) accepts(body string) (matched []string, ok bool) {
+	for _, marker := range p.markers {
+		if strings.Contains(body, marker) {
+			matched = append(matched, marker)
+		}
+	}
+	return matched, len(matched) > 0
 }
 
 var probes = []probe{
@@ -26,6 +57,7 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "OAuth2/OIDC token endpoint accessible, may be susceptible to brute force or credential stuffing without rate limiting",
+		jsonBody:    true, // token endpoint errors are JSON, never an HTML document
 	},
 	{
 		path:        "/connect/authorize",
@@ -42,6 +74,7 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Low,
 		desc:        "JSON Web Key Set endpoint exposed, revealing public signing keys used for token validation",
+		jsonBody:    true, // JWKS is a JSON key set, never an HTML document
 	},
 	// Scaffolded ASP.NET Identity UI
 	{
@@ -85,6 +118,7 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "ASP.NET Core Identity API registration endpoint accessible, may allow unauthorized account creation via API",
+		jsonBody:    true, // Identity API validation errors are JSON, never an HTML document
 	},
 	{
 		path:        "/manage/info",
@@ -93,5 +127,6 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE", "401"},
 		sev:         severity.High,
 		desc:        "ASP.NET Core Identity management API accessible without proper authentication",
+		jsonBody:    true, // manage/info returns a JSON account object, never an HTML document
 	},
 }

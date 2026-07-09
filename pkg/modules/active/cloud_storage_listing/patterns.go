@@ -1,6 +1,10 @@
 package cloud_storage_listing
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/vigolium/vigolium/pkg/modules/modkit"
+)
 
 type listingProbe struct {
 	name    string
@@ -45,6 +49,15 @@ func getAzureContainerFromPath(path string) string {
 		return parts[0]
 	}
 	return ""
+}
+
+// servedAsHTMLDoc reports whether a probe response was served as an HTML
+// document. A genuine S3/Azure listing is XML; a catch-all / static-website host
+// that answers every path with an HTML shell (or only a truncated gzip tail of
+// one) is never a real listing, so an HTML content-type is disqualifying for the
+// XML-only listing probes.
+func servedAsHTMLDoc(contentType string) bool {
+	return modkit.ClassifyContentType(contentType) == modkit.ContentClassHTML
 }
 
 func bodyContainsAll(body string, markers []string) bool {

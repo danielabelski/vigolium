@@ -15,13 +15,44 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory/same-extension negative-control probes
+// the catch-all disproof issues per candidate. A host that answers every
+// /<dir>/<anything>.<ext> with the same 200 body (a reflecting/echo server, a SPA
+// fallback, a blanket rewrite) trips at least one round and the candidate is
+// dropped. Two rounds tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type probe struct {
-	path        string
-	name        string
-	markers     []string
+	path    string
+	name    string
+	markers []string
+	// htmlDoc marks a probe whose GENUINE hit is legitimately an HTML document — the
+	// .phps / .phtml source *highlighter* output, which PHP renders as HTML
+	// (<code><span style=...>). Those skip the content-type gate and rely on the
+	// catch-all decoy disproof. When false (raw PHP source served as plaintext:
+	// .php/.php5/.php7/.inc), a text/html response is NOT a genuine source leak — it
+	// is executed output or a catch-all / echo shell — so it is rejected outright by
+	// content-type. This aligns with the existing <html/<!DOCTYPE anti-markers (the
+	// module already treats an HTML response as "not a source leak") and, crucially,
+	// survives the body-truncation quirk that strips those head anti-markers, where a
+	// weak marker (<?php, $, "password") would otherwise forge a match in the tail.
+	htmlDoc     bool
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
+}
+
+// match reports whether body satisfies this probe's marker set (pure-OR: any
+// single marker hit confirms) and returns the matched substrings for evidence.
+// Centralized so the primary match and the catch-all decoy disproof apply the
+// exact same predicate.
+func (p probe) match(body string) (matched []string, ok bool) {
+	for _, marker := range p.markers {
+		if strings.Contains(body, marker) {
+			matched = append(matched, marker)
+		}
+	}
+	return matched, len(matched) > 0
 }
 
 var probes = []probe{
@@ -29,7 +60,10 @@ var probes = []probe{
 	{
 		path:        "/index.phps",
 		name:        "PHP Highlight Source (index.phps)",
-		markers:     []string{"<?php", "<code>", "<span style=", "highlight_file", "php_highlight"},
+		markers: []string{"<?php", "<code>", "<span style=", "highlight_file", "php_highlight"},
+		// The .phps highlighter renders HTML, so rely on the catch-all decoy disproof
+		// rather than a content-type gate that would reject the genuine hit.
+		htmlDoc:     true,
 		antiMarkers: []string{"404 Not Found", "Page Not Found"},
 		sev:         severity.High,
 		desc:        "PHP source highlighting handler (.phps) enabled, exposing syntax-highlighted source code",
@@ -38,6 +72,7 @@ var probes = []probe{
 		path:        "/config.phps",
 		name:        "PHP Highlight Source (config.phps)",
 		markers:     []string{"<?php", "<code>", "password", "database", "config"},
+		htmlDoc:     true,
 		antiMarkers: []string{"404 Not Found", "Page Not Found"},
 		sev:         severity.Critical,
 		desc:        "PHP source highlighting handler exposing configuration file source code",
@@ -46,6 +81,7 @@ var probes = []probe{
 		path:        "/login.phps",
 		name:        "PHP Highlight Source (login.phps)",
 		markers:     []string{"<?php", "<code>", "<span style="},
+		htmlDoc:     true,
 		antiMarkers: []string{"404 Not Found", "Page Not Found"},
 		sev:         severity.High,
 		desc:        "PHP source highlighting handler exposing login page source code",
@@ -79,7 +115,10 @@ var probes = []probe{
 	{
 		path:        "/index.phtml",
 		name:        "PHTML Extension Accessible",
-		markers:     []string{"<?php", "<?=", "<code>"},
+		markers: []string{"<?php", "<?=", "<code>"},
+		// .phtml source may be served highlighted (HTML), so skip the content-type gate
+		// and let the catch-all decoy disproof guard it.
+		htmlDoc:     true,
 		antiMarkers: []string{"404 Not Found", "Page Not Found", "<html"},
 		sev:         severity.High,
 		desc:        ".phtml extension files accessible, may expose PHP source or allow execution via upload bypass",
@@ -293,6 +332,19 @@ func (m *Module) probeFile(
 		}
 	}
 
+	// Content-type discipline for the plaintext-source probes (survives body
+	// truncation — the header is intact even when a gzip/Content-Length-0 quirk leaves
+	// only a partial body tail): raw PHP source disclosed as .php/.php5/.php7/.inc is
+	// served as text/plain (or a non-HTML PHP mime), never as an HTML *document*. A
+	// text/html response is either executed output or a universal catch-all / echo
+	// shell whose truncated tail carries a weak marker (<?php, $, "password"); reject
+	// it outright. This is the truncation-proof form of the existing <html/<!DOCTYPE
+	// anti-markers. The .phps/.phtml highlighter output IS genuine HTML (htmlDoc), so
+	// those skip this gate and rely on the catch-all decoy disproof below.
+	if !p.htmlDoc && modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil
+	}
+
 	body := resp.Body().String()
 
 	// Check against 404 fingerprint
@@ -327,15 +379,34 @@ func (m *Module) probeFile(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	// Strip the reflected request from the body before marker matching: a host that
+	// echoes the requested path or the request body would otherwise let an echoed
+	// value satisfy a marker (the path /config.php echoing "config", a request body
+	// carrying "password"/"$db"). The original body is kept for anti-markers and
+	// stored evidence.
+	matchBody := modkit.StripReflectedProbePath(body, p.path)
+	if reqBody := ctx.Request().BodyToString(); reqBody != "" {
+		matchBody = modkit.StripReflected(matchBody, reqBody)
 	}
-	if !matched {
+
+	matchedMarkers, ok := p.match(matchBody)
+	if !ok {
+		return nil
+	}
+
+	// Multi-round catch-all disproof: probe several guaranteed-nonexistent siblings
+	// sharing this file's directory AND extension. If a random same-shape path returns
+	// the same status and also satisfies the marker predicate, the host serves this
+	// content for any path (a reflecting/echo server, a SPA fallback, an
+	// extension-scoped catch-all) and the match proves nothing. A genuinely disclosed
+	// source file has no such sibling (the decoy 404s), so this costs no true
+	// positives, and it is robust to the body-truncation quirk because the decoy is run
+	// through the same predicate rather than a body-similarity compare. This is the
+	// guard for the .phps/.phtml probes that cannot use the content-type gate.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, decoyRounds, func(b string) bool {
+		_, sibOK := p.match(b)
+		return sibOK
+	}) {
 		return nil
 	}
 

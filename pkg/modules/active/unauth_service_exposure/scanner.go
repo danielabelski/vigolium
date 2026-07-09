@@ -184,19 +184,33 @@ func (m *Module) ScanPerHost(
 	for _, p := range probes {
 		for _, path := range p.paths {
 			body, header, status, ok := m.fetch(httpClient, base+path)
-			if !ok || !p.confirm(status, header, body) {
+			if !ok || !p.confirm(status, header, body) || servedAsHTML(header) {
 				continue
 			}
 			// Multi-round confirmation: a second independent request must reproduce
 			// the signature, so a one-off/proxied artifact can't create a finding.
 			body2, header2, status2, ok2 := m.fetch(httpClient, base+path)
-			if !ok2 || !p.confirm(status2, header2, body2) {
+			if !ok2 || !p.confirm(status2, header2, body2) || servedAsHTML(header2) {
 				continue
 			}
 			return []*output.ResultEvent{m.result(base, path, p, body)}, nil
 		}
 	}
 	return nil, nil
+}
+
+// servedAsHTML reports whether the response was served as an HTML document. Every
+// service this module fingerprints answers with JSON (or a service-specific
+// header/banner), never an HTML page, so an HTML content-type marks a universal
+// catch-all / echo host — including the gzip/Content-Length:0 transport quirk that
+// captures only a reflecting tail fragment in which a weak signature (notably the
+// Docker Registry probe's bare "repositories") survives and forges a finding.
+// Reject it. Fails open on a missing header (fail toward keeping the finding).
+func servedAsHTML(header func(string) string) bool {
+	if header == nil {
+		return false
+	}
+	return modkit.ClassifyContentType(header("Content-Type")) == modkit.ContentClassHTML
 }
 
 // fetch issues a GET and returns the body, a header accessor, the status, and

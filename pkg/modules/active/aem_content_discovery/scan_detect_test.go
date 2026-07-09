@@ -164,6 +164,42 @@ func TestQueryBuilderCatchAllNoWritableFinding(t *testing.T) {
 	}
 }
 
+// TestCatchAllHTMLEchoNoFinding reproduces the universal catch-all / echo-server
+// FP against a confirmed-AEM host: the login page carries the AEM markers (so
+// ConfirmAEM passes), but a wildcard dispatcher rewrite answers EVERY .json / .1.json
+// / querybuilder selector with 200 + text/html and the SAME reflecting body — a
+// JSON-looking blob that begins with "{" and carries "jcr:primaryType",
+// "success":true and "total" in a truncated tail (the gzip/Content-Length:0 quirk).
+// Without content-type discipline the body-starts-with-"{" fallback would lock a
+// bogus read primitive and forge a tree-enumeration finding; the HTML reject in
+// isJCRJSON / qbTotal must yield NO finding.
+func TestCatchAllHTMLEchoNoFinding(t *testing.T) {
+	// A single JSON-shaped shell, served as text/html for every path. It satisfies
+	// the AEM login-page confirmation marker AND every weak JCR/QueryBuilder
+	// substring, and has nested objects so the tree walk would recurse if admitted.
+	// Valid JSON (so childNames would recurse if admitted) with nested child nodes;
+	// the AEM confirmation marker lives inside a string value so the blob stays
+	// well-formed. Served as text/html for every path.
+	const shell = `{"jcr:primaryType":"nt:folder","note":"Adobe Experience Manager AEM Sign In",` +
+		`"success":true,"total":5,"hits":[{"jcr:path":"/x"}],` +
+		`"child":{"jcr:primaryType":"nt:folder"},"grand":{"jcr:primaryType":"nt:folder"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html") // wildcard rewrite: HTML for JSON selectors
+		_, _ = w.Write([]byte(shell))
+	}))
+	t.Cleanup(srv.Close)
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL)
+
+	results, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	if err != nil {
+		t.Fatalf("scan error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("a catch-all HTML echo host must yield no findings, got %+v", names(results))
+	}
+}
+
 func TestContentDiscoverySkipsNonAEM(t *testing.T) {
 	// No login page and no AEM markers → ConfirmAEM fails → no probing at all, even
 	// though a querybuilder-like body is served.

@@ -1,12 +1,15 @@
 package cloud_storage_listing
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/modtest"
 )
 
 // NEEDS-PHASE-3: ScanPerHost only probes when the target host resolves to a real
@@ -30,6 +33,46 @@ func newCloudRR(t *testing.T, host string, withResponse bool) *httpmsg.HttpReque
 		resp = httpmsg.NewHttpResponse([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
 	}
 	return httpmsg.NewHttpRequestResponse(req, resp)
+}
+
+// TestTryProbe_NoFP_HTMLCatchAll drives the probe seam directly (bypassing the
+// DNS host gate): a catch-all / echo host answers 200 with a text/html shell that
+// carries stray S3 listing markers (the gzip/Content-Length:0 truncation quirk
+// can leave such a marker-bearing tail). A genuine S3/Azure listing is an XML
+// document, so the content-type gate must reject the HTML response — the markers
+// only count when the body is not served as an HTML document.
+func TestTryProbe_NoFP_HTMLCatchAll(t *testing.T) {
+	t.Parallel()
+	const listing = `<ListBucketResult><Contents><Key>secret.txt</Key></Contents></ListBucketResult>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(listing))
+	}))
+	defer srv.Close()
+
+	rr := modtest.Request(t, srv.URL+"/")
+	res, err := New().tryProbe(rr, modtest.Requester(t), s3ListingProbes[0])
+	require.NoError(t, err)
+	assert.Nil(t, res, "an HTML response carrying stray S3 markers must not be flagged as a bucket listing")
+}
+
+// TestTryProbe_RealXMLListingDetected confirms the content-type gate does not cost
+// a true positive: a genuine application/xml S3 listing is still reported.
+func TestTryProbe_RealXMLListingDetected(t *testing.T) {
+	t.Parallel()
+	const listing = `<ListBucketResult><Contents><Key>secret.txt</Key></Contents></ListBucketResult>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(listing))
+	}))
+	defer srv.Close()
+
+	rr := modtest.Request(t, srv.URL+"/")
+	res, err := New().tryProbe(rr, modtest.Requester(t), s3ListingProbes[0])
+	require.NoError(t, err)
+	require.NotNil(t, res, "a genuine application/xml bucket listing must be detected")
 }
 
 // TestNew_Metadata verifies the module constructs with its declared identity.

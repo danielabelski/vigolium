@@ -188,7 +188,7 @@ func (s *Scanner) getBinary() (*CachedBinary, error) {
 }
 
 // executeJsscan runs the jsscan binary and parses output.
-// Uses pooled buffers for stdout/stderr to reduce GC pressure.
+// Uses a pooled buffer for stderr to reduce GC pressure.
 func (s *Scanner) executeJsscan(ctx context.Context, binaryPath, inputPath string, opts ScanOptions) (*ScanResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, MaxScanTimeout)
 	defer cancel()
@@ -200,29 +200,47 @@ func (s *Scanner) executeJsscan(ctx context.Context, binaryPath, inputPath strin
 	args = append(args, inputPath)
 	cmd := exec.CommandContext(ctx, binaryPath, args...)
 
-	stdout := s.bufPool.Get().(*bytes.Buffer)
+	// Capture stdout in a temp FILE rather than a pipe (bytes.Buffer). jsscan is a
+	// Bun/Node runtime that emits one JSONL record per line; the `code` and
+	// `beautified` records for a large bundle exceed 64KB. Node/Bun writes stdout
+	// asynchronously when it is a pipe and can exit before the tail of a large write
+	// has drained through the ~64KB kernel pipe buffer, silently truncating those
+	// records — the truncated JSON then fails to parse and the beautified document is
+	// lost. A regular file is always write-ready (synchronous, no pipe-buffer cap),
+	// so the full output survives regardless of line size.
+	outFile, err := os.CreateTemp("", "jsscan-out-*.jsonl")
+	if err != nil {
+		return nil, fmt.Errorf("create output temp file: %w", err)
+	}
+	outPath := outFile.Name()
+	defer func() {
+		_ = os.Remove(outPath)
+	}()
+
 	stderr := s.bufPool.Get().(*bytes.Buffer)
-	stdout.Reset()
 	stderr.Reset()
-	defer s.bufPool.Put(stdout)
 	defer s.bufPool.Put(stderr)
 
-	cmd.Stdout = stdout
+	cmd.Stdout = outFile
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	runErr := cmd.Run()
+	_ = outFile.Close()
 
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 
+	output, err := os.ReadFile(outPath)
 	if err != nil {
-		if stdout.Len() == 0 {
-			return nil, fmt.Errorf("%w: %w, stderr: %s", ErrScanFailed, err, stderr.String())
-		}
+		return nil, fmt.Errorf("read jsscan output: %w", err)
 	}
 
-	return parseJsscanOutput(stdout.Bytes()), nil
+	if runErr != nil && len(output) == 0 {
+		return nil, fmt.Errorf("%w: %w, stderr: %s", ErrScanFailed, runErr, stderr.String())
+	}
+
+	return parseJsscanOutput(output), nil
 }
 
 // rawRecord is used to detect the type field before full parsing.

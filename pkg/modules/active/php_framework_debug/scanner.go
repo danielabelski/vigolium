@@ -15,13 +15,41 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory/same-extension negative-control probes
+// the catch-all disproof issues per candidate. A host that answers every
+// /<dir>/<anything> with the same 200 body (a reflecting/echo server, a SPA
+// fallback, a blanket rewrite) trips at least one round and the candidate is
+// dropped. Two rounds tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type probe struct {
-	path        string
-	name        string
-	markers     []string
+	path    string
+	name    string
+	markers []string
+	// skipDecoy suppresses the catch-all decoy disproof for a probe whose GENUINE hit
+	// legitimately appears at an ARBITRARY path — the Slim debug probe deliberately
+	// requests a nonexistent path so a Slim app in debug mode renders its
+	// "Slim Application Error" page for it, which a random decoy sibling would ALSO
+	// render, making the decoy indistinguishable from a real hit (a false negative).
+	// Such probes are instead protected by their distinctive brand marker, which a
+	// generic catch-all / echo shell never carries.
+	skipDecoy   bool
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
+}
+
+// match reports whether body satisfies this probe's marker set (pure-OR: any
+// single marker hit confirms) and returns the matched substrings for evidence.
+// Centralized so the primary match and the catch-all decoy disproof apply the
+// exact same predicate.
+func (p probe) match(body string) (matched []string, ok bool) {
+	for _, marker := range p.markers {
+		if strings.Contains(body, marker) {
+			matched = append(matched, marker)
+		}
+	}
+	return matched, len(matched) > 0
 }
 
 var probes = []probe{
@@ -89,11 +117,16 @@ var probes = []probe{
 	},
 	// Slim Framework
 	{
-		path:    "/vigolium-slim-error-probe",
-		name:    "Slim Framework Debug",
-		markers: []string{"Slim Application Error", "slim/slim", "SlimException"},
-		sev:     severity.Medium,
-		desc:    "Slim framework debug mode enabled, exposing detailed error pages with stack traces",
+		path: "/vigolium-slim-error-probe",
+		name: "Slim Framework Debug",
+		// The probe deliberately hits a nonexistent path so a debug-mode Slim app
+		// renders its error page; a random decoy sibling would render it too, so the
+		// catch-all disproof is inapplicable here. The distinctive brand markers below
+		// are what a generic catch-all shell can never carry.
+		markers:   []string{"Slim Application Error", "slim/slim", "SlimException"},
+		skipDecoy: true,
+		sev:       severity.Medium,
+		desc:      "Slim framework debug mode enabled, exposing detailed error pages with stack traces",
 	},
 	// FuelPHP
 	{
@@ -313,20 +346,33 @@ func (m *Module) probeFile(
 		return nil
 	}
 
-	// Strip the reflected probe path before matching so a marker that is also the
-	// path slug ("user_guide" for /user_guide/) can't match on a reflected
-	// href/breadcrumb alone.
+	// Strip the reflected probe path (and any echoed request body) before matching so
+	// a marker that is also the path slug ("user_guide" for /user_guide/) or an echoed
+	// request value can't match on a reflected href/breadcrumb alone. The original
+	// body is kept for anti-markers and stored evidence.
 	matchBody := modkit.StripReflectedProbePath(body, p.path)
-
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(matchBody, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	if reqBody := ctx.Request().BodyToString(); reqBody != "" {
+		matchBody = modkit.StripReflected(matchBody, reqBody)
 	}
-	if !matched {
+
+	matchedMarkers, ok := p.match(matchBody)
+	if !ok {
+		return nil
+	}
+
+	// Multi-round catch-all disproof: probe several guaranteed-nonexistent siblings
+	// sharing this probe's directory AND extension. If a random same-shape path
+	// returns the same status and also satisfies the marker predicate, the host serves
+	// this content for any path (a reflecting/echo server, a SPA fallback, an
+	// extension-scoped catch-all) and the match proves nothing. A genuinely exposed
+	// debug UI / listing has no such sibling (the decoy 404s), so this costs no true
+	// positives, and it is robust to the body-truncation quirk because the decoy is run
+	// through the same predicate rather than a body-similarity compare. Skipped for
+	// probes whose genuine hit renders at an arbitrary path (see skipDecoy).
+	if !p.skipDecoy && modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, decoyRounds, func(b string) bool {
+		_, sibOK := p.match(b)
+		return sibOK
+	}) {
 		return nil
 	}
 

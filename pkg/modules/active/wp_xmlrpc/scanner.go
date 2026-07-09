@@ -95,6 +95,16 @@ func (m *Module) ScanPerRequest(
 		return nil, nil
 	}
 
+	// Content-type discipline: a genuine XML-RPC endpoint answers with an XML
+	// document (text/xml). A universal catch-all / echo host that returns a 200
+	// text/html shell for every path — including the gzip/Content-Length:0 quirk
+	// that captures only a reflecting tail fragment of one — can carry a stray
+	// "methodResponse"/"<value>" and forge an "XML-RPC enabled" finding. Reject an
+	// HTML document: the XML-RPC markers only count in a non-HTML response.
+	if modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil, nil
+	}
+
 	body := resp.Body().String()
 
 	// Must contain methodResponse to confirm XML-RPC is active

@@ -15,6 +15,14 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory negative-control probes the catch-all
+// disproof issues per candidate. A universal catch-all / echo host that answers
+// EVERY path with the same 200 shell (often reflecting the request URI, and —
+// under a gzip + bogus Content-Length: 0 transport quirk — captured as only a
+// truncated TAIL fragment) trips at least one round and the candidate is dropped.
+// Two rounds tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type probe struct {
 	path        string
 	method      string
@@ -26,6 +34,22 @@ type probe struct {
 	sev         severity.Severity
 	desc        string
 	refs        []string
+}
+
+// accepts reports whether body satisfies this probe's marker requirement (any
+// single case-insensitive marker hit — matching the primary loop's ToLower
+// compare). Centralized so the primary match and the catch-all decoy disproof
+// apply the EXACT same predicate — the decoy sibling must be judged by the same
+// rule the candidate was, so a truncated-tail echo / catch-all server that serves
+// the marker for every path is disproved.
+func (p probe) accepts(body string) (matched []string, ok bool) {
+	lower := strings.ToLower(body)
+	for _, marker := range p.markers {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			matched = append(matched, marker)
+		}
+	}
+	return matched, len(matched) > 0
 }
 
 var probes = []probe{
@@ -272,15 +296,39 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(strings.ToLower(body), strings.ToLower(marker)) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	// Strip the reflected request path (and any echoed request body) before marker
+	// matching: the "ignition" / "execute-solution" markers are segments of the
+	// probe path itself (/_ignition/..., /_ignition/execute-solution), so a host
+	// that mirrors the requested URI back into its response — the truncated-tail
+	// echo server — would otherwise self-satisfy a marker. The original body is
+	// kept for anti-markers and stored evidence.
+	matchBody := modkit.StripReflectedProbePath(body, p.path)
+	if reqBody := ctx.Request().BodyToString(); reqBody != "" {
+		matchBody = modkit.StripReflected(matchBody, reqBody)
 	}
-	if !matched {
+
+	matchedMarkers, ok := p.accepts(matchBody)
+	if !ok {
+		return nil
+	}
+
+	// Multi-round catch-all disproof (truncation-proof): the reflected-path strip
+	// above kills an echoed-slug marker, but a universal catch-all shell that
+	// carries "ignition" as a CONSTANT word for every path (surviving in the
+	// truncated tail) slips past it. Probe guaranteed-nonexistent siblings sharing
+	// this path's directory: if a random same-shape path returns the same status
+	// and ALSO satisfies this probe's predicate, the host serves this content for
+	// ANY path — a reflecting/echo server, a SPA fallback, an extension-scoped
+	// catch-all — so the match proves nothing. A genuinely exposed Ignition
+	// endpoint has no such sibling (the decoy 404s), so this costs no true
+	// positives, and it is robust to the body-truncation quirk because the decoy is
+	// run through the same predicate rather than a body-similarity compare. The
+	// genuine hit here is legitimately an HTML error/stack-trace page, so a
+	// content-type=HTML reject would be wrong — the decoy disproof is used instead.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, decoyRounds, func(b string) bool {
+		_, sibOK := p.accepts(b)
+		return sibOK
+	}) {
 		return nil
 	}
 

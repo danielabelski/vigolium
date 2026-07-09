@@ -39,6 +39,62 @@ func TestScanPerRequest_DetectsOIDCDiscovery(t *testing.T) {
 	require.NotEmpty(t, res, "expected an identity-exposure finding when the OIDC discovery document is served")
 }
 
+// TestScanPerRequest_CatchAllEchoNoFalsePositive reproduces the universal
+// catch-all / echo-server FP: the host answers LITERALLY ANY path with 200 +
+// text/html and the SAME reflecting page whose body carries only a truncated tail
+// (no <!DOCTYPE/<html> — the gzip + Content-Length:0 quirk) that happens to
+// contain the scaffolded-Identity markers ("__RequestVerificationToken",
+// "ConfirmPassword", "RememberMe") plus the reflected request path. The 404
+// fingerprint cannot see it (the reflected path makes every response distinct) and
+// the observed-page guard cannot (the tail differs from the home page). The
+// content-type discipline (JSON probes) and the multi-round decoy catch-all (HTML
+// UI probes) must together yield NO finding.
+func TestScanPerRequest_CatchAllEchoNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Universal reflecting shell — every path 200s with the same themed tail
+		// (no leading <!DOCTYPE/<html>) reflecting the request path back.
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(
+			`<div class="app-shell"><form>__RequestVerificationToken ConfirmPassword RememberMe</form>` +
+				`<span>route: ` + r.URL.Path + `</span></div>`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html>home</html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a universal catch-all/echo host must not forge an identity-exposure finding")
+}
+
+// TestScanPerRequest_DetectsScaffoldedRegister confirms a REAL scaffolded Identity
+// register page at its own path (all other paths, including decoy siblings, 404)
+// still fires — the decoy catch-all disproof must not over-suppress a genuine hit.
+func TestScanPerRequest_DetectsScaffoldedRegister(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/Identity/Account/Register" {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html><body><form>__RequestVerificationToken<input name="ConfirmPassword"></form></body></html>`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("404 page not found - unique-baseline-marker"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html>home</html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "a genuine scaffolded Identity register page must still be reported")
+}
+
 // TestScanPerRequest_NoFalsePositive ensures a host with no identity endpoints
 // (all probes 404) produces no finding.
 func TestScanPerRequest_NoFalsePositive(t *testing.T) {

@@ -3,6 +3,7 @@ package jsscan
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,6 +263,46 @@ func TestParseJsscanOutput_CompleteRequest(t *testing.T) {
 	}
 	if len(req.Cookies) != 2 {
 		t.Errorf("len(Cookies) = %d", len(req.Cookies))
+	}
+}
+
+// TestScanner_LargeBeautifyOutputNotTruncated guards the stdout-capture fix in
+// executeJsscan. jsscan (Bun/Node) writes each JSONL record with a single
+// asynchronous write and can exit before a >64KB line finishes draining through
+// the kernel pipe buffer. Capturing stdout over a pipe (bytes.Buffer) therefore
+// truncated the beautified/code records at ~64KB, corrupting their JSON so they
+// were dropped on parse — leaving js-beautify a silent no-op on real bundles.
+// Capturing into a temp file avoids the pipe-buffer cap. This exercises a script
+// whose unminified form is well over 64KB and asserts the record survives whole.
+func TestScanner_LargeBeautifyOutputNotTruncated(t *testing.T) {
+	if !isEmbeddedBinaryValid() {
+		t.Skip("skipping: no valid jsscan binary available")
+	}
+
+	scanner, err := NewScanner(nil)
+	if err != nil {
+		t.Fatalf("NewScanner failed: %v", err)
+	}
+
+	// Single-line minified script; unminifying it (one statement per line) yields a
+	// document far larger than the 64KB pipe buffer.
+	var b strings.Builder
+	b.WriteString("(function(){")
+	for i := 0; i < 4000; i++ {
+		fmt.Fprintf(&b, "var a%d=fn(%d);", i, i)
+	}
+	b.WriteString("})();")
+	input := []byte(b.String())
+
+	res, err := scanner.ScanWithOptions(context.Background(), input, ScanOptions{Beautify: true})
+	if err != nil {
+		t.Fatalf("ScanWithOptions failed: %v", err)
+	}
+	if !res.HasBeautified() {
+		t.Fatal("expected a beautified record for a large minified script (regression: pipe truncated the >64KB line)")
+	}
+	if got := len(res.Beautified.Content); got <= 65535 {
+		t.Fatalf("beautified content truncated at pipe buffer: got %d bytes, want > 65535", got)
 	}
 }
 

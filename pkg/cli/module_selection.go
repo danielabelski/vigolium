@@ -2,11 +2,15 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
 
+	"github.com/vigolium/vigolium/internal/runner"
 	"github.com/vigolium/vigolium/pkg/modules"
+	"github.com/vigolium/vigolium/pkg/terminal"
+	"github.com/vigolium/vigolium/pkg/types"
 )
 
 // registerModuleSelectionFlags registers --module-id and --passive-only, the
@@ -58,6 +62,38 @@ func applyModuleSelectionOverrides(active, passive *[]string, noPassive bool) {
 	}
 	if noPassive {
 		*passive = nil
+	}
+}
+
+// autoSkipKnownIssueScanForModuleSelection auto-appends the known-issue-scan
+// phase to opts.SkipPhases when the operator has narrowed the scan to specific
+// modules (via --module-id or -m/--modules). Hand-picking a handful of modules is
+// a targeted, "polite" scan, so the broad Nuclei/Kingfisher known-issue-scan pass
+// is auto-skipped — matching an explicit `--skip known-issue-scan` — with a
+// console note. It is a no-op when --only is set (which is mutually exclusive with
+// --skip), when no module narrowing is active, when known-issue-scan is already
+// off or already skipped. Silent under --silent.
+func autoSkipKnownIssueScanForModuleSelection(opts *types.Options) {
+	if opts == nil || opts.OnlyPhase != "" {
+		return
+	}
+	if len(globalModuleIDs) == 0 && len(globalModules) == 0 {
+		return
+	}
+	if !opts.KnownIssueScanEnabled {
+		return
+	}
+	kis := string(runner.PhaseKnownIssueScan)
+	for _, p := range opts.SkipPhases {
+		if runner.NormalizeNativePhase(p) == kis {
+			return // operator already skipped it explicitly
+		}
+	}
+	opts.SkipPhases = append(opts.SkipPhases, kis)
+	if !opts.Silent {
+		fmt.Fprintf(os.Stderr, "  %s %s\n",
+			terminal.TipPrefix(),
+			terminal.Gray("narrowed module selection (--module-id/-m) — auto-enabling --skip known-issue-scan (targeted scans stay polite; pass --only known-issue-scan to run it)"))
 	}
 }
 

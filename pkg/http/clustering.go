@@ -77,6 +77,15 @@ func snapshotResponse(resp *httpUtils.ResponseChain, duration int) *CachedRespon
 		cr.StatusCode = r.StatusCode
 		cr.Proto = r.Proto
 		cr.Header = r.Header.Clone()
+		// resp.BodyBytes() above was already decoded by responsechain.Fill (per the
+		// response's Content-Encoding), so the captured body no longer matches these
+		// content-coding / framing headers. Strip them here — the single point where
+		// the decoded body and its headers are paired — so the cached entry is
+		// self-consistent and no reconstruction (ToResponseChain) re-decodes the
+		// plaintext body. Del is a safe no-op on a nil header.
+		cr.Header.Del("Content-Encoding")
+		cr.Header.Del("Content-Length")
+		cr.Header.Del("Transfer-Encoding")
 		// Retain a shallow copy of the request with Body and Response nilled: the
 		// response dump only reads Method/URL/Proto, while the original request's
 		// .Response pins the entire redirect chain (each prior response + body) for
@@ -105,15 +114,26 @@ func (c *CachedResponse) ToResponseChain() *httpUtils.ResponseChain {
 	// of falling through to "HTTP/0.0".
 	proto, major, minor := normalizeHTTPVersion(c.Proto)
 
+	// snapshotResponse already stripped the content-coding / framing headers from the
+	// cached header (the body was decoded before capture), so ResponseChain.Fill
+	// won't try to decode this plaintext body a second time. Clone so the
+	// reconstructed response owns its header map; set ContentLength to the decoded
+	// length so the headers-only dump reports the real size instead of 0.
+	header := c.Header.Clone()
+	if header == nil {
+		header = make(http.Header)
+	}
+
 	// Build a synthetic http.Response with body from cache
 	resp := &http.Response{
-		StatusCode: c.StatusCode,
-		Proto:      proto,
-		ProtoMajor: major,
-		ProtoMinor: minor,
-		Header:     c.Header.Clone(),
-		Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
-		Request:    c.Request,
+		StatusCode:    c.StatusCode,
+		Proto:         proto,
+		ProtoMajor:    major,
+		ProtoMinor:    minor,
+		Header:        header,
+		Body:          io.NopCloser(bytes.NewReader(bodyBytes)),
+		ContentLength: int64(len(bodyBytes)),
+		Request:       c.Request,
 	}
 
 	chain := httpUtils.NewResponseChain(resp, MaxBodyRead)

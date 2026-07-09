@@ -1003,12 +1003,20 @@ cdn-sync: prepare-release-scripts generate-metadata
 # npm name, version-suffixed platform builds). See build/npm/build.mjs.
 NPM_OUT_DIR=build/dist-npm
 
-# "yes" when the goreleaser binaries are missing OR were built at a different
-# version than pkg/cli/version.go ($(VERSION)) — i.e. stale after a version
-# bump. Detected by grepping the ldflag-injected version string in each built
-# binary (no execution, cross-platform). Recursive (=) so it only runs when
-# referenced by the npm-build/npm-pack guards, not on every `make` invocation.
-NPM_NEEDS_BUILD=$(shell bins=$$(ls build/dist/vigolium_*_*/vigolium 2>/dev/null); if [ -z "$$bins" ]; then echo yes; else r=no; for b in $$bins; do grep -qaF -- "$(VERSION)" "$$b" 2>/dev/null || r=yes; done; echo $$r; fi)
+# "yes" when the goreleaser binaries are missing OR were built for a different
+# version than pkg/cli/version.go ($(VERSION)) — i.e. stale after a version bump.
+#
+# Detected via the goreleaser archive name, NOT by grepping the binary: goreleaser
+# names each archive `vigolium_<version>_<os>_<arch>.tar.gz` from the version it
+# actually built (archives.name_template in .goreleaser.yaml) and `--clean` wipes
+# build/dist at the start of every run, so the archive version is an authoritative
+# record of what the binaries are. The old substring grep for "$(VERSION)" in the
+# binary FALSE-MATCHED: a shipped binary carries newer version strings in its
+# embedded content (a v0.2.2 build literally contains "v0.2.3" 12x), so the guard
+# thought stale binaries were fresh and npm-publish shipped v0.2.2 binaries under
+# the 0.2.3 npm version. Recursive (=) so it only runs when referenced by the
+# npm-build/npm-pack guards, not on every `make` invocation.
+NPM_NEEDS_BUILD=$(shell bins=$$(ls build/dist/vigolium_*_*/vigolium 2>/dev/null); arcs=$$(ls build/dist/vigolium_$(GORELEASER_VERSION)_*.tar.gz 2>/dev/null); if [ -z "$$bins" ] || [ -z "$$arcs" ]; then echo yes; else echo no; fi)
 
 # Stage the npm packages from goreleaser output. Runs `make snapshot` first if
 # the binaries are missing OR stale (built at a different version than

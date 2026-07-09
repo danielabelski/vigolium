@@ -81,6 +81,35 @@ func TestScanPerRequest_RedirectURIEchoedToIdPNoFalsePositive(t *testing.T) {
 	}
 }
 
+// TestScanPerRequest_CatchAllEchoNoFalsePositive locks in that the module is
+// immune to the universal catch-all / echo-server FP class: a host that answers
+// LITERALLY ANY path/param with 200 + text/html and the SAME reflecting page
+// (echoing the request URI, no <!DOCTYPE — the body-truncation quirk) must not
+// forge any OAuth finding. The module is already structurally protected because it
+// only reports on differential/reflection-confirmed signals — a 3xx whose Location
+// authority is an attacker-chosen host tracked by a fresh canary (never satisfied
+// by a 200 echo), and a response_type downgrade gated on the endpoint REJECTING an
+// invalid response_type (an echo accepts every value, so the control drops it). The
+// request carries state=xyz so the network-free missing-state check stays quiet.
+func TestScanPerRequest_CatchAllEchoNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Universal reflecting shell: every path/param 200s with the same themed page
+		// echoing the request URI back. No OAuth error tokens, never a 3xx.
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<div class="app-shell">reflected: ` + r.URL.String() + `</div>`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/oauth/authorize?client_id=app1&response_type=code&state=xyz&redirect_uri=https://app.example.com/callback")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a universal catch-all/echo OAuth endpoint must not forge a misconfiguration finding")
+}
+
 // TestScanPerRequest_NoFalsePositive ensures a hardened OAuth endpoint yields no
 // finding: it carries the CSRF state parameter, only ever redirects to a fixed
 // allow-listed callback (never echoing the attacker host), and rejects a

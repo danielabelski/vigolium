@@ -47,14 +47,33 @@ type notFoundFingerprint struct {
 	contentType string
 }
 
-// catchAllProbe records the response to a random, definitely-non-existent
-// `*.php`/PATH_INFO control path. When the host answers it with a 200, it serves
-// a generic body for any script-shaped path (an SPA/catch-all router or a
-// blanket rewrite), so a 200 on the real PATH_INFO tests proves nothing about
-// cgi.fix_pathinfo routing.
+// catchAllRounds is how many distinct random `*.php`/PATH_INFO control probes the
+// blanket catch-all check issues. Multiple rounds turn a single flaky
+// WAF/CDN/cache response into a majority vote, and — crucially — key the verdict
+// on status alone, so it survives the gzip/Content-Length:0 body-truncation quirk
+// that defeats a body-similarity compare (the roche trace.rawaf-test echo server,
+// which returned 200 for every path but a differently-truncated body each time).
+const catchAllRounds = 3
+
+// catchAllProbe records the aggregate result of several random, definitely-non-
+// existent `*.php`/PATH_INFO control probes. count200 is how many of rounds
+// returned 200. A majority means the host serves a generic body for ANY script-
+// shaped path (an SPA/catch-all router, a blanket rewrite, a reflecting/echo
+// server), so a 200 on the real PATH_INFO tests proves nothing about
+// cgi.fix_pathinfo routing. body is one representative 200 body, kept for the
+// similarity-tolerant per-test compare on hosts that are not blanket catch-alls.
 type catchAllProbe struct {
-	is200 bool
-	body  string
+	rounds   int
+	count200 int
+	body     string
+}
+
+// blanket reports whether a majority of the control rounds returned 200 — the
+// host answers every script-shaped path, so no PATH_INFO test can distinguish a
+// real cgi.fix_pathinfo acceptance from the catch-all. Status-only, so it is
+// robust to per-request body truncation/reflection.
+func (c *catchAllProbe) blanket() bool {
+	return c != nil && c.rounds > 0 && c.count200*2 > c.rounds
 }
 
 // Module implements the PHP PATH_INFO Misconfiguration active scanner.
@@ -116,10 +135,14 @@ func (m *Module) ScanPerRequest(
 	// Fingerprint 404 page
 	fp := m.fingerprint404(ctx, httpClient)
 
-	// Probe a random script-shaped path to learn whether the host blanket-serves
-	// 200 for any `*.php`/PATH_INFO URL (a catch-all that no PATH_INFO test can
-	// distinguish from a real cgi.fix_pathinfo routing acceptance).
+	// Probe several random script-shaped paths to learn whether the host blanket-
+	// serves 200 for any `*.php`/PATH_INFO URL (a catch-all that no PATH_INFO test
+	// can distinguish from a real cgi.fix_pathinfo routing acceptance). When a
+	// majority answer 200, the whole host is a catch-all — abandon every test.
 	catchAll := m.probeCatchAll(ctx, httpClient)
+	if catchAll.blanket() {
+		return nil, nil
+	}
 
 	var results []*output.ResultEvent
 	for _, test := range tests {
@@ -130,39 +153,48 @@ func (m *Module) ScanPerRequest(
 	return results, nil
 }
 
-// probeCatchAll requests a random, definitely-non-existent `*.php` script WITH a
-// random PATH_INFO segment. A 200 here means the host returns a generic body for
-// any script-shaped path; the captured body is later compared (similarity-
-// tolerant) against each candidate to drop catch-all false positives.
+// probeCatchAll requests catchAllRounds distinct random, definitely-non-existent
+// `*.php` scripts each WITH a random PATH_INFO segment, and tallies how many
+// return 200. On a genuine cgi.fix_pathinfo host, a non-existent `*.php` is
+// rejected (FPM "No input file specified" / 404), so a 200 across a majority of
+// these controls is the signature of a host that returns a generic body for any
+// script-shaped path. The first 200 body is retained as a representative for the
+// similarity-tolerant per-test compare. Each round uses a fresh random path and
+// NoClustering so a per-path response cache cannot alias the rounds together.
 func (m *Module) probeCatchAll(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 ) *catchAllProbe {
-	randomPath := "/vigolium-pathinfo-catchall-" + utils.RandomString(8) + ".php/" + utils.RandomString(8)
-
-	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
-	if err != nil {
-		return &catchAllProbe{}
-	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, randomPath)
+	baseRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
 		return &catchAllProbe{}
 	}
 
-	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
-	// of re-parsing on this hot path.
-	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
+	res := &catchAllProbe{}
+	for i := 0; i < catchAllRounds; i++ {
+		randomPath := "/vigolium-pathinfo-catchall-" + utils.RandomString(8) + ".php/" + utils.RandomString(8)
+		modifiedRaw, err := httpmsg.SetPath(baseRaw, randomPath)
+		if err != nil {
+			continue
+		}
+		res.rounds++
 
-	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoClustering: true})
-	if err != nil {
-		return &catchAllProbe{}
+		// SetMethod/SetPath produce well-formed raw, so wrap directly instead of
+		// re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
+		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoClustering: true})
+		if err != nil {
+			continue
+		}
+		if resp.Response() != nil && resp.Response().StatusCode == 200 {
+			res.count200++
+			if res.body == "" {
+				res.body = resp.Body().String()
+			}
+		}
+		resp.Close()
 	}
-	defer resp.Close()
-
-	if resp.Response() == nil || resp.Response().StatusCode != 200 {
-		return &catchAllProbe{}
-	}
-	return &catchAllProbe{is200: true, body: resp.Body().String()}
+	return res
 }
 
 // fingerprint404 fetches a non-existent path to learn what a 404 looks like.
@@ -292,7 +324,7 @@ func (m *Module) runTest(
 	// handler), not a cgi.fix_pathinfo routing bug. Mirrors the off-by-slash
 	// suffix-invariance gate; uses similarity-tolerant comparison so per-request
 	// volatile content (timestamps, tokens) does not mask the match.
-	if catchAll != nil && catchAll.is200 && modkit.BodiesSimilar(catchAll.body, body) {
+	if catchAll != nil && catchAll.body != "" && modkit.BodiesSimilar(catchAll.body, body) {
 		return nil
 	}
 

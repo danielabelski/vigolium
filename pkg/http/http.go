@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/core/hosterrors"
 	"github.com/vigolium/vigolium/pkg/core/network"
 	"github.com/vigolium/vigolium/pkg/core/services"
+	"github.com/vigolium/vigolium/pkg/deparos/waf"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/types"
 	"go.uber.org/zap"
@@ -68,6 +70,83 @@ type Requester struct {
 	// pointer to an atomic-published store so WithContext's shallow copy shares
 	// one instance. Always non-nil after NewRequester.
 	carried *carriedSessionStore
+	// blockNotifier fires a one-time-per-host callback when a response is
+	// classified as a WAF/CDN block (captcha / bot-detection / challenge page),
+	// so the scan can warn the operator that traffic is being filtered. Pointer
+	// field so WithContext's shallow copy shares one instance (and never copies
+	// its mutex). Always non-nil after NewRequester; inert until SetBlockNotifier
+	// installs a sink.
+	blockNotifier *blockNotifier
+}
+
+// BlockNotice describes a WAF/CDN block observed on scan traffic. It is passed
+// to the sink registered via SetBlockNotifier, once per host.
+type BlockNotice struct {
+	Host    string // host the block was observed on
+	WAFType string // detected WAF/CDN vendor (e.g. "cloudflare", "akamai", "generic")
+	Status  int    // HTTP status code of the blocking response
+}
+
+// blockNotifier detects WAF/CDN block responses on the requester's traffic and
+// invokes sink exactly once per host. A single warning per host is enough: it
+// tells the operator that host is filtering traffic and the scan against it is
+// likely to be throttled or blocked, without one line per blocked request.
+type blockNotifier struct {
+	sink func(BlockNotice) // installed once at scan setup, before concurrency starts
+	mu   sync.Mutex
+	seen map[string]struct{} // hosts already warned about (lowercased)
+}
+
+// report classifies resp and, on the first confirmed block for host, invokes the
+// sink. It is a no-op without a sink, so the per-response cost on the hot path is
+// a single nil check until SetBlockNotifier is called. A host is only marked
+// "seen" once a block is actually confirmed, so an ordinary application 403 does
+// not suppress a later genuine WAF block on the same host.
+func (n *blockNotifier) report(host string, resp *httpUtils.ResponseChain) {
+	if n == nil || n.sink == nil || host == "" || resp == nil {
+		return
+	}
+	httpResp := resp.Response()
+	if httpResp == nil {
+		return
+	}
+	// Cheap status pre-gate before reading the body / taking the lock.
+	if !waf.IsBlockStatusCode(httpResp.StatusCode) {
+		return
+	}
+
+	key := strings.ToLower(host)
+	n.mu.Lock()
+	_, already := n.seen[key]
+	n.mu.Unlock()
+	if already {
+		return
+	}
+
+	var body []byte
+	if b := resp.Body(); b != nil {
+		body = b.Bytes()
+	}
+	block := waf.ClassifyParts(httpResp.StatusCode, httpResp.Header, body)
+	if block == nil {
+		return
+	}
+
+	// Confirmed block: claim the host under lock so concurrent workers on the
+	// same host emit exactly one warning.
+	n.mu.Lock()
+	if _, dup := n.seen[key]; dup {
+		n.mu.Unlock()
+		return
+	}
+	n.seen[key] = struct{}{}
+	n.mu.Unlock()
+
+	n.sink(BlockNotice{
+		Host:    host,
+		WAFType: block.WAFType,
+		Status:  httpResp.StatusCode,
+	})
 }
 
 // carriedSessionStore holds per-host CarriedSessions. Sessions are written once
@@ -111,6 +190,20 @@ func (r *Requester) SetCarriedSessions(sessions map[string]httpmsg.CarriedSessio
 		normalized[key] = sess
 	}
 	r.carried.set(normalized)
+}
+
+// SetBlockNotifier installs a sink invoked once per host the first time a
+// response on that host is classified as a WAF/CDN block (captcha, bot-detection,
+// or challenge page). It lets the scan warn the operator that traffic is being
+// filtered and results against that host may be incomplete. The sink runs on the
+// request goroutine, so it must be cheap and non-blocking. Call once during scan
+// setup, before scanning concurrency starts; a nil sink is a no-op. The
+// installed sink is shared by every WithContext clone of this requester.
+func (r *Requester) SetBlockNotifier(sink func(BlockNotice)) {
+	if r == nil || r.blockNotifier == nil || sink == nil {
+		return
+	}
+	r.blockNotifier.sink = sink
 }
 
 // WithContext returns a shallow copy of the Requester whose context-less Execute
@@ -296,6 +389,7 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 		services:         services,
 		customHeaders:    parseHeaders(options.Headers),
 		carried:          &carriedSessionStore{},
+		blockNotifier:    &blockNotifier{seen: make(map[string]struct{})},
 	}
 
 	if options.ClusterRequests {
@@ -435,6 +529,9 @@ func (r *Requester) executeDirectly(ctx context.Context, input *httpmsg.HttpRequ
 		r.services.HostErrors.MarkSuccess(input.ID())
 	}
 	r.reportHostFeedback(host, responseChainStatus(resp), nil)
+	// Warn once per host when the edge (WAF/CDN) is filtering traffic. Cheap
+	// nil-check hot path until a notifier sink is installed.
+	r.blockNotifier.report(host, resp)
 	return resp, int(time.Since(start).Seconds()), nil
 }
 

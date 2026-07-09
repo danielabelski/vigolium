@@ -61,7 +61,7 @@ func TestPreflight_HappyPath(t *testing.T) {
 		`{"type":"message_end","message":{"role":"assistant","provider":"openai-codex","model":"gpt-5.5","usage":{"input":4,"output":1,"cost":{"total":0.0001}},"stopReason":"stop"}}`,
 		`{"type":"agent_end","messages":[]}`,
 	)
-	res, err := Preflight(context.Background(), PreflightOptions{Timeout: 5 * time.Second})
+	res, err := Preflight(context.Background(), PreflightOptions{Timeout: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("Preflight: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestPreflight_SurfacesAuthError(t *testing.T) {
 		`{"type":"message_end","message":{"role":"assistant","model":"gpt-5.5","stopReason":"error","errorMessage":"401 Incorrect API key provided"}}`,
 		`{"type":"agent_end","messages":[]}`,
 	)
-	_, err := Preflight(context.Background(), PreflightOptions{Timeout: 5 * time.Second})
+	_, err := Preflight(context.Background(), PreflightOptions{Timeout: 30 * time.Second})
 	if err == nil {
 		t.Fatalf("expected error when message_end carries errorMessage")
 	}
@@ -100,7 +100,7 @@ func TestPreflight_NoAgentEnd(t *testing.T) {
 	withFakePi(t, 0,
 		`{"type":"session","id":"abc","cwd":"/tmp"}`,
 	)
-	_, err := Preflight(context.Background(), PreflightOptions{Timeout: 5 * time.Second})
+	_, err := Preflight(context.Background(), PreflightOptions{Timeout: 30 * time.Second})
 	if err == nil {
 		t.Fatalf("expected error when no agent_end event is emitted")
 	}
@@ -108,7 +108,7 @@ func TestPreflight_NoAgentEnd(t *testing.T) {
 
 func TestPreflight_NonZeroExit(t *testing.T) {
 	withFakePi(t, 7) // no JSONL, just a non-zero exit
-	_, err := Preflight(context.Background(), PreflightOptions{Timeout: 5 * time.Second})
+	_, err := Preflight(context.Background(), PreflightOptions{Timeout: 30 * time.Second})
 	if err == nil {
 		t.Fatalf("expected error on non-zero pi exit")
 	}

@@ -126,6 +126,33 @@ func TestScanPerRequest_NoFalsePositive_CatchAll(t *testing.T) {
 	assert.Empty(t, res, "a blanket 200 for any *.php path (catch-all) must not be reported as PATH_INFO misconfig")
 }
 
+// TestScanPerRequest_NoFP_UniversalReflector reproduces the roche
+// trace.rawaf-test catch-all: EVERY path (not just *.php) returns 200 with a
+// per-request echo body, and — mimicking the gzip/Content-Length:0 truncation
+// quirk — each response is a differently-sized fragment, so the 404-fingerprint
+// and body-similarity guards cannot fire. Only the status-only, multi-round
+// blanket catch-all check (a majority of random *.php/PATH_INFO controls return
+// 200) suppresses it.
+func TestScanPerRequest_NoFP_UniversalReflector(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		// Path-dependent, variable-length body: distinct tokens and size per path
+		// defeat the length-ratio fingerprint and the token-similarity compare.
+		_, _ = w.Write([]byte("<tr><td>uri</td><td>" + r.URL.Path + "</td></tr>" +
+			strings.Repeat("q", 37+3*len(r.URL.Path))))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a universal 200 echo/catch-all must be suppressed by the multi-round blanket check")
+}
+
 // TestCanProcess validates the host-liveness gate.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

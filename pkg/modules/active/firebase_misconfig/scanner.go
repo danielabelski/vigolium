@@ -14,6 +14,13 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory/same-extension negative-control probes
+// the catch-all disproof issues per candidate. A host that answers every
+// /<dir>/<anything>.<ext> with the same 200 shell (a reflecting/echo server, a
+// SPA fallback, a blanket rewrite) trips at least one round and the candidate is
+// dropped. Two rounds tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type notFoundFingerprint struct {
 	bodyHash string
 	bodyLen  int
@@ -143,6 +150,18 @@ func (m *Module) probeFile(
 		}
 	}
 
+	// Content-type discipline (survives body truncation — the header is intact even
+	// when a gzip/Content-Length-0 quirk leaves only a partial body): every Firebase
+	// probe targets a JSON / JS / plist / rules file, none of which are ever served
+	// as an HTML *document*. A reflecting or catch-all host that answers arbitrary
+	// paths with its themed text/html shell would otherwise forge a match on a weak
+	// marker ("{", `":`) that appears anywhere in that shell. This is the decisive,
+	// zero-false-negative guard for that class — a real Firebase config file simply
+	// never comes back as text/html.
+	if modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil
+	}
+
 	body := resp.Body().String()
 
 	// Check against 404 fingerprint
@@ -180,6 +199,22 @@ func (m *Module) probeFile(
 	// generic JSON body sharing one weak key cannot match.
 	matchedMarkers, ok := modkit.MatchAllGroups(body, probe.markers)
 	if !ok {
+		return nil
+	}
+
+	// Multi-round catch-all disproof: probe several guaranteed-nonexistent siblings
+	// that share this probe's directory AND extension (e.g. /vigolium-decoy-*.json
+	// for /.runtimeconfig.json). If a random same-shape path returns the same status
+	// and *also* satisfies the marker groups, the host serves this content for any
+	// path — an echo/reflecting server or extension-scoped catch-all — so the match
+	// proves nothing. A real exposed Firebase file has no such sibling (the decoy
+	// 404s), so this costs no true positives. Robust to the body-truncation quirk:
+	// the decoy is subjected to the same predicate, not a body-similarity compare.
+	markerMatch := func(b string) bool {
+		_, sibOK := modkit.MatchAllGroups(b, probe.markers)
+		return sibOK
+	}
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, probe.path, body, status, decoyRounds, markerMatch) {
 		return nil
 	}
 

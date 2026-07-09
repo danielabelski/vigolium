@@ -110,6 +110,79 @@ func TestScanPerRequest_ScopedCrossDomainNoFinding(t *testing.T) {
 	assert.Empty(t, res, "a domain-scoped cross-domain policy must not yield a finding")
 }
 
+// TestScanPerRequest_DetectsClassicASPInclude serves an exposed classic ASP DB
+// include carrying the full ADODB.Connection + password signature; only that path
+// exists, so the same-extension decoy 404s and the finding stands.
+func TestScanPerRequest_DetectsClassicASPInclude(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/includes/db.inc" {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`Set conn = Server.CreateObject("ADODB.Connection")` + "\n" +
+				`conn.Open "Provider=SQLOLEDB;Data Source=db;User Id=sa;password=S3cr3t;"`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not-here unique-baseline-marker"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html>home</html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected a finding for an exposed classic ASP DB include")
+}
+
+// TestScanPerRequest_NoFP_ReflectedPasswordCatchAll reproduces the roche
+// trace.rawaf-test echo server: every path returns 200 text/html reflecting the
+// request (whose body carries "password"). The .inc probes require the full
+// ADODB + Connection + password co-occurrence — which a request-echo page never
+// carries — so a lone reflected "password" cannot forge a Critical finding.
+func TestScanPerRequest_NoFP_ReflectedPasswordCatchAll(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		// Echo the requested path plus the reflected credential fields, but NONE of
+		// the structural ADODB/Connection tokens a real include carries.
+		_, _ = w.Write([]byte(`<span>` + r.URL.Path + ` username=admin password=1234 pwd=1234</span>`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.RequestJSON(t, srv.URL+"/",
+		`{"username":"admin","password":"1234"}`), "text/html", "<html>home</html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a request-echo catch-all must not be flagged as an exposed ASP include")
+}
+
+// TestScanPerRequest_NoFP_MarkerCatchAll covers a harder catch-all that serves a
+// body carrying ALL of a probe's markers for EVERY path (so requireAll passes) —
+// only the multi-round same-extension decoy disproof can catch it: a random
+// /includes/vigolium-decoy-*.inc returns the same marker-bearing body, proving
+// the host serves it for any path.
+func TestScanPerRequest_NoFP_MarkerCatchAll(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`Set conn = Server.CreateObject("ADODB.Connection"); conn.Open "password=x"`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html>home</html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a marker-bearing catch-all must be disproved by the same-extension decoy")
+}
+
 // TestCanProcess_RequiresResponse verifies the module only runs with a baseline response.
 func TestCanProcess_RequiresResponse(t *testing.T) {
 	t.Parallel()

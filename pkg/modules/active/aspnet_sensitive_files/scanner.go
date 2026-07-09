@@ -15,9 +15,53 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory/same-extension negative-control probes
+// the catch-all disproof issues per candidate. A host that answers every
+// /<dir>/<anything>.<ext> with the same 200 body (a reflecting/echo server, a
+// SPA fallback, a blanket rewrite) trips at least one round and the candidate is
+// dropped. Two rounds tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type notFoundFingerprint struct {
 	bodyHash string
 	bodyLen  int
+}
+
+// accepts reports whether body satisfies this file's confirmation: its marker
+// requirement (requireAll co-occurrence when set, otherwise any single marker)
+// AND, when present, a confirmAny signal. matched carries the evidence
+// substrings. Centralized so the primary match and the catch-all decoy disproof
+// apply the exact same predicate.
+func (sf sensitiveFile) accepts(body string) (matched []string, ok bool) {
+	if len(sf.requireAll) > 0 {
+		matched, ok = modkit.MatchAllGroups(body, sf.requireAll)
+		if !ok {
+			return nil, false
+		}
+	} else {
+		for _, marker := range sf.markers {
+			if strings.Contains(body, marker) {
+				matched = append(matched, marker)
+			}
+		}
+		if len(matched) == 0 {
+			return nil, false
+		}
+	}
+	if len(sf.confirmAny) > 0 {
+		confirmed := false
+		for _, sig := range sf.confirmAny {
+			if strings.Contains(body, sig) {
+				matched = append(matched, sig)
+				confirmed = true
+				break
+			}
+		}
+		if !confirmed {
+			return nil, false
+		}
+	}
+	return matched, true
 }
 
 type Module struct {
@@ -185,34 +229,34 @@ func (m *Module) probeFile(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range sf.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	// Strip the reflected request from the body before marker matching: a host
+	// that echoes the requested path or the request body back into its response
+	// (the roche trace.rawaf-test echo server) would otherwise let an injected
+	// value satisfy a marker ("password" from the request's own JSON body). The
+	// original body is kept for anti-markers and stored evidence.
+	matchBody := modkit.StripReflectedProbePath(body, sf.path)
+	if reqBody := ctx.Request().BodyToString(); reqBody != "" {
+		matchBody = modkit.StripReflected(matchBody, reqBody)
 	}
-	if !matched {
+
+	matchedMarkers, ok := sf.accepts(matchBody)
+	if !ok {
 		return nil
 	}
 
-	// Some files (e.g. cross-domain policies) are near-ubiquitous and only
-	// constitute a finding when their content is actually insecure. When
-	// confirmAny is set, require one of those signals in the body — otherwise
-	// the benign, scoped variant is dropped instead of reported.
-	if len(sf.confirmAny) > 0 {
-		confirmed := false
-		for _, sig := range sf.confirmAny {
-			if strings.Contains(body, sig) {
-				confirmed = true
-				matchedMarkers = append(matchedMarkers, sig)
-				break
-			}
-		}
-		if !confirmed {
-			return nil
-		}
+	// Multi-round catch-all disproof: probe several guaranteed-nonexistent
+	// siblings sharing this file's directory AND extension. If a random same-shape
+	// path returns the same status and also satisfies the file's predicate, the
+	// host serves this content for any path (a reflecting/echo server, a SPA
+	// fallback, an extension-scoped catch-all) and the match proves nothing. A
+	// genuinely exposed file has no such sibling (the decoy 404s), so this costs no
+	// true positives, and it is robust to the body-truncation quirk because the
+	// decoy is run through the same predicate rather than a body-similarity compare.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, sf.path, body, status, decoyRounds, func(b string) bool {
+		_, sibOK := sf.accepts(b)
+		return sibOK
+	}) {
+		return nil
 	}
 
 	urlx, _ := ctx.URL()

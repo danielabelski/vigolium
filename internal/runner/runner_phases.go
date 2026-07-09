@@ -70,6 +70,10 @@ func (r *Runner) RunNativeScan() error {
 	}
 	defer infra.Close()
 
+	// Warn the operator (once per host) when the edge WAF/CDN starts filtering
+	// scan traffic, across all phases that share this requester.
+	r.attachWAFBlockNotifier(infra.httpRequester)
+
 	// Initialize scan logger (must happen before printScanConfig so the tee captures it)
 	r.scanLogger = database.NewScanLogger(r.repository, infra.scanUUID)
 	r.scanLogger.StartBatcher()

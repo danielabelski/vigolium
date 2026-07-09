@@ -15,6 +15,13 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory negative-control probes the catch-all
+// disproof issues per candidate. A host that answers every sibling path with the
+// same 200 dashboard shell (a reflecting/echo server, an SPA fallback, a blanket
+// rewrite) trips at least one round and the candidate is dropped. Two rounds
+// tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type notFoundFingerprint struct {
 	bodyHash string
 	bodyLen  int
@@ -179,6 +186,16 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
+	// Content-type discipline for a non-document probe (rack-mini-profiler's
+	// includes.js is JavaScript, never an HTML page). Truncation-proof: the
+	// Content-Type header survives the gzip + bogus Content-Length:0 quirk that
+	// leaves only a partial body, so a text/html catch-all cannot masquerade as
+	// the JS resource. The admin-panel probes serve a genuine HTML document, so
+	// they skip this and rely on the decoy catch-all confirmation below instead.
+	if !p.htmlDoc && modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil
+	}
+
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
 			return nil
@@ -189,15 +206,28 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
-	}
+	// Strip the reflected request path before marker matching. A path-routing app
+	// echoes the requested URL into its page (a breadcrumb, a <title>, a JSON
+	// "path" field), so a marker that is literally a segment of the probe path —
+	// "rails_admin" for /rails_admin, "active_admin" for /active_admin — would
+	// self-match our OWN request rather than a live panel. Stripping it means a
+	// marker only counts when it comes from the endpoint's own body. The original
+	// body is retained for the stored response evidence.
+	matchBody := modkit.StripReflectedProbePath(body, p.path)
+	matchedMarkers, matched := p.accepts(matchBody)
 	if !matched {
+		return nil
+	}
+
+	// Multi-round catch-all disproof: probe several guaranteed-nonexistent
+	// siblings sharing this probe's directory. If a random same-shape path returns
+	// the same status and also satisfies the marker predicate, the host serves
+	// this dashboard shell for ANY path (a reflecting/echo server, an SPA
+	// fallback, a blanket rewrite) and the match proves nothing. A genuinely
+	// exposed panel has no such sibling (the decoy 404s), so this costs no true
+	// positives, and it survives the body-truncation quirk because the decoy is
+	// run through the same marker predicate rather than a body-similarity compare.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, decoyRounds, p.markerMatch) {
 		return nil
 	}
 

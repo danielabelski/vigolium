@@ -57,6 +57,33 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host without exposed Rails dashboards must not yield findings")
 }
 
+// TestScanPerRequest_CatchAllReflectingNoFalsePositive reproduces the universal
+// catch-all / echo-server false positive. The host answers EVERY path with a 200
+// text/html fragment that (a) reflects the requested path — so /rails_admin and
+// /active_admin echo their own "rails_admin"/"active_admin" marker — and (b)
+// carries a constant "Sidekiq" word in a truncated TAIL (no <!DOCTYPE / <html>,
+// so anti-markers are gone; the reflected path keeps each body distinct so the
+// 404 fingerprint never matches). Without the reflected-path strip and the decoy
+// catch-all confirmation, /sidekiq (constant marker) and /rails_admin (reflected
+// marker) would both forge a dashboard finding.
+func TestScanPerRequest_CatchAllReflectingNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Catch-all: 200 + text/html + reflected path + a constant brand word, for ANY path.
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("you asked for " + r.URL.Path + " -- Sidekiq dashboard busy retries queue"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html><body>Welcome to the Acme storefront landing page</body></html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a reflecting HTML catch-all must not forge a Rails dashboard finding")
+}
+
 // TestCanProcess validates the host-liveness gate.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

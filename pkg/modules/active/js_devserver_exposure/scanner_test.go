@@ -137,6 +137,58 @@ func TestScanPerRequest_BlanketStatusNoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host returning 204 for every path must not flag a status-only dev-server probe")
 }
 
+// TestScanPerRequest_CatchAllHTMLTailNoFalsePositive reproduces the catch-all /
+// echo-server FP with body truncation: the host answers EVERY path (including the
+// marker-probe paths and the 404 fingerprint) with a 200 text/html shell that is a
+// truncated TAIL fragment — no leading <!DOCTYPE, echoing the request path so the
+// exact-hash 404 gate and the observed-page guard are both defeated — yet the tail
+// carries the sockjs `"websocket"` marker. The surviving Content-Type header must
+// reject the HTML shell so the marker never forges a dev-server finding.
+func TestScanPerRequest_CatchAllHTMLTailNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// Truncated tail (no <!DOCTYPE): echoes the path so every response differs,
+		// and embeds the sockjs `"websocket"` marker a weak body scan would flag.
+		_, _ = w.Write([]byte(`app ` + r.URL.Path +
+			` boot {"transports":["websocket"],"origins":"*:*"}</div></body></html>`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html><body>app</body></html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a catch-all HTML tail carrying a dev-server marker must not be reported")
+}
+
+// TestScanPerRequest_DetectsSockJSInfo confirms the HTML-shell guard does not
+// suppress a genuine marker hit: a real SockJS info endpoint serves a non-HTML
+// JSON body carrying the "websocket"/"origins" markers at its own path while other
+// paths 404, so the finding still fires.
+func TestScanPerRequest_DetectsSockJSInfo(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sockjs-node/info" {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(`{"websocket":true,"origins":["*:*"],"entropy":123456}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not found"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html><body>app</body></html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "a real non-HTML SockJS info endpoint must still be detected")
+	assert.True(t, strings.Contains(res[0].Info.Name, "SockJS"), "finding should name the SockJS dev server")
+}
+
 // TestScanPerRequest_JSONApiNoFalsePositive reproduces the empty-marker FP class:
 // an app that returns a small, distinct, non-HTML JSON 200 for one of the marker-
 // less dev paths (an API gateway echoing the route, a catch-all error object).

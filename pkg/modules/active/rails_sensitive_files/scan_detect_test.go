@@ -114,6 +114,32 @@ func TestScanPerRequest_DetectsLocalSecret(t *testing.T) {
 	require.NotEmpty(t, res, "expected a finding when a hex secret_key_base is exposed")
 }
 
+// TestScanPerRequest_CatchAllHTMLNoFalsePositive reproduces the universal
+// catch-all / echo-server false positive. The host answers EVERY path with a
+// 200 text/html fragment that reflects the requested path and carries weak
+// marker words ("gem "/"source" for the Gemfile) in a truncated TAIL (no
+// leading <!DOCTYPE / <html>, so the anti-markers are gone; the reflected path
+// keeps each body's hash/length distinct so the 404 fingerprint never matches).
+// Only the content-type discipline (text/html is never a Rails config file) can
+// drop it. Without that guard /Gemfile would forge a "source"/"gem " match.
+func TestScanPerRequest_CatchAllHTMLNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Catch-all: 200 + text/html + reflected path + weak markers, for ANY path.
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("you asked for " + r.URL.Path + " -- gem source adapter: database:"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html><body>Welcome to the online store front page</body></html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an HTML catch-all reflecting weak markers must not forge a Rails-file finding")
+}
+
 // TestCanProcess validates the host-liveness gate.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

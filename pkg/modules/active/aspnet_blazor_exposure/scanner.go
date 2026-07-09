@@ -16,6 +16,13 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory/same-extension negative-control probes
+// the catch-all disproof issues per candidate. A host that answers every sibling
+// path with the same 200 shell (a reflecting/echo server, an SPA fallback, a
+// blanket rewrite) trips at least one round and the candidate is dropped. Two
+// rounds tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type notFoundFingerprint struct {
 	bodyHash string
 	bodyLen  int
@@ -185,6 +192,20 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
+	// Content-type discipline for a structured (non-document) probe. The JSON boot
+	// manifest / negotiate response, the JavaScript runtimes, and the .NET WASM
+	// binary are never served as an HTML *document*, so a text/html response for
+	// them is a catch-all / echo shell — reject it. Truncation-proof: the
+	// Content-Type header survives the gzip + bogus Content-Length:0 quirk that
+	// captures only a partial body, so this holds even when weak markers ("assembly",
+	// "resources", the echoed "_framework"/"blazor" path segment) survive in the
+	// truncated tail after the <html> anti-marker in the head is lost. The
+	// directory-listing probe serves a genuine HTML document, so it skips this and
+	// relies on the decoy catch-all confirmation below.
+	if !p.htmlDoc && modkit.ClassifyContentType(resp.Response().Header.Get("Content-Type")) == modkit.ContentClassHTML {
+		return nil
+	}
+
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
 			return nil
@@ -195,15 +216,25 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
-	}
+	// Strip the reflected request path before marker matching so a marker that is
+	// merely a segment of the probe path echoed back ("_framework", "blazor" from
+	// /_framework/blazor.webassembly.js) cannot self-match our OWN request. The
+	// original body is retained for the stored response evidence.
+	matchBody := modkit.StripReflectedProbePath(body, p.path)
+	matchedMarkers, matched := p.accepts(matchBody)
 	if !matched {
+		return nil
+	}
+
+	// Multi-round catch-all disproof: probe several guaranteed-nonexistent siblings
+	// sharing this probe's directory AND extension. If a random same-shape path
+	// returns the same status and also satisfies the marker predicate, the host
+	// serves this content for ANY path (a reflecting/echo server, an SPA fallback,
+	// an extension-scoped catch-all) and the match proves nothing. A genuinely
+	// exposed resource has no such sibling (the decoy 404s), so this costs no true
+	// positives, and it survives the body-truncation quirk because the decoy is run
+	// through the same marker predicate rather than a body-similarity compare.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, decoyRounds, p.markerMatch) {
 		return nil
 	}
 

@@ -134,6 +134,15 @@ func (e *Engine) collectValidatedLinks(links []*spider.DiscoveredLink, parentDep
 	var files, dirs [][]byte
 	var baseURL []byte
 
+	// Pre-pass: record every directory that directly holds a content-hash
+	// fingerprinted bundle before breadcrumb processing (below) recurses into any
+	// of them, so the skip decision is independent of link order within the batch.
+	for _, dl := range links {
+		if dl != nil && dl.URL != nil {
+			e.recordHashedAssetParent(dl.URL)
+		}
+	}
+
 	for _, dl := range links {
 		if dl == nil || dl.URL == nil {
 			continue

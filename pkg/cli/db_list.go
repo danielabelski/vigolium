@@ -866,7 +866,7 @@ func displayTable(records []*database.HTTPRecord, total int64, offset, _ int) er
 func colorModuleType(t string) string {
 	switch strings.ToLower(t) {
 	case "active":
-		return terminal.BoldYellow(t)
+		return terminal.BoldGreen(t)
 	case "passive":
 		return terminal.BoldCyan(t)
 	default:

@@ -15,6 +15,14 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
+// decoyRounds is how many same-directory negative-control probes the catch-all
+// disproof issues per candidate. A universal catch-all / echo host that answers
+// EVERY path with the same 200 shell (often reflecting the request URI, and —
+// under a gzip + bogus Content-Length: 0 transport quirk — captured as only a
+// truncated TAIL fragment) trips at least one round and the candidate is dropped.
+// Two rounds tolerate a single WAF/CDN flake without over-probing.
+const decoyRounds = 2
+
 type probe struct {
 	path        string
 	name        string
@@ -23,6 +31,20 @@ type probe struct {
 	sev         severity.Severity
 	desc        string
 	refs        []string
+}
+
+// accepts reports whether body satisfies this probe's marker requirement (any
+// single marker hit). Centralized so the primary match and the catch-all decoy
+// disproof apply the EXACT same predicate — the decoy sibling must be judged by
+// the same rule the candidate was, so a truncated-tail echo / catch-all server
+// that serves the marker for every path is disproved.
+func (p probe) accepts(body string) (matched []string, ok bool) {
+	for _, marker := range p.markers {
+		if strings.Contains(body, marker) {
+			matched = append(matched, marker)
+		}
+	}
+	return matched, len(matched) > 0
 }
 
 var probes = []probe{
@@ -293,22 +315,36 @@ func (m *Module) probeFile(
 		return nil
 	}
 
-	// Strip the reflected probe path before matching: the /tinker and /web-tinker
-	// markers ("tinker", "web-tinker") are the path slug itself, so a page echoing
-	// the requested path (a <form action>, an href, a JSON route name) would forge
-	// a Critical RCE finding. After the strip a marker only counts when it comes
-	// from the endpoint's own content.
+	// Strip the reflected probe path (and any echoed request body) before matching:
+	// the /tinker and /web-tinker markers ("tinker", "web-tinker") are the path slug
+	// itself, so a page echoing the requested path (a <form action>, an href, a
+	// JSON route name) — the truncated-tail echo server — would forge a Critical RCE
+	// finding. After the strip a marker only counts when it comes from the
+	// endpoint's own content. The original body is kept for stored evidence.
 	matchBody := modkit.StripReflectedProbePath(body, p.path)
-
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(matchBody, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	if reqBody := ctx.Request().BodyToString(); reqBody != "" {
+		matchBody = modkit.StripReflected(matchBody, reqBody)
 	}
-	if !matched {
+
+	matchedMarkers, ok := p.accepts(matchBody)
+	if !ok {
+		return nil
+	}
+
+	// Multi-round catch-all disproof (truncation-proof): the reflected-path strip
+	// above kills an echoed-slug marker, but a universal catch-all shell that
+	// carries a weak tool name as a CONSTANT word for every path (a "clockwork" /
+	// "log-viewer" reference in a bundle name, surviving in the truncated tail)
+	// slips past it. Probe guaranteed-nonexistent siblings sharing this path's
+	// directory: if a random same-shape path returns the same status and ALSO
+	// satisfies this probe's predicate, the host serves this content for ANY path,
+	// so the match proves nothing. A genuinely exposed dev tool has no such sibling
+	// (the decoy 404s), so this costs no true positives, and it is robust to the
+	// body-truncation quirk because the decoy is run through the same predicate.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, p.path, body, status, decoyRounds, func(b string) bool {
+		_, sibOK := p.accepts(b)
+		return sibOK
+	}) {
 		return nil
 	}
 

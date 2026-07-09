@@ -168,11 +168,24 @@ func (m *Module) ScanPerHost(
 			contentType := resp.Response().Header.Get("Content-Type")
 			respBody := resp.Body().String()
 
+			// Self-reflection / echo-server guard: a catch-all or echo handler that
+			// mirrors the requested path into its response body lets a probe whose
+			// content marker is a substring of its OWN path self-confirm — the
+			// /fastify-overview probe (marker "fastify") sees the word reflected
+			// straight back from "/fastify-overview" and forges an "overview plugin
+			// exposed" finding. Strip the reflected probe path before matching so a
+			// marker only counts when it comes from the endpoint's real content, not
+			// our own request. This survives the gzip + bogus `Content-Length: 0`
+			// truncation that drops the shell head but keeps the reflected tail — the
+			// case the head-keyed ConfirmNotSoft404 wildcard guard below cannot see.
+			// The original respBody is kept for the empty-body gate and evidence.
+			matchBody := modkit.StripReflectedProbePath(respBody, p.path)
+
 			// An exposed documentation / metrics / debug endpoint always returns a
 			// non-empty, resource-specific body. A blank 200 is the signature of an
 			// SPA/CDN catch-all that answers every path with an empty shell, so it
 			// can never be a genuine hit — skip it before the per-probe match.
-			if strings.TrimSpace(respBody) != "" && p.match(statusCode, contentType, respBody) {
+			if strings.TrimSpace(respBody) != "" && p.match(statusCode, contentType, matchBody) {
 				location := resp.Response().Header.Get("Location")
 				// Defense-in-depth for catch-alls whose shell is non-empty: reject the
 				// match when it is indistinguishable from the host's wildcard response

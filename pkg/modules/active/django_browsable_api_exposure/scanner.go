@@ -52,6 +52,19 @@ func New() *Module {
 	return m
 }
 
+// hasStrongMarker reports whether body carries a DRF-specific browsable-API
+// anchor. It is the accept predicate shared by the probe and the catch-all decoy
+// confirmation: a guaranteed-nonexistent sibling carrying the same anchor proves
+// the host is a catch-all / echo shell rather than a real browsable endpoint.
+func hasStrongMarker(body string) bool {
+	for _, marker := range strongMarkers {
+		if strings.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Module) IncludesBaseCanProcess() bool { return false }
 
 func (m *Module) CanProcess(ctx *httpmsg.HttpRequestResponse) bool {
@@ -166,6 +179,28 @@ func (m *Module) probeWithAcceptHTML(
 	if len(matchedMarkers) == 0 {
 		return nil
 	}
+
+	urlx, _ := ctx.URL()
+	probePath := overridePath
+	if probePath == "" {
+		probePath = urlx.Path
+	}
+
+	// Catch-all / echo confirmation. The genuine DRF browsable API legitimately IS
+	// an HTML 200 document, so content-type cannot separate it from a universal
+	// catch-all / echo host that answers LITERALLY ANY path with the same 200
+	// text/html shell. Compounding this, a gzip + bogus Content-Length:0 transport
+	// quirk can truncate the captured body to a tail fragment (no leading
+	// <!DOCTYPE/<html> head), so the "404 Not Found" anti-marker is gone while a
+	// reflected "django-rest-framework" / "rest_framework" token survives in the
+	// tail and forges a finding. Disprove it by probing guaranteed-nonexistent
+	// siblings under this path's directory and dropping the finding when they return
+	// the SAME 200 status carrying the same DRF anchor — a real browsable API serves
+	// its markers only at its own route (siblings 404), so a genuine finding stands.
+	if modkit.MultiRoundExtDecoyCatchAll(ctx, httpClient, probePath, body, status, 2, hasStrongMarker) {
+		return nil
+	}
+
 	// Record any generic layout tokens as supporting evidence only.
 	for _, marker := range corroborators {
 		if strings.Contains(body, marker) {
@@ -173,11 +208,6 @@ func (m *Module) probeWithAcceptHTML(
 		}
 	}
 
-	urlx, _ := ctx.URL()
-	probePath := overridePath
-	if probePath == "" {
-		probePath = urlx.Path
-	}
 	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	return &output.ResultEvent{

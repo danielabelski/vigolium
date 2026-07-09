@@ -34,8 +34,17 @@ var qbTotalRe = regexp.MustCompile(`"total"\s*:\s*(\d+)`)
 
 // qbTotal returns the QueryBuilder result total, or -1 when the body is not a
 // successful QueryBuilder response.
+//
+// Content-type discipline (defense-in-depth alongside the per-probe negative
+// controls) rejects the catch-all/echo body-truncation FP: a QueryBuilder reply is
+// application/json, never an HTML *document*, so a reflecting/catch-all host whose
+// truncated text/html tail happens to carry the `"success":true` / `"total":N`
+// substrings cannot forge a successful QueryBuilder response.
 func qbTotal(res aem.ProbeResult) int {
 	if !res.OK || res.Status != 200 || !strings.Contains(res.Body, `"success":true`) {
+		return -1
+	}
+	if modkit.ClassifyContentType(res.ContentType) == modkit.ContentClassHTML {
 		return -1
 	}
 	mm := qbTotalRe.FindStringSubmatch(res.Body)

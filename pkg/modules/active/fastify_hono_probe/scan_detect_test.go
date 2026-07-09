@@ -61,6 +61,57 @@ func TestScanPerHost_DetectsFastifyMetrics(t *testing.T) {
 	require.NotEmpty(t, res, "expected a finding when the Fastify metrics endpoint serves Prometheus content")
 }
 
+// TestScanPerHost_NoFalsePositive_PathReflectingEcho reproduces the self-reflection
+// FP with body truncation: an echo / catch-all handler mirrors the request path
+// into a 200 text/html tail for EVERY path (no leading <!DOCTYPE, so the head-keyed
+// wildcard soft-404 guard is defeated — each path's head bytes differ). The
+// /fastify-overview probe (marker "fastify") would otherwise self-confirm on the
+// word reflected straight back from its own path. Stripping the reflected probe
+// path before matching must drop it.
+func TestScanPerHost_NoFalsePositive_PathReflectingEcho(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		// Truncated tail echoing the request path — /fastify-overview reflects the
+		// word "fastify" back, and every path's head differs.
+		_, _ = w.Write([]byte(`<div id=app data-route="` + r.URL.Path + `">loading</div>`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html>app</html>")
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a path-reflecting echo server must not self-confirm the /fastify-overview marker")
+}
+
+// TestScanPerHost_DetectsFastifyOverview confirms the reflected-path strip does not
+// suppress a genuine hit: a real overview endpoint whose own content (not just the
+// reflected path) names fastify is still reported.
+func TestScanPerHost_DetectsFastifyOverview(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fastify-overview" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<h1>Application Overview</h1><ul><li>plugin: fastify-swagger</li>` +
+				`<li>plugin: fastify-cors</li></ul>`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html>app</html>")
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "a real fastify-overview endpoint naming fastify in its content must still be reported")
+}
+
 // TestScanPerHost_NoFalsePositive returns 404 for all framework paths, so no
 // finding should be produced.
 func TestScanPerHost_NoFalsePositive(t *testing.T) {

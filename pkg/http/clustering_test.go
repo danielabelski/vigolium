@@ -1,7 +1,10 @@
 package http
 
 import (
+	"bytes"
+	"compress/gzip"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -118,6 +121,82 @@ func TestCachedResponse_Roundtrip(t *testing.T) {
 	}
 	if rebuilt.Response().Header.Get("X-Test") != "hello" {
 		t.Errorf("rebuilt header: expected 'hello', got %q", rebuilt.Response().Header.Get("X-Test"))
+	}
+}
+
+// TestCachedResponse_DecodedBodyNotReDecoded guards against a regression where a
+// gzipped response cached by the clusterer was decoded twice. responsechain.Fill
+// decompresses the body per Content-Encoding, but the response keeps that header;
+// if the cached entry retains it, reconstructing and re-filling hands the already
+// plaintext body to gzip.NewReader, whose internal bufio pulls a 4096-byte chunk
+// off the body before the header parse fails — silently dropping the first ~4096
+// bytes of the stored response. snapshotResponse must strip the now-stale
+// content-coding / framing headers so the cached entry is self-consistent and the
+// body round-trips byte-for-byte through reconstruction.
+func TestCachedResponse_DecodedBodyNotReDecoded(t *testing.T) {
+	// A body larger than bufio's 4096 default so a dropped first chunk is visible.
+	payload := make([]byte, 100000)
+	for i := range payload {
+		payload[i] = byte('A' + (i % 26))
+	}
+
+	var gzbuf bytes.Buffer
+	gz := gzip.NewWriter(&gzbuf)
+	if _, err := gz.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A response as the transport delivers it when the scanner sends its own
+	// Accept-Encoding: a compressed body with the Content-Encoding header retained.
+	// responsechain.Fill decodes it; snapshotResponse then captures the decoded body.
+	resp := &http.Response{
+		StatusCode: 200,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header: http.Header{
+			"Content-Encoding": {"gzip"},
+			"Content-Type":     {"application/javascript"},
+			"Content-Length":   {fmt.Sprint(gzbuf.Len())},
+		},
+		Body: io.NopCloser(bytes.NewReader(gzbuf.Bytes())),
+	}
+
+	chain := httpUtils.NewResponseChain(resp, MaxBodyRead)
+	for chain.Has() {
+		if err := chain.Fill(); err != nil {
+			t.Fatal(err)
+		}
+		if !chain.Previous() {
+			break
+		}
+	}
+
+	cached := snapshotResponse(chain, 0)
+	chain.Close()
+
+	if string(cached.Body()) != string(payload) {
+		t.Fatalf("snapshot body mismatch: got %d bytes, want %d", len(cached.Body()), len(payload))
+	}
+	// The cached entry must not advertise an encoding or framing that no longer
+	// matches its decoded body.
+	for _, h := range []string{"Content-Encoding", "Content-Length", "Transfer-Encoding"} {
+		if v := cached.Header.Get(h); v != "" {
+			t.Errorf("cached header still carries %s=%q over a decoded body", h, v)
+		}
+	}
+
+	rebuilt := cached.ToResponseChain()
+	defer rebuilt.Close()
+	if got := rebuilt.BodyBytes(); string(got) != string(payload) {
+		t.Fatalf("reconstructed body corrupted: got %d bytes, want %d (dropped %d)",
+			len(got), len(payload), len(payload)-len(got))
+	}
+	if v := rebuilt.Response().Header.Get("Content-Encoding"); v != "" {
+		t.Errorf("reconstructed response still advertises Content-Encoding %q", v)
 	}
 }
 
