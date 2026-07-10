@@ -18,7 +18,7 @@ var (
 	ModuleConfirmation = "Confirmed when a KB Article Page widget POST returns a non-empty article text/short_description for a guest, reproduced across independent rounds, while a non-existent KB id returns no content (ruling out a catch-all)"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Certain
-	ModuleTags         = []string{"servicenow", "exposure", "info-disclosure", "idor", "api", "misconfig"}
+	ModuleTags         = []string{"servicenow", "exposure", "info-disclosure", "idor", "api", "misconfig", "moderate"}
 )
 
 var moduleReferences = []string{

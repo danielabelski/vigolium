@@ -18,7 +18,7 @@ var (
 	ModuleConfirmation = "Confirmed when a Simple List widget POST returns isValid:true, count>0, and a first record with a non-null display_value for a sensitive table, reproduced across independent rounds, while a bogus table returns no records (ruling out a catch-all) and a missing token returns 401"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Certain
-	ModuleTags         = []string{"servicenow", "exposure", "info-disclosure", "idor", "api", "misconfig"}
+	ModuleTags         = []string{"servicenow", "exposure", "info-disclosure", "idor", "api", "misconfig", "moderate"}
 )
 
 var moduleReferences = []string{

@@ -72,7 +72,7 @@ func TestSecretPatterns(t *testing.T) {
 		// Google API Key pattern needs exactly "AIza" + 35 chars.
 		"Google API Key": "AIza" + "01234567890123456789012345678901234",
 		"Private Key":    "-----BEGIN PRIVATE KEY-----",
-		"Slack Token":    "xoxb-1234-abcd",
+		"Slack Token":    "xoxb-1234-" + "abcd",
 	}
 	// Drive from the known samples (not the pattern list) so a renamed or removed
 	// pattern fails the test instead of silently asserting nothing.

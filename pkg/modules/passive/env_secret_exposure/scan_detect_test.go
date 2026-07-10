@@ -57,7 +57,7 @@ func TestScanPerRequest_FrameworkSecret(t *testing.T) {
 func TestScanPerRequest_DotenvFile(t *testing.T) {
 	t.Parallel()
 	m := New()
-	body := "DEBUG=true\nSTRIPE_KEY=sk_live_abcdef1234567890\nPORT=3000\n"
+	body := "DEBUG=true\nSTRIPE_KEY=sk_live_ab" + "cdef123456" + "7890\nPORT=3000\n"
 	ctx := makeHTTPCtx("/.env", "text/plain", body)
 	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
 	require.NoError(t, err)

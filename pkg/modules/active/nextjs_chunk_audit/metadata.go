@@ -18,7 +18,7 @@ var (
 	ModuleConfirmation = "Confirmed when /_next/static/chunks/<chunk>.js returns 200 with JavaScript content and is successfully parsed"
 	ModuleSeverity     = severity.Info
 	ModuleConfidence   = severity.Certain
-	ModuleTags         = []string{"nextjs", "javascript", "intel", "info-disclosure", "medium"}
+	ModuleTags         = []string{"nextjs", "javascript", "intel", "info-disclosure", "medium", "light"}
 )
 
 const (

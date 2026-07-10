@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed when an RCE/write-capable AEM surface serves its identifying markers (or advertises write methods) reproducibly; no exec or write payload is sent"
 	ModuleSeverity     = severity.Critical
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"aem", "adobe", "rce", "exposure", "cms"}
+	ModuleTags         = []string{"aem", "adobe", "rce", "exposure", "cms", "heavy"}
 )

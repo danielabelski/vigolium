@@ -335,8 +335,41 @@ func TestNewInputSource_MultipleFilePaths(t *testing.T) {
 }
 
 func TestSupportedFormats(t *testing.T) {
-	assert.Contains(t, SupportedFormats(), "urls")
-	assert.Contains(t, SupportedFormats(), "nuclei")
+	// SupportedFormats must advertise every canonical format the resolver accepts
+	// (it previously listed only 5 of the 9). Assert completeness so the public
+	// list can't silently drift from formatRegistry again.
+	got := SupportedFormats()
+	for _, name := range SupportedFormatNames() {
+		assert.Contains(t, got, name, "SupportedFormats must list %q", name)
+		parser, err := resolveFormat(name)
+		require.NoError(t, err, "canonical format %q must resolve", name)
+		require.NotNil(t, parser)
+	}
+	assert.Contains(t, got, "postman", "regression: postman was missing from the advertised list")
+	assert.Contains(t, got, "har")
+	assert.Contains(t, got, "burpxml")
+}
+
+// TestResolveFormatUnknownErrors guards the fix for the silent Nuclei fallback:
+// an unknown explicit format must return an error, not a Nuclei parser, so a
+// typo fails fast instead of misparsing the input.
+func TestResolveFormatUnknownErrors(t *testing.T) {
+	for _, bad := range []string{"postamn", "nuclie", "swaggr", "totally-made-up"} {
+		parser, err := resolveFormat(bad)
+		require.Error(t, err, "unknown format %q must error", bad)
+		assert.Nil(t, parser)
+		assert.Contains(t, err.Error(), bad, "error should name the offending value")
+	}
+}
+
+// TestResolveFormatAliasesAndDefault verifies documented aliases resolve and an
+// empty format falls back to the "urls" default (matching the -I flag default).
+func TestResolveFormatAliasesAndDefault(t *testing.T) {
+	for _, alias := range []string{"swagger", "burp", "burp-xml", "burpstate", "nuclei-output", "list", " HAR ", ""} {
+		parser, err := resolveFormat(alias)
+		require.NoError(t, err, "alias %q must resolve", alias)
+		require.NotNil(t, parser)
+	}
 }
 
 // TestFileSourceParseErrorSurfacedOnceThenEOF guards the fix for the feedItems

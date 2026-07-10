@@ -2,7 +2,9 @@ package source
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
@@ -68,30 +70,52 @@ func NewFileSource(cfg FileSourceConfig) (*FileSource, error) {
 	}, nil
 }
 
-// resolveFormat returns the appropriate Format implementation for the given name.
+// formatEntry binds a canonical input-format name and its accepted aliases to a
+// parser constructor. formatRegistry (below) is the single source of truth for
+// which input formats exist: resolveFormat, SupportedFormats, and
+// SupportedFormatNames all derive from it so the accepted set, the help text,
+// and the error message can never drift apart.
+type formatEntry struct {
+	canonical string
+	aliases   []string
+	newParser func() formats.Format
+}
+
+// formatRegistry lists every supported input format in display order.
+var formatRegistry = []formatEntry{
+	{"urls", []string{"url", "list"}, func() formats.Format { return urls.New() }},
+	{"nuclei", []string{"nuclei-output"}, func() formats.Format { return nuclei.New() }},
+	{"openapi", []string{"swagger"}, func() formats.Format { return openapi.New() }},
+	{"postman", nil, func() formats.Format { return postman.New() }},
+	{"curl", nil, func() formats.Format { return curl.New() }},
+	{"burpraw", []string{"burp-raw", "raw"}, func() formats.Format { return burpraw.New() }},
+	{"burpxml", []string{"burp-xml", "burp", "burpstate"}, func() formats.Format { return burpxml.New() }},
+	{"har", []string{"http-archive"}, func() formats.Format { return har.New() }},
+	{"deparos", []string{"deparos-output"}, func() formats.Format { return deparos.New() }},
+}
+
+// resolveFormat returns the parser for the given format name or alias. An empty
+// name resolves to the default "urls" list format (matching the -I flag
+// default). An unknown explicit format is a hard error: previously any
+// unrecognized value silently fell back to the Nuclei parser, so a typo (e.g.
+// "postamn") would misparse the input as Nuclei JSONL and yield zero or partial
+// records with no error. Failing fast surfaces the mistake before any scan runs.
 func resolveFormat(name string) (formats.Format, error) {
-	switch name {
-	case "nuclei", "nuclei-output":
-		return nuclei.New(), nil
-	case "urls", "url", "list":
-		return urls.New(), nil
-	case "openapi", "swagger":
-		return openapi.New(), nil
-	case "postman":
-		return postman.New(), nil
-	case "curl":
-		return curl.New(), nil
-	case "burpraw", "burp-raw", "raw":
-		return burpraw.New(), nil
-	case "burpxml", "burp-xml", "burp", "burpstate":
-		return burpxml.New(), nil
-	case "har", "http-archive":
-		return har.New(), nil
-	case "deparos", "deparos-output":
-		return deparos.New(), nil
-	default:
-		return nuclei.New(), nil // Default to nuclei format
+	key := strings.ToLower(strings.TrimSpace(name))
+	if key == "" {
+		key = "urls"
 	}
+	for _, e := range formatRegistry {
+		if key == e.canonical {
+			return e.newParser(), nil
+		}
+		for _, a := range e.aliases {
+			if key == a {
+				return e.newParser(), nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("unknown input format %q; supported formats: %s (see 'vigolium scan --list-input-mode')", name, SupportedFormats())
 }
 
 // Format returns the underlying format parser.

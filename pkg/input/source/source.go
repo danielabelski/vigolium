@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
@@ -140,9 +141,20 @@ func NewInputSource(cfg SourceConfig) (InputSource, error) {
 	}
 }
 
-// SupportedFormats returns comma-separated list of supported input formats.
+// SupportedFormats returns a comma-separated list of the canonical input-format
+// names, derived from the single formatRegistry source of truth so it can never
+// drift from the set resolveFormat actually accepts.
 func SupportedFormats() string {
-	return "urls, nuclei, openapi, swagger, deparos"
+	return strings.Join(SupportedFormatNames(), ", ")
+}
+
+// SupportedFormatNames returns the canonical input-format names in display order.
+func SupportedFormatNames() []string {
+	names := make([]string, len(formatRegistry))
+	for i, e := range formatRegistry {
+		names[i] = e.canonical
+	}
+	return names
 }
 
 // TargetSource provides input from direct URL targets (from -u flag).

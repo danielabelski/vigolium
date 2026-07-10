@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed when an internal XML entity is expanded (not echoed) in the servlet response across multiple rounds, proving DTD/entity processing is enabled"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"aem", "adobe", "xxe", "cve", "cve2019", "cms"}
+	ModuleTags         = []string{"aem", "adobe", "xxe", "cve", "cve2019", "cms", "moderate"}
 )

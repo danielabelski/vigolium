@@ -18,7 +18,7 @@ var (
 	ModuleConfirmation = "Confirmed when the Aura getConfigData action returns state:SUCCESS with an apiNamesToKeyPrefixes map exposing custom (__c) objects to the guest, reproduced across independent rounds against a live Aura gateway"
 	ModuleSeverity     = severity.Medium
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"salesforce", "aura", "lightning", "exposure", "info-disclosure", "misconfig"}
+	ModuleTags         = []string{"salesforce", "aura", "lightning", "exposure", "info-disclosure", "misconfig", "moderate"}
 )
 
 var moduleReferences = []string{

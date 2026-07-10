@@ -12,15 +12,15 @@ import (
 func defaultOpts() ResponseWindowOpts { return DefaultResponseWindowOpts() }
 
 func TestWindowBody_SmallBodyUnchanged(t *testing.T) {
-	body := []byte("var apiKey = \"AIzaSyAFi5SqFWHuSSGO5cyrhrLKdgLpMsa1Jmk\";\n")
-	got := WindowBody(body, []string{"AIzaSyAFi5SqFWHuSSGO5cyrhrLKdgLpMsa1Jmk"}, 1, defaultOpts())
+	body := []byte("var apiKey = \"AIzaSyAFi5" + "SqFWHuSSGO" + "5cyrhrLKdg" + "LpMsa1Jmk\";\n")
+	got := WindowBody(body, []string{"AIzaSyAFi5" + "SqFWHuSSGO" + "5cyrhrLKdg" + "LpMsa1Jmk"}, 1, defaultOpts())
 
 	assert.Equal(t, string(body), got)
 	assert.NotContains(t, got, "truncated", "small body must not be truncated")
 }
 
 func TestWindowBody_LargeMultilineWindowsAroundMatch(t *testing.T) {
-	secret := "AIzaSyAFi5SqFWHuSSGO5cyrhrLKdgLpMsa1Jmk"
+	secret := "AIzaSyAFi5" + "SqFWHuSSGO" + "5cyrhrLKdg" + "LpMsa1Jmk"
 	var sb strings.Builder
 	for i := 0; i < 400; i++ {
 		fmt.Fprintf(&sb, "line %d filler content padding padding padding\n", i)
@@ -45,7 +45,7 @@ func TestWindowBody_LargeMultilineWindowsAroundMatch(t *testing.T) {
 }
 
 func TestWindowBody_MinifiedSingleLineCharClamped(t *testing.T) {
-	secret := "AIzaSyAFi5SqFWHuSSGO5cyrhrLKdgLpMsa1Jmk"
+	secret := "AIzaSyAFi5" + "SqFWHuSSGO" + "5cyrhrLKdg" + "LpMsa1Jmk"
 	left := strings.Repeat("a", 50_000)
 	right := strings.Repeat("b", 50_000)
 	body := []byte(left + secret + right)

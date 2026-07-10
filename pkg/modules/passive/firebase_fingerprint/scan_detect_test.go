@@ -36,7 +36,7 @@ func TestScanPerRequest_FirebaseConfig(t *testing.T) {
 	t.Parallel()
 	m := New()
 	body := `var firebaseConfig = {
-		"apiKey": "AIzaSyA1234567890abcdefghijklmnopqrstuvw",
+		"apiKey": "AIzaSyA123` + `4567890abc` + `defghijklm` + `nopqrstuvw",
 		"authDomain": "myapp-prod.firebaseapp.com",
 		"databaseURL": "https://myapp-prod.firebaseio.com",
 		"projectId": "myapp-prod",

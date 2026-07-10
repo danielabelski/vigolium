@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed when a deliberately-invalid credential is rejected but a default credential authenticates (login-token issued / console served), reproducibly"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Certain
-	ModuleTags         = []string{"aem", "adobe", "default-credentials", "auth", "cms"}
+	ModuleTags         = []string{"aem", "adobe", "default-credentials", "auth", "cms", "moderate"}
 )

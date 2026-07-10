@@ -42,7 +42,7 @@ This is the **native scan** pipeline — deterministic, Go-based scanning with n
 
 ### Module System
 
-All scanner logic lives in **modules** registered in the **Registry** (`pkg/modules/registry.go`); the wiring is in `pkg/modules/default_registry_active.go` / `default_registry_passive.go` (currently 168 active + 98 passive registrations = 266 modules). Two types:
+All scanner logic lives in **modules** registered in the **Registry** (`pkg/modules/registry.go`); the wiring is in `pkg/modules/default_registry_active.go` / `default_registry_passive.go` (currently 198 active + 115 passive registrations = 313 modules). Two types:
 
 - **ActiveModule** (`pkg/modules/active.go`): Sends modified requests to detect vulnerabilities. Methods: `ScanPerInsertionPoint`, `ScanPerRequest`, `ScanPerHost`. Each module declares which `ScanScope` and `InsertionPointType` it handles.
 - **PassiveModule** (`pkg/modules/passive.go`): Analyzes existing request/response pairs without sending new traffic. Optional `Flusher` interface for end-of-scan finalization.

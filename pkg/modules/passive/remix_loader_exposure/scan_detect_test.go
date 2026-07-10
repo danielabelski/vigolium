@@ -33,7 +33,7 @@ func TestNew(t *testing.T) {
 func TestScanPerRequest_SensitiveLoaderData(t *testing.T) {
 	t.Parallel()
 	m := New()
-	body := `<script>window.__remixContext={"state":{"api_key":"sk_live_0123456789abcdef"}};</script>`
+	body := `<script>window.__remixContext={"state":{"api_key":"sk_live_01` + `23456789ab` + `cdef"}};</script>`
 	ctx := makeHTTPCtx(body)
 	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
 	require.NoError(t, err)

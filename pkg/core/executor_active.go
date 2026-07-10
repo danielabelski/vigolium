@@ -16,7 +16,7 @@ func (e *Executor) runActivePerHost(ctx context.Context, reqClient *http.Request
 		return
 	}
 
-	host := hostFromItem(item)
+	origin := originKeyFromItem(item)
 
 	for _, module := range e.perHostActive {
 		if !filter.allows(module.ID()) {
@@ -30,10 +30,10 @@ func (e *Executor) runActivePerHost(ctx context.Context, reqClient *http.Request
 			continue
 		}
 
-		// Claim this (module, host) pair — skip if another worker already claimed
+		// Claim this (module, origin) pair — skip if another worker already claimed
 		// it. ContainsOrAdd is atomic (single lock) so two concurrent workers
 		// can't both win the claim; ok==true means the pair was already claimed.
-		claimKey := hostClaimKey{moduleID: module.ID(), host: host}
+		claimKey := hostClaimKey{moduleID: module.ID(), origin: origin}
 		if ok, _ := e.caches.perHostActiveClaimed.ContainsOrAdd(claimKey, struct{}{}); ok {
 			continue
 		}

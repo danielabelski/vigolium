@@ -303,13 +303,17 @@ func (e *Executor) staticStorageCandidate(rr *httpmsg.HttpRequestResponse) bool 
 // server run.
 const perHostClaimCacheSize = 16384
 
-// hostClaimKey identifies a (module, host) per-host claim. Using a struct key
-// instead of a "moduleID:host" string avoids allocating a fresh string on every
-// request for every per-host module (the claim is checked per request but only
-// won once per pair) — the struct is hashed/compared in place by the LRU's map.
+// hostClaimKey identifies a (module, origin) per-host claim, where origin is the
+// canonical scheme://host:port identity (see originKeyFromItem) rather than a
+// bare hostname — so the same hostname exposed on multiple ports/schemes doesn't
+// collapse into one claim and suppress a ScanPerHost module on the other origins.
+// Using a struct key instead of a "moduleID:origin" string avoids allocating a
+// fresh string on every request for every per-host module (the claim is checked
+// per request but only won once per pair) — the struct is hashed/compared in
+// place by the LRU's map.
 type hostClaimKey struct {
 	moduleID string
-	host     string
+	origin   string
 }
 
 // scanCaches groups the Executor's per-scan lookup and dedup state. Every field
@@ -329,7 +333,7 @@ type scanCaches struct {
 
 	// perHostActiveClaimed / perHostPassiveClaimed ensure per-host modules run
 	// exactly once per (module, host) pair even with concurrent workers.
-	// Key: hostClaimKey{moduleID, host} → struct{}. Bounded LRUs rather than
+	// Key: hostClaimKey{moduleID, origin} → struct{}. Bounded LRUs rather than
 	// unbounded sync.Maps: in a long-lived scan-on-receive executor the (module,
 	// host) key space grows with every distinct host ingested, so an unbounded
 	// map leaks for the process lifetime. The LRU caps that growth and, by
@@ -465,6 +469,7 @@ func NewExecutor(
 		e.scanCtx.RiskScoreUpdater = &repoRiskScoreUpdater{repo: cfg.Repository}
 		e.scanCtx.RemarksAnnotator = &repoRemarksAnnotator{repo: cfg.Repository}
 		e.scanCtx.RecordRewriter = &repoRecordResponseRewriter{repo: cfg.Repository}
+		e.scanCtx.ArtifactWriter = &repoDerivedArtifactWriter{repo: cfg.Repository}
 		e.scanCtx.RequestUUIDResolver = e
 	}
 

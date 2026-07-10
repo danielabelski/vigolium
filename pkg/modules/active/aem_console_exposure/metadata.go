@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed when an AEM console/admin panel's unique title/markers are served with a 200 and reproduce across multiple confirmation rounds"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"aem", "adobe", "misconfiguration", "exposure", "cms"}
+	ModuleTags         = []string{"aem", "adobe", "misconfiguration", "exposure", "cms", "light"}
 )

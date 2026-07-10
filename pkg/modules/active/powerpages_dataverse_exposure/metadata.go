@@ -18,7 +18,7 @@ var (
 	ModuleConfirmation = "Confirmed when an unauthenticated GET /_api/<table> returns HTTP 200 with an @odata.context and a non-empty value array of records, reproduced across independent rounds, while a bogus entity set returns a Dataverse 404 (ruling out a catch-all)"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Certain
-	ModuleTags         = []string{"powerpages", "dataverse", "microsoft", "exposure", "info-disclosure", "idor", "api"}
+	ModuleTags         = []string{"powerpages", "dataverse", "microsoft", "exposure", "info-disclosure", "idor", "api", "moderate"}
 )
 
 var moduleReferences = []string{

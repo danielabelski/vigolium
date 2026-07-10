@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed out-of-band: the AEM server issues a DNS/HTTP request to the collaborator host planted in auth_url or in the uploaded package's privileges.xml SYSTEM entity"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"aem", "adobe", "ssrf", "xxe", "oob", "blind", "cve", "cve2025", "cms"}
+	ModuleTags         = []string{"aem", "adobe", "ssrf", "xxe", "oob", "blind", "cve", "cve2025", "cms", "heavy"}
 )

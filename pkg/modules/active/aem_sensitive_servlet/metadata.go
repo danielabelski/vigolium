@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed when an AEM servlet returns its distinctive disclosure markers (rep:password, jcr:primaryType, success/hits, userID) with a 200 that reproduces across multiple rounds and is not a catch-all shell"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"aem", "adobe", "info-disclosure", "exposure", "cms"}
+	ModuleTags         = []string{"aem", "adobe", "info-disclosure", "exposure", "cms", "light"}
 )

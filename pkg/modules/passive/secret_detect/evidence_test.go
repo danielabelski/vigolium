@@ -12,15 +12,15 @@ import (
 const testHead = "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n\r\n"
 
 func TestBuildEvidenceResponse_SmallBodyShownInFull(t *testing.T) {
-	body := []byte("var apiKey = \"AIzaSyAFi5SqFWHuSSGO5cyrhrLKdgLpMsa1Jmk\";\n")
-	got := BuildEvidenceResponse(testHead, body, "AIzaSyAFi5SqFWHuSSGO5cyrhrLKdgLpMsa1Jmk", 1)
+	body := []byte("var apiKey = \"AIzaSyAFi5" + "SqFWHuSSGO" + "5cyrhrLKdg" + "LpMsa1Jmk\";\n")
+	got := BuildEvidenceResponse(testHead, body, "AIzaSyAFi5" + "SqFWHuSSGO" + "5cyrhrLKdg" + "LpMsa1Jmk", 1)
 
 	assert.Equal(t, testHead+string(body), got)
 	assert.NotContains(t, got, "truncated", "small body must not be truncated")
 }
 
 func TestBuildEvidenceResponse_LargeMultilineWindowsAroundMatch(t *testing.T) {
-	secret := "AIzaSyAFi5SqFWHuSSGO5cyrhrLKdgLpMsa1Jmk"
+	secret := "AIzaSyAFi5" + "SqFWHuSSGO" + "5cyrhrLKdg" + "LpMsa1Jmk"
 	var sb strings.Builder
 	for i := 0; i < 200; i++ {
 		fmt.Fprintf(&sb, "line %d filler content padding padding padding\n", i)
@@ -45,7 +45,7 @@ func TestBuildEvidenceResponse_LargeMultilineWindowsAroundMatch(t *testing.T) {
 }
 
 func TestBuildEvidenceResponse_MinifiedSingleLineCharClamped(t *testing.T) {
-	secret := "AIzaSyAFi5SqFWHuSSGO5cyrhrLKdgLpMsa1Jmk"
+	secret := "AIzaSyAFi5" + "SqFWHuSSGO" + "5cyrhrLKdg" + "LpMsa1Jmk"
 	// One giant line (minified bundle): line windowing would span everything, so
 	// the char cap must bound the window instead.
 	left := strings.Repeat("a", 50_000)

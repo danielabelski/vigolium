@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed when a JCR read primitive (DefaultGetServlet or QueryBuilder) returns repository nodes that reproduce across rounds and are not a catch-all shell — recursion through discovered child-node names, credential/secret markers, user accounts, or writable-node predicates escalate severity"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"aem", "adobe", "info-disclosure", "content-discovery", "jcr", "exposure", "cms"}
+	ModuleTags         = []string{"aem", "adobe", "info-disclosure", "content-discovery", "jcr", "exposure", "cms", "moderate"}
 )

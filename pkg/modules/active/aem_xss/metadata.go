@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed when the injected breakout reflects unencoded in a text/html response across multiple rounds; escalated to High when a headless browser fires the alert dialog"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"aem", "adobe", "xss", "cms"}
+	ModuleTags         = []string{"aem", "adobe", "xss", "cms", "moderate"}
 )

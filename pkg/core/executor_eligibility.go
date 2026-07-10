@@ -1,6 +1,8 @@
 package core
 
 import (
+	"net"
+	"strconv"
 	"strings"
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
@@ -172,19 +174,54 @@ func normalizeTechTags(in []string) []string {
 	return out
 }
 
-// hostFromItem extracts the host for tech-registry lookup. Prefers Service().Host()
-// (already includes port for non-default ports) and falls back to the URL host.
+// hostFromItem extracts the per-host key used for tech-registry and
+// content-class lookups. It returns the URL host — the bare hostname plus
+// ":port" for non-default ports — because that is exactly the key the write
+// paths use: fingerprint modules publish detections with urlx.Host (==
+// item.URL().Host) via ScanContext.MarkTech, and the content-class registry is
+// seeded from neturl.Parse(target).Host. Keying reads off the bare
+// Service().Host() (which drops the port) let a stack detected on :443 gate
+// modules on :8443 and dropped every non-default-port detection outright. Falls
+// back to the bare service host only when the URL cannot be parsed.
 func hostFromItem(item *httpmsg.HttpRequestResponse) string {
+	if item == nil {
+		return ""
+	}
+	if u, err := item.URL(); err == nil && u != nil && u.Host != "" {
+		return u.Host
+	}
+	if svc := item.Service(); svc != nil {
+		return svc.Host()
+	}
+	return ""
+}
+
+// originKeyFromItem returns the canonical origin identity — scheme, host, and
+// effective port — used to key per-host module claims. Unlike hostFromItem it
+// includes the scheme and always resolves the port, so the same hostname served
+// on multiple ports or schemes (e.g. https://h:443 public app vs https://h:8443
+// admin app) yields distinct keys. This prevents the first port scanned from
+// claiming the (module, host) pair and suppressing a ScanPerHost module's run
+// against the other origins of the same hostname.
+func originKeyFromItem(item *httpmsg.HttpRequestResponse) string {
 	if item == nil {
 		return ""
 	}
 	if svc := item.Service(); svc != nil {
 		if h := svc.Host(); h != "" {
-			return h
+			return svc.Protocol() + "://" + net.JoinHostPort(h, strconv.Itoa(svc.Port()))
 		}
 	}
-	if u, err := item.URL(); err == nil && u != nil {
-		return u.Host
+	if u, err := item.URL(); err == nil && u != nil && u.Hostname() != "" {
+		port := u.Port()
+		if port == "" {
+			if u.Scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+		}
+		return u.Scheme + "://" + net.JoinHostPort(u.Hostname(), port)
 	}
 	return ""
 }

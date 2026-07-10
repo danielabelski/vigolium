@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed when the direct request to a protected servlet does not return its content but a path-normalization bypass variant does, reproducibly"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Certain
-	ModuleTags         = []string{"aem", "adobe", "acl-bypass", "path-normalization", "dispatcher", "cms"}
+	ModuleTags         = []string{"aem", "adobe", "acl-bypass", "path-normalization", "dispatcher", "cms", "moderate"}
 )

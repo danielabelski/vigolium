@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed when a benign marker property POSTed to the BulkImportConfigServlet is read back verbatim through the ConfDeliveryServlet (pre-auth write), and/or a x#{7*7}y probe is read back as x49y with the literal #{7*7} absent (EL evaluated server-side), reproducing across rounds"
 	ModuleSeverity     = severity.Critical
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"aem", "adobe", "injection", "el-injection", "rce", "acl", "cve", "cve2025", "cms"}
+	ModuleTags         = []string{"aem", "adobe", "injection", "el-injection", "rce", "acl", "cve", "cve2025", "cms", "moderate"}
 )

@@ -18,7 +18,7 @@ var (
 	ModuleConfirmation = "Confirmed when ApexActionController.execute returns state:SUCCESS for a benign read-only Apex method across independent rounds, while a bogus namespace/class/method returns a non-success state (ruling out a catch-all endpoint) — against a live Aura gateway"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"salesforce", "aura", "lightning", "apex", "rce", "ssrf", "misconfig"}
+	ModuleTags         = []string{"salesforce", "aura", "lightning", "apex", "rce", "ssrf", "misconfig", "heavy"}
 )
 
 var moduleReferences = []string{

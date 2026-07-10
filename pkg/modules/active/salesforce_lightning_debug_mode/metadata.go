@@ -18,7 +18,7 @@ var (
 	ModuleConfirmation = "Confirmed when the Aura bootstrap on a live Aura gateway host declares a debug mode (PRODDEBUG / DEV / JSTESTDEBUG) consistently across independent, cache-bypassed rounds; a PROD (or STATS) mode never fires"
 	ModuleSeverity     = severity.Medium
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"salesforce", "aura", "lightning", "debug", "info-disclosure", "misconfig"}
+	ModuleTags         = []string{"salesforce", "aura", "lightning", "debug", "info-disclosure", "misconfig", "light"}
 )
 
 var moduleReferences = []string{

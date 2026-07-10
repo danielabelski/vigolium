@@ -250,6 +250,12 @@ func (f *Finding) FromResultEvent(event *output.ResultEvent) error {
 	f.FindingSource = event.FindingSource
 	f.ModuleShort = event.ModuleShort
 
+	// Classification: native modules already publish a CWE in the result event's
+	// metadata map (Metadata["cwe"], e.g. "CWE-79"), but the finding's cwe_id
+	// column — which exists and is rendered in reports — was never populated from
+	// native results. Surface it so console/JSON/HTML/DB/API all carry it.
+	f.CWEID = cweFromMetadata(event.Metadata)
+
 	f.FindingHash = event.ID()
 	f.FoundAt = time.Now()
 
@@ -258,6 +264,45 @@ func (f *Finding) FromResultEvent(event *output.ResultEvent) error {
 	f.Status = StatusTriaged
 
 	return nil
+}
+
+// cweFromMetadata extracts a CWE identifier from a ResultEvent's metadata map.
+// Native modules publish it as Metadata["cwe"], typically a single "CWE-nnn"
+// string; a slice of strings/interfaces is joined. Returns "" when absent.
+func cweFromMetadata(meta map[string]interface{}) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	v, ok := meta["cwe"]
+	if !ok {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case []string:
+		return joinNonEmpty(t)
+	case []interface{}:
+		parts := make([]string, 0, len(t))
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		return joinNonEmpty(parts)
+	}
+	return ""
+}
+
+// joinNonEmpty trims each element and joins the non-empty ones with ", ".
+func joinNonEmpty(in []string) string {
+	parts := make([]string, 0, len(in))
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // windowStaticFindingResponse returns a size-bounded copy of a finding's raw

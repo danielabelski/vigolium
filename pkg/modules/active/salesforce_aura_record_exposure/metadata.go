@@ -18,7 +18,7 @@ var (
 	ModuleConfirmation = "Confirmed when the Aura getItems action returns state:SUCCESS with a non-empty record set for a sensitive object, reproduced across independent rounds, while a bogus object name returns no records (ruling out a catch-all)"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Certain
-	ModuleTags         = []string{"salesforce", "aura", "lightning", "exposure", "info-disclosure", "idor", "misconfig"}
+	ModuleTags         = []string{"salesforce", "aura", "lightning", "exposure", "info-disclosure", "idor", "misconfig", "moderate"}
 )
 
 var moduleReferences = []string{
