@@ -32,14 +32,17 @@ type Options struct {
 	Hostname    string   // target hostname (derived from TargetURL if empty)
 
 	// Output
-	OutputPath   string    // write agent output to this file
-	DryRun       bool      // render prompt and print it, don't execute agent
-	ShowPrompt   bool      // print rendered prompt to stderr before executing
-	ScanUUID     string    // scan UUID to attach findings to
-	ProjectUUID  string    // project UUID for data scoping
-	StreamWriter io.Writer `json:"-"` // when non-nil, agent output is streamed here in real-time
-	SessionDir   string    `json:"-"` // session directory for artifacts (transcripts, generated extensions, etc.)
-	Verbose      bool      `json:"-"` // when true, the toollog renders a per-tool result preview alongside the standard one-liner
+	OutputPath  string // write agent output to this file
+	DryRun      bool   // render prompt and print it, don't execute agent
+	ShowPrompt  bool   // print rendered prompt to stderr before executing
+	ScanUUID    string // scan UUID to attach findings to
+	ProjectUUID string // project UUID for data scoping
+	// EnableBurpBridgeTools exposes only the live read-only Burp search and
+	// inspect tools on a fresh agent session. It does not enable replay tools.
+	EnableBurpBridgeTools bool      `json:"-"`
+	StreamWriter          io.Writer `json:"-"` // when non-nil, agent output is streamed here in real-time
+	SessionDir            string    `json:"-"` // session directory for artifacts (transcripts, generated extensions, etc.)
+	Verbose               bool      `json:"-"` // when true, the toollog renders a per-tool result preview alongside the standard one-liner
 
 	// Extra template data (injected into {{.Extra}} in prompt templates)
 	Extra map[string]string `json:"-"`

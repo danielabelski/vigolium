@@ -580,6 +580,8 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		// having to fire a full run_scan every time.
 		tools.Register(vigtool.NewQueryRecordsTool(sessCtx))
 		tools.Register(vigtool.NewInspectRecordTool(sessCtx))
+		tools.Register(vigtool.NewSearchBurpItemsTool(sessCtx))
+		tools.Register(vigtool.NewInspectBurpItemTool(sessCtx))
 		tools.Register(vigtool.NewReplayRequestTool(sessCtx))
 		tools.Register(vigtool.NewOASTPollTool(sessCtx))
 		// send_raw_http: exact-bytes socket primitive for smuggling/desync/

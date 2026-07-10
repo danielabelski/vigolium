@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/vigolium/vigolium/pkg/agent/input"
+	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
@@ -42,6 +44,8 @@ var (
 	replayInReplaceTop   bool
 	replayOutputPath     string
 	replayPretty         bool
+	replayBurpBridgeURL  string
+	replaySaveToBurp     bool
 
 	// Bulk-selection flags — when any is set, replay iterates the matching
 	// stored records instead of a single source (mirrors `traffic --replay`,
@@ -71,6 +75,8 @@ shape is stable so an agent can confirm a finding without parsing terminal outpu
 
 Cookies set by one replay persist to the next when --session-id is provided. Routes
 through HTTP_PROXY / HTTPS_PROXY (or --proxy) for Burp-style inspection.
+Use --save-to-burp with --burp-bridge-url to add the actual mutated request and
+fresh replay response directly to Burp's Target Site map without proxying it twice.
 
 Bulk mode: pass --all (or any of --host/--method/--status/--path/--source/--search/
 --body) to replay every matching stored record instead of a single source — like
@@ -118,6 +124,16 @@ func init() {
 		"When the source is a stored record, update its stored response with the replay")
 	f.StringVarP(&replayOutputPath, "output", "o", "", "Write JSON result to this file (default: stdout)")
 	f.BoolVar(&replayPretty, "pretty", false, "Human-readable summary instead of JSON")
+	f.StringVar(
+		&replayBurpBridgeURL,
+		"burp-bridge-url",
+		burpbridge.URLFromEnvironment(),
+		"Loopback Burp bridge URL used by --save-to-burp")
+	f.BoolVar(
+		&replaySaveToBurp,
+		"save-to-burp",
+		false,
+		"Add each replayed request and its fresh response to Burp's Target Site map")
 
 	// Bulk selection — mirror the traffic filters. Setting any of these (or
 	// --all) switches replay into bulk mode over the matching stored records.
@@ -139,6 +155,21 @@ func runReplay(cmd *cobra.Command, args []string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if replaySaveToBurp && strings.TrimSpace(replayBurpBridgeURL) == "" {
+		return fmt.Errorf("--save-to-burp requires --burp-bridge-url")
+	}
+	var bridgeClient *burpbridge.Client
+	if replayBurpBridgeURL != "" {
+		validated, err := burpbridge.ValidateURL(replayBurpBridgeURL)
+		if err != nil {
+			return fmt.Errorf("--burp-bridge-url: %w", err)
+		}
+		replayBurpBridgeURL = validated
+		bridgeClient, err = burpbridge.New(validated)
+		if err != nil {
+			return err
+		}
+	}
 
 	mutations, err := parseReplayMutations()
 	if err != nil {
@@ -163,6 +194,8 @@ func runReplay(cmd *cobra.Command, args []string) error {
 		client:      newReplayClient(pj, replayTimeout),
 		pj:          pj,
 		jarLoaded:   jarLoaded,
+		burpClient:  bridgeClient,
+		saveToBurp:  replaySaveToBurp,
 	}
 
 	// Bulk mode: iterate every matching stored record through the same engine.
@@ -208,6 +241,8 @@ type replayRun struct {
 	client      *http.Client
 	pj          *jar.PersistentJar
 	jarLoaded   int
+	burpClient  *burpbridge.Client
+	saveToBurp  bool
 }
 
 // newReplayClient builds the shared HTTP client for replay: the persistent
@@ -269,8 +304,15 @@ func (rr *replayRun) one(ctx context.Context, src *replaySource, overlay map[str
 			fmt.Fprintf(os.Stderr, "%s replay: --in-replace failed: %v\n", terminal.WarningSymbol(), err)
 		}
 	}
+	if rr.saveToBurp {
+		if err := saveReplayResultToBurp(ctx, rr.burpClient, src, result); err != nil {
+			return nil, fmt.Errorf("save replay to Burp: %w", err)
+		}
+	}
 
-	return buildReplayOutput(src, result, rr.jarLoaded, rr.pj), nil
+	out := buildReplayOutput(src, result, rr.jarLoaded, rr.pj)
+	out.SavedToBurp = rr.saveToBurp
+	return out, nil
 }
 
 // replaySource is the resolved baseline a replay diffs against. It can
@@ -627,15 +669,7 @@ func persistReplayResponse(ctx context.Context, src *replaySource, result *repla
 	}
 	repo := database.NewRepository(db)
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", result.Replay.Status, http.StatusText(result.Replay.Status))
-	for k, vs := range result.Replay.Headers {
-		for _, v := range vs {
-			fmt.Fprintf(&b, "%s: %s\r\n", k, v)
-		}
-	}
-	b.WriteString("\r\n")
-	raw := append([]byte(b.String()), body...)
+	raw := rawReplayResponse(result.Replay)
 
 	update := &database.RecordResponseUpdate{
 		StatusCode:            result.Replay.Status,
@@ -648,6 +682,58 @@ func persistReplayResponse(ctx context.Context, src *replaySource, result *repla
 		ResponseTimeMs:        result.Replay.ResponseTimeMs,
 	}
 	return repo.UpdateRecordResponse(ctx, src.RecordUUID, update)
+}
+
+func saveReplayResultToBurp(
+	ctx context.Context,
+	client *burpbridge.Client,
+	src *replaySource,
+	result *replay.Result,
+) error {
+	if client == nil {
+		return fmt.Errorf("Burp bridge client is not configured")
+	}
+	if result == nil || len(result.RawMutatedRequest) == 0 {
+		return fmt.Errorf("replay did not return the complete sent request")
+	}
+	var rawResponse []byte
+	if result.Replay != nil && result.Replay.Status > 0 && result.Replay.Error == "" {
+		rawResponse = rawReplayResponse(result.Replay)
+	}
+	return client.AddToSiteMap(
+		ctx,
+		replaySourceURL(src),
+		result.RawMutatedRequest,
+		rawResponse,
+		"vigolium-replay",
+	)
+}
+
+func replaySourceURL(src *replaySource) string {
+	scheme := src.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	host := src.Hostname
+	if src.Port > 0 {
+		host = net.JoinHostPort(src.Hostname, strconv.Itoa(src.Port))
+	}
+	return (&url.URL{Scheme: scheme, Host: host}).String()
+}
+
+func rawReplayResponse(summary *replay.Summary) []byte {
+	if summary == nil || summary.Status <= 0 {
+		return nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", summary.Status, http.StatusText(summary.Status))
+	for k, values := range summary.Headers {
+		for _, value := range values {
+			fmt.Fprintf(&b, "%s: %s\r\n", k, value)
+		}
+	}
+	b.WriteString("\r\n")
+	return append([]byte(b.String()), summary.RawBody...)
 }
 
 // replayOutput is the JSON shape emitted to stdout / --output. It wraps
@@ -663,6 +749,7 @@ type replayOutput struct {
 	CookiesPreloaded int            `json:"cookies_preloaded,omitempty"`
 	JarPath          string         `json:"jar_path,omitempty"`
 	Result           *replay.Result `json:"result"`
+	SavedToBurp      bool           `json:"saved_to_burp,omitempty"`
 	// Error is set (with Result nil) only in bulk mode when a single record
 	// fails to replay, so one bad record doesn't abort the JSONL stream.
 	Error string `json:"error,omitempty"`
@@ -724,6 +811,9 @@ func emitReplayPretty(out *replayOutput) error {
 	if out.SessionID != "" {
 		fmt.Printf("  session: %s (preloaded %d cookies, jar: %s)\n",
 			out.SessionID, out.CookiesPreloaded, out.JarPath)
+	}
+	if out.SavedToBurp {
+		fmt.Printf("  saved to Burp Target Site map\n")
 	}
 	if out.Result == nil || out.Result.Replay == nil || out.Result.Baseline == nil {
 		return fmt.Errorf("no result")

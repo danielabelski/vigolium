@@ -4,6 +4,11 @@
 
 Returns paginated HTTP request/response records stored in the database. Response and request bodies are excluded from list responses for performance.
 
+When the server is started with `--burp-bridge-url http://127.0.0.1:9009`, this
+same endpoint merges live Burp Proxy history with database records before
+sorting and pagination. Live rows use `source: "burp"`; use `source=burp` to
+select only those rows. No separate public bridge endpoint is required.
+
 **Query parameters:**
 
 | Parameter      | Type   | Default | Description                                  |
@@ -16,7 +21,7 @@ Returns paginated HTTP request/response records stored in the database. Response
 | `status_code`  | string |         | Filter by status code (comma-separated)      |
 | `content_type` | string |         | Filter by response content type              |
 | `search`       | string |         | Search across URL and path                   |
-| `source`       | string |         | Filter by ingestion source (e.g. `ingest-server`, `cli`) |
+| `source`       | string |         | Filter by source (e.g. `burp`, `ingest-server`, `cli`) |
 | `min_risk`     | int    |         | Filter by minimum risk score                 |
 | `remark`       | string |         | Filter by remark                             |
 | `sort`         | string | `created_at` | Sort field: `created_at`, `sent_at`, `method`, `path`, `status_code`, `response_time` |
@@ -80,6 +85,26 @@ curl -s 'http://localhost:9002/api/http-records?domain=*.example.com' | jq .
 ```
 
 > **Note:** The fields `raw_request`, `raw_response`, `request_body`, `response_body`, `request_headers`, and `response_headers` are excluded from list responses for performance. Use `GET /api/http-records/:uuid` to access the full record including headers and bodies. Fields with empty values (e.g. `request_content_type`, `parameters`, `remarks`) are omitted from the JSON response.
+
+For a live row, the detail UUID begins with `burp:` and remains valid while the
+extension listener is running and retains its temporary reference. Live Burp
+records are read-only; they cannot be deleted through the records API.
+
+To turn live rows into ordinary persisted records, run
+`vigolium import --burp-bridge-url http://127.0.0.1:9009`, or add
+`--save-to-vigolium-db` to `vigolium traffic --burp-bridge-url ...`. The traffic
+form honors its active filters, offset, and limit; use `--all` to import every
+matching live record.
+
+The reverse direction uses `--save-to-burp`:
+
+```bash
+vigolium traffic --burp-bridge-url http://127.0.0.1:9009 --save-to-burp
+```
+
+This copies the selected persisted request/response pairs into Burp's Target
+Site map without replaying them. The same filters, offset, limit, and `--all`
+selection behavior apply.
 
 ---
 

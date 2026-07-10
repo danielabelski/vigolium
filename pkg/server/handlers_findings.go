@@ -167,8 +167,9 @@ func (h *findingsHandlers) HandleDeleteFinding(c fiber.Ctx) error {
 		})
 	}
 
-	// Verify the finding exists
-	if _, err := h.repo.GetFindingByID(c.Context(), id); err != nil {
+	// Verify the finding exists and belongs to the request's project
+	existing, err := h.repo.GetFindingByID(c.Context(), id)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
 				Error: ErrFindingNotFound.Error(),
@@ -178,6 +179,12 @@ func (h *findingsHandlers) HandleDeleteFinding(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to retrieve finding: " + err.Error(),
 			Code:  fiber.StatusInternalServerError,
+		})
+	}
+	if !inRequestProject(c, existing.ProjectUUID) {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrFindingNotFound.Error(),
+			Code:  fiber.StatusNotFound,
 		})
 	}
 
@@ -233,6 +240,28 @@ func (h *findingsHandlers) HandleUpdateFindingStatus(c fiber.Ctx) error {
 		})
 	}
 
+	// Scope the mutation to the request's project: load first so an operator
+	// scoped to one engagement can't flip another project's finding via a raw id.
+	existing, err := h.repo.GetFindingByID(c.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+				Error: ErrFindingNotFound.Error(),
+				Code:  fiber.StatusNotFound,
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
+			Error: "failed to retrieve finding: " + err.Error(),
+			Code:  fiber.StatusInternalServerError,
+		})
+	}
+	if !inRequestProject(c, existing.ProjectUUID) {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrFindingNotFound.Error(),
+			Code:  fiber.StatusNotFound,
+		})
+	}
+
 	if err := h.repo.UpdateFindingStatus(c.Context(), id, status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
@@ -285,6 +314,12 @@ func (h *findingsHandlers) HandleGetFinding(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to retrieve finding: " + err.Error(),
 			Code:  fiber.StatusInternalServerError,
+		})
+	}
+	if !inRequestProject(c, finding.ProjectUUID) {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrFindingNotFound.Error(),
+			Code:  fiber.StatusNotFound,
 		})
 	}
 

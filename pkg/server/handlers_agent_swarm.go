@@ -328,7 +328,11 @@ func (h *Handlers) buildSwarmConfig(req AgentSwarmRequest, projectUUID string) a
 		profilePath := settings.ScanningStrategy.ResolveProfilePath(req.Profile)
 		profile, profileErr := config.LoadProfile(profilePath)
 		if profileErr == nil {
+			// Snapshot under the config-watcher read lock so a live hot-reload
+			// swapping settings sections can't tear this value copy of h.settings.
+			h.configWatcher.RLock()
 			settingsCopy := *settings
+			h.configWatcher.RUnlock()
 			if applyErr := config.ApplyProfile(&settingsCopy, profile); applyErr == nil {
 				settings = &settingsCopy
 			}
@@ -480,8 +484,12 @@ func (h *Handlers) buildServerAgentSwarmFunc(targetURL, projectUUID, scanUUID, o
 			}
 		}
 
-		// Clone settings to apply extension dir without mutating global
+		// Clone settings to apply extension dir without mutating global.
+		// Snapshot under the config-watcher read lock so a concurrent hot-reload
+		// swapping settings sections can't tear this value copy.
+		h.configWatcher.RLock()
 		settingsCopy := *settings
+		h.configWatcher.RUnlock()
 		if req.ExtensionDir != "" {
 			settingsCopy.DynamicAssessment.Extensions.Enabled = true
 			settingsCopy.DynamicAssessment.Extensions.ExtensionDir = req.ExtensionDir

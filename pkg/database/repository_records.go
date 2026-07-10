@@ -48,6 +48,66 @@ func (r *Repository) SaveRecord(ctx context.Context, httpRR *httpmsg.HttpRequest
 	return record.UUID, nil
 }
 
+// UpsertSnapshotRecord stores a Burp snapshot record idempotently. When an
+// existing request later gains a response, or its response changes, the
+// response-derived columns are refreshed in place while the stable UUID and
+// finding links are preserved. outcome is inserted, updated, or unchanged.
+func (r *Repository) UpsertSnapshotRecord(ctx context.Context, httpRR *httpmsg.HttpRequestResponse, source string, projectUUID string) (uuid, outcome string, err error) {
+	if httpRR == nil || httpRR.Request() == nil {
+		return "", "", fmt.Errorf("invalid HttpRequestResponse")
+	}
+	record := &HTTPRecord{}
+	if err := record.FromHttpRequestResponse(httpRR); err != nil {
+		return "", "", fmt.Errorf("failed to convert request: %w", err)
+	}
+	record.Source = source
+	record.ProjectUUID = defaultProjectUUID(projectUUID)
+
+	existingUUID, lookupErr := r.findDuplicateRecord(ctx, record)
+	if lookupErr != nil {
+		return "", "", lookupErr
+	}
+	if existingUUID == "" {
+		if _, err := r.db.NewInsert().Model(record).Exec(ctx); err != nil {
+			return "", "", fmt.Errorf("failed to insert snapshot record: %w", err)
+		}
+		r.emitRecordSaved(record)
+		return record.UUID, "inserted", nil
+	}
+	if !record.HasResponse {
+		return existingUUID, "unchanged", nil
+	}
+
+	existing, err := r.GetRecordByUUID(ctx, existingUUID)
+	if err != nil {
+		return "", "", err
+	}
+	if existing.HasResponse && existing.ResponseHash == record.ResponseHash {
+		return existingUUID, "unchanged", nil
+	}
+	_, err = r.db.NewUpdate().
+		Model((*HTTPRecord)(nil)).
+		Set("status_code = ?", record.StatusCode).
+		Set("status_phrase = ?", record.StatusPhrase).
+		Set("response_http_version = ?", record.ResponseHTTPVersion).
+		Set("response_content_type = ?", record.ResponseContentType).
+		Set("response_content_length = ?", record.ResponseContentLength).
+		Set("raw_response = ?", record.RawResponse).
+		Set("response_hash = ?", record.ResponseHash).
+		Set("response_norm_hash = ?", record.ResponseNormHash).
+		Set("response_words = ?", record.ResponseWords).
+		Set("response_title = ?", record.ResponseTitle).
+		Set("content_hash = ?", record.ContentHash).
+		Set("has_response = ?", true).
+		Set("received_at = ?", time.Now()).
+		Where("uuid = ?", existingUUID).
+		Exec(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to refresh snapshot response: %w", err)
+	}
+	return existingUUID, "updated", nil
+}
+
 // findDuplicateRecord checks whether a record with the same method, hostname,
 // path, and URL already exists. For requests with a body, the request_hash is
 // also compared to distinguish different payloads to the same endpoint. It is a

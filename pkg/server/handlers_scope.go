@@ -57,7 +57,7 @@ func (h *Handlers) HandleUpdateScope(c fiber.Ctx) error {
 	}
 
 	// Persist to disk
-	if err := config.SaveSettings(config.ConfigFilePath(), h.settings); err != nil {
+	if err := config.SaveSettings(h.effectiveConfigPath(), h.settings); err != nil {
 		zap.L().Error("Failed to save scope config", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error:   "failed to save config",

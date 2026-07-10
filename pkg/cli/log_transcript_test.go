@@ -34,7 +34,7 @@ func TestRenderTranscript(t *testing.T) {
 		"I should fetch the homepage first.", // compacted (blank lines dropped)
 		"Fetching the homepage to map the attack surface.",
 		"▶ web_fetch",
-		"method=GET",      // args rendered, keys sorted (method before url)
+		"method=GET", // args rendered, keys sorted (method before url)
 		"url=https://ginandjuice.shop/",
 		"✓ web_fetch",
 		"bytes",

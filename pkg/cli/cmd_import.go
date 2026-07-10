@@ -14,6 +14,7 @@ import (
 
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/agent"
+	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/dbimport"
 	"github.com/vigolium/vigolium/pkg/output"
@@ -21,12 +22,15 @@ import (
 	"github.com/vigolium/vigolium/pkg/terminal"
 )
 
+var importBurpBridgeURL string
+
 var importCmd = &cobra.Command{
-	Use:   "import <path|gs://...> [more-paths...]",
-	Short: "Import scan data from an audit folder, JSONL, archive, or another vigolium SQLite database",
+	Use:   "import [path|gs://...] [more-paths...]",
+	Short: "Import scan data, databases, or live Burp Proxy history",
 	Long: `Import scan data into the database from various sources.
 
 Supported inputs:
+  - Live Burp Proxy history through --burp-bridge-url (no path argument)
   - Audit output folder: contains audit-state.json and findings-draft/
   - JSONL file: exported data with {"type": "...", "data": {...}} envelopes
     Supports http_record and finding types (e.g. from 'vigolium export --format jsonl')
@@ -49,6 +53,11 @@ Sources are imported sequentially into the same destination DB and their results
 aggregated into one summary; because SQLite merges and finding imports dedup on
 natural keys, re-runs and overlapping inputs are safe.
 
+The Burp bridge is an alternative source and cannot be combined with a path or
+--glob-db in the same invocation. It imports all Proxy-history records visible
+through the extension's Bridge settings. Re-importing is idempotent: changed
+responses are refreshed and unchanged requests are not duplicated.
+
 Use --upload to push the local source to cloud storage after a successful import,
 or --upload-key=<key> to choose an explicit storage key (folders are bundled to
 tar.gz unless the key ends in .zip).
@@ -68,6 +77,11 @@ mirror 'vigolium export', so a single import step can emit a fully-branded repor
 }
 
 func init() {
+	importCmd.Flags().StringVar(
+		&importBurpBridgeURL,
+		"burp-bridge-url",
+		burpbridge.URLFromEnvironment(),
+		"Import live Burp Proxy history from this loopback bridge URL into the database")
 	importCmd.Flags().Bool("upload", false, "Upload the local import source to cloud storage after import")
 	importCmd.Flags().String("upload-key", "", "Explicit storage key for --upload (default: imports/<basename>-<ts>.<ext>)")
 	importCmd.Flags().StringVar(&globalGlobDB, "glob-db", "", "Glob of local files to import alongside any positional paths (use one format per run), e.g. --glob-db 'prefix-*.sqlite' or '*.jsonl'")
@@ -108,14 +122,32 @@ func runImport(cmd *cobra.Command, args []string) error {
 		upload = true
 	}
 	globDB := globalGlobDB
+	bridgeURL := strings.TrimSpace(importBurpBridgeURL)
+	if bridgeURL != "" {
+		validated, err := burpbridge.ValidateURL(bridgeURL)
+		if err != nil {
+			return fmt.Errorf("--burp-bridge-url: %w", err)
+		}
+		bridgeURL = validated
+	}
+	if bridgeURL != "" && (len(args) > 0 || globDB != "") {
+		return fmt.Errorf("--burp-bridge-url is an import source and cannot be combined with path arguments or --glob-db")
+	}
+	if bridgeURL != "" && upload {
+		return fmt.Errorf("--upload and --upload-key are not applicable to a live Burp bridge import")
+	}
 
 	// Gather every import source: positional paths plus any local files matched
 	// by --glob-db. Positional args are gcs://→gs:// normalized and deduped
 	// here so the destination DB, HasPrefix checks and StorageURL stay
 	// consistent regardless of ordering.
-	sources, err := gatherImportSources(args, globDB)
-	if err != nil {
-		return err
+	var sources []string
+	var err error
+	if bridgeURL == "" {
+		sources, err = gatherImportSources(args, globDB)
+		if err != nil {
+			return err
+		}
 	}
 	multi := len(sources) > 1
 	if multi {
@@ -136,6 +168,9 @@ func runImport(cmd *cobra.Command, args []string) error {
 	reportFormat, _ := cmd.Flags().GetString("format")
 	reportOutput, _ := cmd.Flags().GetString("output")
 	if reportFormat != "" {
+		if bridgeURL != "" {
+			return fmt.Errorf("--format is not applicable to a traffic-only Burp bridge import")
+		}
 		if _, _, ok := reportGenerator(reportFormat); !ok {
 			return fmt.Errorf("--format %q is not a report format; use html, report, pdf, or markdown", reportFormat)
 		}
@@ -164,6 +199,21 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	repo := database.NewRepository(db)
+	if bridgeURL != "" {
+		if !globalJSON {
+			fmt.Fprint(os.Stderr, GetBanner())
+			fmt.Fprintf(os.Stderr, "%s %s\n", terminal.InfoSymbol(),
+				terminal.BoldCyan(fmt.Sprintf("Importing live Burp traffic from %s ...", bridgeURL)))
+		}
+		result, err := importBurpTrafficToDB(ctx, repo, bridgeURL, burpbridge.Query{
+			Location: "proxy_history",
+		}, projectUUID)
+		if err != nil {
+			return fmt.Errorf("import Burp traffic: %w", err)
+		}
+		writeBurpImportResult(os.Stdout, bridgeURL, result, globalJSON)
+		return nil
+	}
 
 	// One label for both the banner and the summary: the single source path, or
 	// "N sources" when there are several.

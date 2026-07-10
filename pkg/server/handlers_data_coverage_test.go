@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -287,6 +288,70 @@ func TestHandleListRecords(t *testing.T) {
 			t.Errorf("status = %d, want 200", status)
 		}
 	})
+}
+
+func TestHandleListRecordsMergesBurpBridgeTraffic(t *testing.T) {
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/burp-bridge/search":
+			_, _ = w.Write([]byte(`{"total":1,"records":[{"ref":"live-1","method":"POST","url":"https://burp.test/live","status":201,"mime_type":"JSON"}]}`))
+		case "/api/burp-bridge/inspect":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"url": "https://burp.test/live",
+				"request_base64": base64.StdEncoding.EncodeToString(
+					[]byte("POST /live HTTP/1.1\r\nHost: burp.test\r\nContent-Length: 0\r\n\r\n")),
+				"response_base64": base64.StdEncoding.EncodeToString(
+					[]byte("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{}")),
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer bridge.Close()
+
+	db, repo := newPinnedTestDB(t)
+	insertRecord(t, db, database.DefaultProjectUUID)
+	h := newBasicHandlers(t, ServerConfig{BurpBridgeURL: bridge.URL}, &fakeQueue{}, db, repo, nil)
+	app := fiber.New()
+	app.Get("/api/http-records", h.HandleListRecords)
+	app.Get("/api/http-records/:uuid", h.HandleGetRecord)
+
+	status, body := doGet(t, app, "/api/http-records?limit=10", nil)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var list struct {
+		Data  []database.HTTPRecord `json:"data"`
+		Total int64                 `json:"total"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.Total != 2 || len(list.Data) != 2 {
+		t.Fatalf("list = %+v", list)
+	}
+	var live *database.HTTPRecord
+	for i := range list.Data {
+		if list.Data[i].Source == "burp" {
+			live = &list.Data[i]
+		}
+	}
+	if live == nil {
+		t.Fatalf("Burp source missing: %+v", list.Data)
+	}
+
+	status, body = doGet(t, app, "/api/http-records/"+live.UUID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", status, body)
+	}
+	var detail database.HTTPRecord
+	if err := json.Unmarshal(body, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Source != "burp" || len(detail.RawRequest) == 0 {
+		t.Fatalf("detail = %+v", detail)
+	}
 }
 
 func TestHandleGetRecord(t *testing.T) {

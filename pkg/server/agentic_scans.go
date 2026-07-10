@@ -270,6 +270,7 @@ func (h *Handlers) startAgenticScan(c fiber.Ctx, mode string, stream bool, opts 
 	}
 
 	opts.AgentName = h.effectiveAgentName(opts.AgentName)
+	opts.ProjectUUID = projectUUID
 	agenticScanUUID, err := h.registerRunningAgenticScan(mode, opts.AgentName, opts.ScanUUID)
 	if err != nil {
 		if byokCleanup != nil {

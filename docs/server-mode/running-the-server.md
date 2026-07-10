@@ -25,6 +25,61 @@ vigolium server -A
 
 The server listens on `0.0.0.0:9002` by default.
 
+## Live Burp Traffic
+
+When the Vigolium Burp extension's Bridge listener is enabled, the server can
+include live Burp Proxy history in the ordinary HTTP-records API:
+
+```bash
+vigolium server --burp-bridge-url http://127.0.0.1:9009
+```
+
+`GET /api/http-records` then returns one globally sorted and paginated result
+containing both persisted database records and current Burp traffic. Live rows
+have `"source": "burp"` and temporary UUIDs beginning with `burp:`; the normal
+detail route, `GET /api/http-records/:uuid`, also resolves those live UUIDs.
+Existing filters such as `domain`, `method`, `path`, `status_code`, `search`,
+sorting, and `source=burp` apply without a separate bridge API workflow.
+
+The bridge is optional. If Burp is closed or its listener is unavailable, the
+server continues returning database records and sets
+`X-Vigolium-Burp-Bridge: unavailable` on the response. The URL must be an
+HTTP loopback address with an explicit port. It can also be supplied through
+`VIGOLIUM_BURP_BRIDGE_URL`.
+
+The server flag is a live, read-only view. To persist Proxy history into the
+database, use either import workflow:
+
+```bash
+# Import all traffic visible through the Bridge listener
+vigolium import --burp-bridge-url http://127.0.0.1:9009
+
+# Import only the traffic page selected by filters; add --all for all matches
+vigolium traffic --burp-bridge-url http://127.0.0.1:9009 \
+  --host example.com --save-to-vigolium-db
+```
+
+Imports are idempotent: new requests are inserted, changed responses refresh
+their existing record, and unchanged requests are left alone. Persisted rows
+retain `source=burp` and remain available after Burp or the bridge stops.
+
+The bridge also supports the reverse direction into Burp's Target Site map:
+
+```bash
+# Copy the selected database page into Burp without replaying the requests
+vigolium traffic --burp-bridge-url http://127.0.0.1:9009 \
+  --host example.com --save-to-burp
+
+# Replay a request, then save the mutated request and fresh response to Burp
+vigolium replay --record-uuid <uuid> --save-to-burp \
+  --burp-bridge-url http://127.0.0.1:9009
+```
+
+`traffic --save-to-burp` reads only persisted database records and honors its
+active filters, offset, and limit; add `--all` for every match. It calls
+Montoya's Site map insertion API and does not issue target network requests.
+Individual requests or responses larger than 8 MiB are skipped and reported.
+
 ## Authentication
 
 All API requests (except `/health`) require a Bearer token:

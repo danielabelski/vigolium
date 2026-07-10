@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/vigolium/vigolium/internal/config"
+	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/olium"
 )
 
@@ -91,4 +92,21 @@ func TestRunWithSkillsUsesSkillSession(t *testing.T) {
 	_, err = e2.RunWithSkills(context.Background(), Options{PromptInline: "triage"}, nil)
 	require.NoError(t, err)
 	require.Equal(t, int32(1), fake2.runPromptCalls.Load(), "nil registry must fall back to RunPrompt")
+}
+
+func TestRunWithBurpBridgeUsesReadOnlyBridgeSession(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRuntime{output: "ok"}
+	e := &Engine{runtime: fake, repo: &database.Repository{}}
+
+	_, err := e.Run(context.Background(), Options{
+		PromptInline:          "search Burp",
+		ProjectUUID:           "project-1",
+		EnableBurpBridgeTools: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), fake.runPromptCalls.Load())
+	require.Equal(t, int32(1), fake.runOnSessionCalls.Load())
+	require.Nil(t, fake.lastSpec.VigTools, "bridge-only queries must not gain replay tools")
+	require.Equal(t, "project-1", fake.lastSpec.BurpBridgeTools.ProjectUUID)
 }

@@ -134,11 +134,18 @@ function verifyReleaseVersion(expected) {
     if (m) built.add(m[1]);
   }
   if (built.size === 0) {
-    console.warn(
-      `\x1b[33m[warn] no goreleaser archives in ${DIST_DIR} — cannot verify the ` +
-        `built version against ${expected}; ensure \`make snapshot\` produced this dist.\x1b[0m`,
+    // Fail closed: build/dist exists (checked above) but holds no goreleaser
+    // archives to verify against. Warning-and-continuing here is exactly the
+    // fail-open that lets stale unpacked binaries be repackaged under a new
+    // version — the v0.2.3 mis-publish this guard exists to stop. If archives
+    // are genuinely absent, `make snapshot` must be re-run before packing.
+    fail(
+      `cannot verify the built version against ${expected}: no goreleaser ` +
+        `archives (vigolium_<version>_<os>_<arch>.tar.gz) in ${DIST_DIR}. The ` +
+        `unpacked binaries there are unverifiable and may be STALE — packaging ` +
+        `them risks shipping a binary that reports the wrong version. Run ` +
+        `\`make snapshot\` to rebuild for ${expected} before packing.`,
     );
-    return;
   }
   if (built.size !== 1 || !built.has(expected)) {
     fail(

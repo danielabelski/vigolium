@@ -182,9 +182,9 @@ func (e *Engine) runOnSession(ctx context.Context, opts Options, sess AgentSessi
 			// Session-reuse path: the recorder (if any) is attached to the
 			// session's engine and flushed by the caller's sess.Close().
 			out, runErr = e.rt().RunOnSession(ctx, oliumCfg, sess, runPrompt, opts.StreamWriter, thinkingSink.writer(), opts.Verbose)
-		case skills != nil && skills.Len() > 0:
-			// Fresh-per-call path WITH skills: build a per-call session carrying
-			// the <available_skills> block + load_skill tool, run on it, then
+		case (skills != nil && skills.Len() > 0) || opts.EnableBurpBridgeTools:
+			// Fresh-per-call path with skills and/or the live Burp bridge: build a
+			// per-call session carrying the requested tools, run on it, then
 			// flush its transcript via Close (the recorder buffers the final
 			// turn until close). A build failure surfaces as a retryable error.
 			rec := RecordSpec{SessionDir: opts.SessionDir, Template: opts.PromptTemplate}
@@ -192,15 +192,20 @@ func (e *Engine) runOnSession(ctx context.Context, opts Options, sess AgentSessi
 			// read+replay tool subset so its skills can actually confirm against
 			// scan records (not just reason over prompt context).
 			var vigTools *VigToolSpec
-			if e.repo != nil {
+			if e.repo != nil && skills != nil && skills.Len() > 0 {
 				vigTools = &VigToolSpec{Repo: e.repo, ProjectUUID: opts.ProjectUUID}
 			}
+			var burpBridgeTools *BurpBridgeToolSpec
+			if opts.EnableBurpBridgeTools || (skills != nil && skills.Len() > 0) {
+				burpBridgeTools = &BurpBridgeToolSpec{ProjectUUID: opts.ProjectUUID}
+			}
 			skillSess, sErr := e.rt().NewSessionWithSpec(oliumCfg, SessionSpec{
-				SourcePath:   opts.SourcePath,
-				IncludeTools: true,
-				Skills:       skills,
-				VigTools:     vigTools,
-				Record:       rec,
+				SourcePath:      opts.SourcePath,
+				IncludeTools:    true,
+				Skills:          skills,
+				VigTools:        vigTools,
+				BurpBridgeTools: burpBridgeTools,
+				Record:          rec,
 			})
 			if sErr != nil {
 				return oliumRunOutput{}, sErr

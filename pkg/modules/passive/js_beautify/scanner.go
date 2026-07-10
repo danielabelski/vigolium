@@ -26,7 +26,13 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/utils"
+	"go.uber.org/zap"
 )
+
+// beautifyErrWarnOnce ensures a persistent jsscan failure (e.g. an embedded
+// binary that predates the --beautify interface) is surfaced once per process
+// rather than silently swallowed into a no-op on every JS response.
+var beautifyErrWarnOnce sync.Once
 
 // Module implements the passive JavaScript beautifier.
 type Module struct {
@@ -281,7 +287,19 @@ func (m *Module) ScanPerRequestContext(ctx context.Context, item *httpmsg.HttpRe
 	}
 	res, scanErr := scanner.ScanWithOptions(ctx, scanBytes, jsscan.ScanOptions{Beautify: true})
 	<-beautifySem
-	if scanErr != nil || res == nil || !res.HasBeautified() {
+	if scanErr != nil {
+		// Don't fail the scan on a beautify error, but surface it once: a stale
+		// jsscan binary (unknown option '--beautify') otherwise disappears as a
+		// silent no-op across every JS response.
+		if ctx.Err() == nil {
+			beautifyErrWarnOnce.Do(func() {
+				zap.L().Warn("js_beautify: jsscan beautify failed; JS beautification disabled for this run — verify the embedded jsscan binary supports --beautify",
+					zap.Error(scanErr))
+			})
+		}
+		return nil, nil
+	}
+	if res == nil || !res.HasBeautified() {
 		return nil, nil
 	}
 	b := res.Beautified

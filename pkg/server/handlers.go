@@ -302,6 +302,18 @@ func (h *Handlers) HandleServerInfo(c fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
+// effectiveConfigPath returns the config file the server actually loaded
+// settings from, honoring the --config flag (ServerConfig.ConfigPath). Config
+// mutations from the API must write here — and the watcher watches this same
+// file — so a custom config isn't silently shadowed by writes to the default
+// ~/.vigolium/vigolium-configs.yaml. Empty falls back to the default path.
+func (h *Handlers) effectiveConfigPath() string {
+	if h.config.ConfigPath != "" {
+		return h.config.ConfigPath
+	}
+	return config.ConfigFilePath()
+}
+
 // getScopeMatcher returns the cached ScopeMatcher, creating it lazily on first call.
 func (h *Handlers) getScopeMatcher() *config.ScopeMatcher {
 	h.scopeMatcherMu.RLock()
@@ -318,9 +330,23 @@ func (h *Handlers) getScopeMatcher() *config.ScopeMatcher {
 		return h.scopeMatcher
 	}
 	if h.settings != nil {
-		h.scopeMatcher = config.NewScopeMatcher(h.settings.Scope)
+		// Read the Scope section under the config-watcher read lock so a live
+		// hot-reload swapping settings.Scope in place can't tear the slice/map
+		// headers we copy into the matcher here.
+		h.scopeMatcher = config.NewScopeMatcher(h.readReloadableScope())
 	}
 	return h.scopeMatcher
+}
+
+// readReloadableScope returns a copy of the Scope section taken under the config
+// watcher's reload read lock (a no-op when no watcher is active), coordinating
+// with reload()'s in-place section swaps to avoid a torn read.
+func (h *Handlers) readReloadableScope() config.ScopeConfig {
+	if h.configWatcher != nil {
+		h.configWatcher.RLock()
+		defer h.configWatcher.RUnlock()
+	}
+	return h.settings.Scope
 }
 
 // resetScopeMatcher invalidates the cached ScopeMatcher so it is rebuilt on next use.

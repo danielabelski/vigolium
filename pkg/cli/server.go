@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/internal/runner"
+	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/core/network"
 	hostlimit "github.com/vigolium/vigolium/pkg/core/ratelimit"
@@ -40,6 +41,7 @@ type serverOptions struct {
 	// Server
 	Host            string
 	ServicePort     int
+	BurpBridgeURL   string
 	IngestProxyPort int
 	APIKeys         []string
 	NoAuth          bool
@@ -96,6 +98,7 @@ var serverCmd = &cobra.Command{
 Common modes:
   • Default: full API, requires the auto-generated key from config (see config ls server.api_key)
   • --view-only: read-only — no scan, ingest, or agent endpoints
+  • --burp-bridge-url: merge live Burp Proxy history into the normal HTTP records API
   • --scan-on-receive: continuously scan ingested traffic as it arrives
   • --ingest-proxy-port: enable a transparent HTTP ingest proxy on a separate port
   • -A: disable auth (local development only)`,
@@ -112,6 +115,11 @@ func init() {
 	// Server group
 	flags.StringVar(&serverOpts.Host, "host", "0.0.0.0", "Bind address for the API server")
 	flags.IntVar(&serverOpts.ServicePort, "service-port", 9002, "Port for the REST API server")
+	flags.StringVar(
+		&serverOpts.BurpBridgeURL,
+		"burp-bridge-url",
+		burpbridge.URLFromEnvironment(),
+		"Merge live Burp traffic from this loopback bridge URL into /api/http-records")
 	flags.IntVar(&serverOpts.IngestProxyPort, "ingest-proxy-port", 0, "Transparent HTTP proxy port for recording traffic (0 = disabled)")
 	flags.BoolVar(&serverOpts.ProxyMITM, "proxy-mitm", false,
 		"Intercept HTTPS through --ingest-proxy-port using a generated CA so TLS traffic is recorded (and scanned with -S). Trust the CA printed at startup")
@@ -282,6 +290,13 @@ func printServerEndpoints(serviceAddr string, showAPIKeyHint bool) {
 
 func runServerCmd(cmd *cobra.Command, args []string) error {
 	defer syncLogger()
+	if serverOpts.BurpBridgeURL != "" {
+		validated, err := burpbridge.ValidateURL(serverOpts.BurpBridgeURL)
+		if err != nil {
+			return fmt.Errorf("--burp-bridge-url: %w", err)
+		}
+		serverOpts.BurpBridgeURL = validated
+	}
 
 	// --export-ca: generate (if needed) and write the MITM CA cert, then exit.
 	if serverOpts.ExportCA != "" {
@@ -450,6 +465,7 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 	// Create API server
 	apiServer := server.NewServer(server.ServerConfig{
 		ServiceAddr:          serviceAddr,
+		BurpBridgeURL:        serverOpts.BurpBridgeURL,
 		IngestProxyAddr:      ingestProxyAddr,
 		IngestProxyMITM:      serverOpts.ProxyMITM,
 		IngestProxyInsecure:  serverOpts.ProxyInsecure,
@@ -653,6 +669,11 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 		} else if serverOpts.ProxyMITM {
 			fmt.Printf("  %s %s --proxy-mitm has no effect without --ingest-proxy-port\n",
 				terminal.WarningSymbol(), terminal.Yellow("warning:"))
+		}
+		if serverOpts.BurpBridgeURL != "" {
+			fmt.Printf("  %s Burp traffic source %s\n",
+				terminal.InfoSymbol(),
+				terminal.Cyan(serverOpts.BurpBridgeURL))
 		}
 		if globalScanOnReceive && !serverOpts.DisableCatchup {
 			fmt.Printf("  %s Scan workers %s  %s Catchup workers %s\n",

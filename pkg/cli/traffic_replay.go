@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
@@ -35,8 +36,7 @@ func runTrafficReplayFlow(ctx context.Context, db *database.DB, fuzzyTerm string
 		return err
 	}
 
-	qb := database.NewQueryBuilder(db, filters)
-	records, err := qb.Execute(ctx)
+	records, _, err := queryTrafficRecords(ctx, db, filters, true)
 	if err != nil {
 		return fmt.Errorf("failed to query database: %w", err)
 	}
@@ -169,6 +169,10 @@ func replayRecord(ctx context.Context, w io.Writer, client *http.Client, repo *d
 
 	// --in-replace: update stored response
 	if replayInReplace {
+		if burpbridge.IsBridgeUUID(rec.UUID) {
+			_, _ = fmt.Fprintf(w, "  %s Live Burp records are read-only; response not written to the database\n", terminal.WarnPrefix())
+			return nil
+		}
 		rawResp := buildRawResponseHeaders(resp)
 		rawResp = append(rawResp, body...)
 

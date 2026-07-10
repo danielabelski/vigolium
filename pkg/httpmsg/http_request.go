@@ -211,8 +211,12 @@ func (r *HttpRequest) Parameters() ([]*Param, error) {
 func (r *HttpRequest) ID() string {
 	r.mu.RLock()
 	if r.cachedID != "" {
+		// Copy the value before unlocking: a concurrent writer (a racing
+		// first-caller still committing its identical id) may reassign the
+		// string, and returning r.cachedID after RUnlock reads it unsynchronized.
+		v := r.cachedID
 		r.mu.RUnlock()
-		return r.cachedID
+		return v
 	}
 	r.mu.RUnlock()
 

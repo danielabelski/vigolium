@@ -111,3 +111,8 @@ build/dist-license/
 build/dist-public/
 build/dist-npm/
 build/public-install.sh
+
+# Archon audit SAST working artifacts
+/archon/codeql-artifacts/
+/archon/codeql-queries/
+/archon/semgrep-res/

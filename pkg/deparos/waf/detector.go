@@ -54,6 +54,14 @@ type BodyCheck struct {
 	// Pattern checks if body matches this regex.
 	Pattern *regexp.Regexp
 
+	// Weak marks a generic phrase that also appears in ordinary (non-WAF)
+	// application responses (e.g. Azure's bare "The request is blocked"). A weak
+	// match alone never brands a response as this WAF: it only contributes once a
+	// strong signal — a vendor-specific header or a non-weak body signal — also
+	// matches. This keeps a plain application 403 from being misattributed to a
+	// vendor and tripping the discovery block circuit breaker.
+	Weak bool
+
 	// containsLower is the lowercased byte form of Contains, precomputed once at
 	// rule-build time (see normalizeBodyChecks) so matchBody compares against the
 	// once-lowercased body without re-lowering/allocating the needle per call.
@@ -133,26 +141,40 @@ func (d *detector) matchRule(rule Rule, header http.Header, body, lowerBody []by
 
 	var indicators []string
 
-	// Check headers first (faster)
-	headerMatched := false
+	// A strong signal is a vendor-specific header or a non-weak body match — the
+	// kind of signal that on its own reliably attributes a response to this WAF.
+	strongMatched := false
+
+	// Check headers first (faster). Header matches are always strong.
 	for _, check := range rule.HeaderChecks {
 		if indicator := matchHeader(header, check); indicator != "" {
 			indicators = append(indicators, indicator)
-			headerMatched = true
+			strongMatched = true
 		}
 	}
 
-	// Check body patterns
-	bodyMatched := false
+	// Check body patterns. Weak body matches (generic phrases shared with plain
+	// application responses) are held aside and only counted once a strong signal
+	// corroborates them, so e.g. Azure's bare "The request is blocked" can't alone
+	// brand an ordinary 403 as WAF traffic.
+	var weakIndicators []string
 	for _, check := range rule.BodyChecks {
-		if indicator := matchBody(body, lowerBody, check); indicator != "" {
+		indicator := matchBody(body, lowerBody, check)
+		if indicator == "" {
+			continue
+		}
+		if check.Weak {
+			weakIndicators = append(weakIndicators, indicator)
+		} else {
 			indicators = append(indicators, indicator)
-			bodyMatched = true
+			strongMatched = true
 		}
 	}
 
-	// Rule matches if we have any indicators
-	if headerMatched || bodyMatched {
+	// Rule matches only on a strong signal. Weak indicators ride along for
+	// diagnostics once corroborated, but never trigger a match by themselves.
+	if strongMatched {
+		indicators = append(indicators, weakIndicators...)
 		return &BlockResult{
 			IsBlocked:  true,
 			WAFType:    rule.Name,
@@ -456,7 +478,10 @@ func azureRule() Rule {
 		},
 		BodyChecks: []BodyCheck{
 			{Contains: "Microsoft-Azure-Application-Gateway"},
-			{Contains: "The request is blocked"},
+			// Generic phrase: Front Door/App Gateway emit it, but so do plain apps.
+			// Only counts alongside a strong Azure signal (e.g. the X-Azure-Ref
+			// header or the App Gateway product string above).
+			{Contains: "The request is blocked", Weak: true},
 		},
 	}
 }

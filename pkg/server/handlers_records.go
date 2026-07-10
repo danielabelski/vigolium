@@ -7,7 +7,9 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/database"
+	"go.uber.org/zap"
 )
 
 // HandleListRecords handles GET /api/http-records
@@ -116,7 +118,13 @@ func (h *Handlers) HandleListRecords(c fiber.Ctx) error {
 		}
 	}
 
-	qb := database.NewQueryBuilder(h.db, filters)
+	bridgeEnabled := h.config.BurpBridgeURL != "" && burpbridge.Eligible(filters)
+	fetchFilters := filters
+	if bridgeEnabled {
+		fetchFilters.Offset = 0
+		fetchFilters.Limit = filters.Offset + filters.Limit
+	}
+	qb := database.NewQueryBuilder(h.db, fetchFilters)
 
 	// Excluding raw_* keeps the list payload small. HTTPRecord.MarshalJSON
 	// derives request_body/response_body/request_headers/response_headers from
@@ -136,6 +144,29 @@ func (h *Handlers) HandleListRecords(c fiber.Ctx) error {
 	}
 
 	total, _ := qb.Count(ctx)
+	if bridgeEnabled {
+		client, clientErr := burpbridge.New(h.config.BurpBridgeURL)
+		var live burpbridge.Result
+		if clientErr == nil {
+			live, clientErr = client.Query(ctx, burpbridge.QueryFromFilters(fetchFilters, false))
+		}
+		if clientErr != nil {
+			c.Set("X-Vigolium-Burp-Bridge", "unavailable")
+			zap.L().Warn("Burp bridge traffic unavailable; returning database records only", zap.Error(clientErr))
+		} else {
+			c.Set("X-Vigolium-Burp-Bridge", "connected")
+		}
+		records, total = burpbridge.MergePage(
+			records,
+			live.Records,
+			total,
+			live.Total,
+			filters.Offset,
+			filters.Limit,
+			filters.SortBy,
+			filters.SortAsc,
+		)
+	}
 
 	return c.JSON(PaginatedResponse{
 		ProjectUUID: projectUUID,
@@ -143,7 +174,7 @@ func (h *Handlers) HandleListRecords(c fiber.Ctx) error {
 		Total:       total,
 		Limit:       filters.Limit,
 		Offset:      filters.Offset,
-		HasMore:     int64(filters.Offset+filters.Limit) < total,
+		HasMore:     int64(filters.Offset+len(records)) < total,
 	})
 }
 
@@ -164,8 +195,9 @@ func (h *Handlers) HandleDeleteRecord(c fiber.Ctx) error {
 		})
 	}
 
-	// Verify the record exists
-	if _, err := h.repo.GetRecordByUUID(c.Context(), uuid); err != nil {
+	// Verify the record exists and belongs to the request's project
+	rec, err := h.repo.GetRecordByUUID(c.Context(), uuid)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
 				Error: ErrRecordNotFound.Error(),
@@ -175,6 +207,12 @@ func (h *Handlers) HandleDeleteRecord(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to retrieve record: " + err.Error(),
 			Code:  fiber.StatusInternalServerError,
+		})
+	}
+	if !inRequestProject(c, rec.ProjectUUID) {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrRecordNotFound.Error(),
+			Code:  fiber.StatusNotFound,
 		})
 	}
 
@@ -207,6 +245,20 @@ func (h *Handlers) HandleGetRecord(c fiber.Ctx) error {
 			Code:  fiber.StatusBadRequest,
 		})
 	}
+	if burpbridge.IsBridgeUUID(uuid) {
+		if h.config.BurpBridgeURL == "" {
+			return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{Error: ErrRecordNotFound.Error()})
+		}
+		client, err := burpbridge.New(h.config.BurpBridgeURL)
+		if err != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(ErrorResponse{Error: err.Error()})
+		}
+		record, err := client.Inspect(c.Context(), uuid, getProjectUUID(c))
+		if err != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(ErrorResponse{Error: err.Error()})
+		}
+		return c.JSON(record)
+	}
 
 	record, err := h.repo.GetRecordByUUID(c.Context(), uuid)
 	if err != nil {
@@ -219,6 +271,12 @@ func (h *Handlers) HandleGetRecord(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to retrieve record: " + err.Error(),
 			Code:  fiber.StatusInternalServerError,
+		})
+	}
+	if !inRequestProject(c, record.ProjectUUID) {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrRecordNotFound.Error(),
+			Code:  fiber.StatusNotFound,
 		})
 	}
 

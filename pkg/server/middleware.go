@@ -99,6 +99,17 @@ func getProjectUUID(c fiber.Ctx) string {
 	return database.DefaultProjectUUID
 }
 
+// inRequestProject reports whether a loaded row (records, findings, OAST
+// interactions, scans) belongs to the request's active project (X-Project-UUID,
+// or the default project when the header is absent). Point endpoints that fetch
+// by a global id/uuid use this to enforce project-selection semantics — the
+// docs promise the header scopes all operations — so an operator scoped to one
+// engagement can't read, mutate, or delete another's data via a raw id. Callers
+// surface a mismatch as 404 (not 403) so cross-project existence isn't leaked.
+func inRequestProject(c fiber.Ctx, rowProjectUUID string) bool {
+	return rowProjectUUID == getProjectUUID(c)
+}
+
 const authUserLocalsKey = "auth_user"
 
 // BearerAuth returns fiber middleware that validates Bearer tokens and resolves user identity.

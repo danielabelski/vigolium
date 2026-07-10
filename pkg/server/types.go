@@ -11,6 +11,7 @@ import (
 // ServerConfig holds configuration for the API server.
 type ServerConfig struct {
 	ServiceAddr          string   // e.g. "0.0.0.0:9002"
+	BurpBridgeURL        string   // optional loopback Burp listener merged into GET /api/http-records
 	IngestProxyAddr      string   // e.g. "0.0.0.0:9003" (empty = disabled)
 	IngestProxyMITM      bool     // Intercept HTTPS via a generated CA (records + scans TLS traffic)
 	IngestProxyInsecure  bool     // Skip upstream TLS verification when intercepting HTTPS

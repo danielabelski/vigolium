@@ -614,7 +614,14 @@ update-jsscan:
 	@cp -R $(JSSCAN_SRC_DIR)/* $(JSSCAN_DST_DIR)/
 	@echo "$(PREFIX) jsscan binaries updated"
 
-# Pre-test step: build jsscan from source if any binary is missing or is an LFS pointer
+# Pre-test step: build jsscan from source if any binary is missing, is an LFS
+# pointer, or predates a required CLI capability. Size alone can't catch a stale
+# but full-size binary built against an older interface (e.g. before --beautify),
+# which passes the file check yet fails every js_beautify test at runtime — the
+# passive module swallows the "unknown option" error into a no-op. Since only the
+# host-arch binary can be executed here, probe its --help for the capabilities the
+# tests rely on; the cross-arch binaries are built from the same source in lockstep.
+JSSCAN_REQUIRED_CAPS=--beautify
 ensure-jsscan:
 	@needs_build=0; \
 	for bin in $(JSSCAN_RES_BINS); do \
@@ -624,8 +631,24 @@ ensure-jsscan:
 			break; \
 		fi; \
 	done; \
+	if [ $$needs_build -eq 0 ]; then \
+		os=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+		arch=$$(uname -m); \
+		case "$$arch" in x86_64|amd64) arch=amd64 ;; arm64|aarch64) arch=arm64 ;; esac; \
+		host_bin="$(JSSCAN_RES_DST_DIR)/jsscan-$$os-$$arch"; \
+		if [ -x "$$host_bin" ]; then \
+			help=$$("$$host_bin" --help 2>&1 || true); \
+			for cap in $(JSSCAN_REQUIRED_CAPS); do \
+				if ! printf '%s' "$$help" | grep -q -- "$$cap"; then \
+					echo "$(PREFIX) jsscan host binary is missing capability '$$cap', rebuilding from source..."; \
+					needs_build=1; \
+					break; \
+				fi; \
+			done; \
+		fi; \
+	fi; \
 	if [ $$needs_build -eq 1 ]; then \
-		echo "$(PREFIX) jsscan binaries missing or invalid, building from source..."; \
+		echo "$(PREFIX) jsscan binaries missing, invalid, or stale, building from source..."; \
 		cd platform/jsscan && bun install --linker isolated --ignore-scripts && bun run build:bin; \
 		cd ../..; \
 		mkdir -p $(JSSCAN_RES_DST_DIR); \

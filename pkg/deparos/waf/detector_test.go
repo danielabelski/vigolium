@@ -288,6 +288,29 @@ func TestDetector_Azure(t *testing.T) {
 		require.NotNil(t, result)
 		assert.Equal(t, "azure", result.WAFType)
 	})
+
+	t.Run("generic 'The request is blocked' body alone is not azure", func(t *testing.T) {
+		// A plain application 403 that happens to say "The request is blocked"
+		// must not be misattributed to Azure and trip the discovery circuit
+		// breaker. Without a vendor-specific signal it is not a WAF block.
+		rc := createTestResponseChain(403, http.Header{
+			"Server":       []string{"nginx"},
+			"Content-Type": []string{"text/plain"},
+		}, "The request is blocked")
+		defer rc.Close()
+		result := detector.Detect(rc)
+		assert.Nil(t, result, "generic phrase alone should not classify as azure")
+	})
+
+	t.Run("generic phrase counts once a strong signal corroborates", func(t *testing.T) {
+		rc := createTestResponseChain(403, http.Header{
+			"X-Azure-Ref": []string{"0abc123"},
+		}, "The request is blocked")
+		defer rc.Close()
+		result := detector.Detect(rc)
+		require.NotNil(t, result)
+		assert.Equal(t, "azure", result.WAFType)
+	})
 }
 
 func TestDetector_FortiWeb(t *testing.T) {

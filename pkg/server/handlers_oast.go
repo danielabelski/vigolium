@@ -89,6 +89,12 @@ func (h *Handlers) HandleGetOASTInteraction(c fiber.Ctx) error {
 			Code:  fiber.StatusInternalServerError,
 		})
 	}
+	if !inRequestProject(c, interaction.ProjectUUID) {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrOASTInteractionNotFound.Error(),
+			Code:  fiber.StatusNotFound,
+		})
+	}
 
 	return c.JSON(interaction)
 }
@@ -111,8 +117,9 @@ func (h *Handlers) HandleDeleteOASTInteraction(c fiber.Ctx) error {
 		})
 	}
 
-	// Verify it exists first
-	if _, err := h.repo.GetOASTInteractionByID(c.Context(), id); err != nil {
+	// Verify it exists and belongs to the request's project first
+	interaction, err := h.repo.GetOASTInteractionByID(c.Context(), id)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
 				Error: ErrOASTInteractionNotFound.Error(),
@@ -122,6 +129,12 @@ func (h *Handlers) HandleDeleteOASTInteraction(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to retrieve OAST interaction: " + err.Error(),
 			Code:  fiber.StatusInternalServerError,
+		})
+	}
+	if !inRequestProject(c, interaction.ProjectUUID) {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrOASTInteractionNotFound.Error(),
+			Code:  fiber.StatusNotFound,
 		})
 	}
 

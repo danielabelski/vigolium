@@ -172,16 +172,17 @@ func (h *Handlers) HandleAgentQuery(c fiber.Ctx) error {
 // buildQueryOpts creates agent.Options from a query request.
 func (h *Handlers) buildQueryOpts(req AgenticScanRequest) agent.Options {
 	return agent.Options{
-		AgentName:      h.effectiveAgentName(req.Agent),
-		PromptTemplate: req.PromptTemplate,
-		PromptFile:     req.PromptFile,
-		PromptInline:   req.Prompt,
-		SourcePath:     req.SourcePath,
-		Files:          req.Files,
-		Append:         req.Append,
-		Instruction:    req.Instruction,
-		Source:         req.Source,
-		ScanUUID:       req.ScanUUID,
+		AgentName:             h.effectiveAgentName(req.Agent),
+		PromptTemplate:        req.PromptTemplate,
+		PromptFile:            req.PromptFile,
+		PromptInline:          req.Prompt,
+		SourcePath:            req.SourcePath,
+		Files:                 req.Files,
+		Append:                req.Append,
+		Instruction:           req.Instruction,
+		Source:                req.Source,
+		ScanUUID:              req.ScanUUID,
+		EnableBurpBridgeTools: true,
 	}
 }
 

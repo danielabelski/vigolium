@@ -23,6 +23,13 @@ type VigToolSpec struct {
 	ProjectUUID string
 }
 
+// BurpBridgeToolSpec registers only the live, read-only Burp bridge tools.
+// It is separate from VigToolSpec so ordinary query agents do not receive
+// replay_request or attack_kit merely because the bridge is available.
+type BurpBridgeToolSpec struct {
+	ProjectUUID string
+}
+
 // AgentSession is an opaque, reusable agent conversation whose prefix (system
 // prompt, tool definitions, prior turns) stays warm across prompts so the
 // provider's prompt cache hits. Fork returns a child that shares the prefix but
@@ -79,6 +86,9 @@ type SessionSpec struct {
 	// vigolium read+replay tool subset so a skill can actually confirm/escalate
 	// against scan records. nil for phases that only reason over prompt context.
 	VigTools *VigToolSpec
+	// BurpBridgeTools, when non-nil (and IncludeTools), registers only
+	// search_burp_items and inspect_burp_item. Both tools are read-only.
+	BurpBridgeTools *BurpBridgeToolSpec
 	// Record, when its SessionDir is set, attaches a Pi-style JSONL transcript
 	// recorder to the built engine so the session's turns (including model
 	// reasoning) persist for debugging. Zero value = no transcript.

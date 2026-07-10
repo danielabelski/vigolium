@@ -3,12 +3,14 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/cli/tui"
 	"github.com/vigolium/vigolium/pkg/database"
@@ -113,6 +115,11 @@ var (
 	// trafficAll lifts the -n/--limit cap so every matched record is
 	// listed/replayed. Most useful with --replay to re-send all stored traffic.
 	trafficAll bool
+
+	// trafficBurpBridgeURL enables live Burp records as an additional source.
+	trafficBurpBridgeURL    string
+	trafficSaveToVigoliumDB bool
+	trafficSaveToBurp       bool
 )
 
 var trafficCmd = &cobra.Command{
@@ -146,7 +153,7 @@ func init() {
 	pf.StringArrayVar(&trafficExcludeSearch, "exclude-search", nil, "Exclude records where the term appears in the URL, path, or raw request/response (repeatable; dropped if ANY term matches — the inverse of --search)")
 	pf.StringVar(&trafficExcludeHeader, "exclude-header", "", "Exclude records whose HTTP header names/values contain the term (inverse of --header)")
 	pf.StringVar(&trafficExcludeBody, "exclude-body", "", "Exclude records whose request/response body contains the term (inverse of --body)")
-	pf.StringVar(&trafficSource, "source", "", "Filter by record source (e.g. scanner, ingest-cli, ingest-server, ingest-proxy, seed)")
+	pf.StringVar(&trafficSource, "source", "", "Filter by record source (e.g. burp, scanner, ingest-cli, ingest-server, ingest-proxy, seed)")
 	pf.StringVar(&trafficSort, "sort", "created_at", "Sort by: uuid, created_at, sent_at, method, status, time")
 	pf.BoolVar(&trafficAsc, "asc", false, "Sort in ascending order (default: descending)")
 	pf.IntVarP(&trafficLimit, "limit", "n", 100, "Maximum records to display")
@@ -169,6 +176,21 @@ func init() {
 	f.BoolVarP(&trafficAll, "all", "a", false, "List/replay every matched record (ignore the -n/--limit cap); pair with --replay to re-send all stored traffic")
 	f.IntVarP(&trafficReplayConcurrency, "concurrency", "c", 10, "Concurrent replays (--replay); keep low to avoid overwhelming an intercepting proxy like Burp")
 	f.BoolVar(&trafficReplayBrowser, "with-browser", false, "Replay each URL through a real browser routed via --proxy (--replay), so Burp captures browser-driven traffic")
+	f.StringVar(
+		&trafficBurpBridgeURL,
+		"burp-bridge-url",
+		burpbridge.URLFromEnvironment(),
+		"Merge live traffic from this loopback Burp bridge URL with local database records")
+	f.BoolVar(
+		&trafficSaveToVigoliumDB,
+		"save-to-vigolium-db",
+		false,
+		"Persist the live Burp records selected by the active filters into the database")
+	f.BoolVar(
+		&trafficSaveToBurp,
+		"save-to-burp",
+		false,
+		"Copy the database records selected by the active filters into Burp's Target Site map")
 	f.BoolVar(&replayInReplace, "in-replace", false, "With --replay: overwrite each stored response with the new replay response")
 	f.DurationVar(&globalTimeout, "timeout", 15*time.Second, "Per-request timeout for --replay (e.g. 30s, 1m)")
 
@@ -177,10 +199,44 @@ func init() {
 
 func runTraffic(cmd *cobra.Command, args []string) error {
 	defer closeDatabaseOnExit()
+	if trafficSaveToVigoliumDB && strings.TrimSpace(trafficBurpBridgeURL) == "" {
+		return fmt.Errorf("--save-to-vigolium-db requires --burp-bridge-url")
+	}
+	if trafficSaveToBurp && strings.TrimSpace(trafficBurpBridgeURL) == "" {
+		return fmt.Errorf("--save-to-burp requires --burp-bridge-url")
+	}
+	if trafficSaveToBurp && trafficSaveToVigoliumDB {
+		return fmt.Errorf("--save-to-burp and --save-to-vigolium-db cannot be combined")
+	}
+	if trafficSaveToVigoliumDB && statelessReadRequested() {
+		return fmt.Errorf("--save-to-vigolium-db cannot be used with --stateless or --glob-db")
+	}
+	if trafficSaveToVigoliumDB && trafficReplay {
+		return fmt.Errorf("--save-to-vigolium-db cannot be combined with --replay")
+	}
+	if trafficSaveToBurp && trafficReplay {
+		return fmt.Errorf("--save-to-burp cannot be combined with --replay")
+	}
+	if trafficBurpBridgeURL != "" {
+		validated, err := burpbridge.ValidateURL(trafficBurpBridgeURL)
+		if err != nil {
+			return fmt.Errorf("--burp-bridge-url: %w", err)
+		}
+		trafficBurpBridgeURL = validated
+	}
 
 	db, err := openReadDB()
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	if trafficSaveToVigoliumDB {
+		ctx := context.Background()
+		if err := db.CreateSchema(ctx); err != nil {
+			return fmt.Errorf("failed to create database schema: %w", err)
+		}
+		if err := db.SeedDefaults(ctx); err != nil {
+			return fmt.Errorf("failed to seed default data: %w", err)
+		}
 	}
 
 	var fuzzyTerm string
@@ -210,15 +266,48 @@ func runTraffic(cmd *cobra.Command, args []string) error {
 		}
 
 		ctx := context.Background()
-		qb := database.NewQueryBuilder(db, filters)
-		records, total, err := qb.ExecuteWithCount(ctx)
+		if trafficSaveToBurp {
+			records, err := database.NewQueryBuilder(db, filters).Execute(ctx)
+			if err != nil {
+				return fmt.Errorf("query records to save to Burp: %w", err)
+			}
+			client, err := burpbridge.New(trafficBurpBridgeURL)
+			if err != nil {
+				return err
+			}
+			result := client.SaveRecordsToSiteMap(ctx, records)
+			writeBurpSiteMapSaveResult(os.Stderr, result)
+			if result.Added == 0 && result.Skipped > 0 {
+				return fmt.Errorf("no selected records could be saved to Burp")
+			}
+		}
+		if trafficSaveToVigoliumDB {
+			if !burpbridge.Eligible(filters) {
+				return fmt.Errorf("the active source/risk/remark filters exclude live Burp traffic")
+			}
+			result, err := importBurpTrafficToDB(
+				ctx,
+				database.NewRepository(db),
+				trafficBurpBridgeURL,
+				burpbridge.QueryFromFilters(filters, false),
+				filters.ProjectUUID,
+			)
+			if err != nil {
+				return fmt.Errorf("import Burp traffic: %w", err)
+			}
+			writeBurpImportResult(os.Stderr, trafficBurpBridgeURL, result, false)
+		}
+		tuiActive, tuiErr := tui.Active(trafficTUI, trafficNoTUI, globalJSON)
+		if tuiErr != nil {
+			return tuiErr
+		}
+		includeRaw := tuiActive || trafficRaw || trafficBurp || trafficMarkdown
+		records, total, err := queryTrafficRecords(ctx, db, filters, includeRaw)
 		if err != nil {
 			return fmt.Errorf("failed to query database: %w", err)
 		}
 
-		if active, tuiErr := tui.Active(trafficTUI, trafficNoTUI, globalJSON); tuiErr != nil {
-			return tuiErr
-		} else if active {
+		if tuiActive {
 			if len(records) == 0 {
 				fmt.Printf("%s No HTTP records found.\n", terminal.InfoSymbol())
 				return nil
@@ -245,11 +334,11 @@ func runTraffic(cmd *cobra.Command, args []string) error {
 			renderErr = displayRaw(records)
 		case trafficTree:
 			warnIfCapped(len(records), total) // top, so it's seen before a long tree
-			printTrafficSummary(ctx, db, len(records), total)
+			printTrafficSummary(ctx, db, records, total)
 			renderErr = displayTree(records)
 		default:
 			warnIfCapped(len(records), total)
-			printTrafficSummary(ctx, db, len(records), total)
+			printTrafficSummary(ctx, db, records, total)
 			renderErr = trafficDisplayTable(records, total, trafficOffset)
 		}
 		if renderErr != nil {
@@ -416,14 +505,20 @@ func statusBucket(code int) string {
 // status-class / method / content-type breakdown, mirroring printFindingsSummary.
 // Counts are DB-wide (project scope, filter-independent like the finding summary)
 // so a --glob-db read shows the whole merged corpus at a glance.
-func printTrafficSummary(ctx context.Context, db *database.DB, shown int, total int64) {
+func printTrafficSummary(ctx context.Context, db *database.DB, records []*database.HTTPRecord, total int64) {
 	projectUUID, _ := effectiveProjectUUID()
+	shown := len(records)
 
 	fmt.Printf("%s Showing %d-%d of %d records\n",
 		terminal.InfoSymbol(),
 		trafficOffset+1,
 		min(trafficOffset+shown, int(total)),
 		total)
+	if trafficBurpBridgeURL != "" {
+		printVisibleTrafficBreakdown(records)
+		fmt.Println()
+		return
+	}
 
 	// Status classes, ordered and colored like the tree/table status column.
 	if statusCounts, err := database.CountRecordsByColumn(ctx, db, projectUUID, "status_code"); err == nil {
@@ -473,6 +568,34 @@ func printTrafficSummary(ctx context.Context, db *database.DB, shown int, total 
 	}
 
 	fmt.Println()
+}
+
+// printVisibleTrafficBreakdown keeps summary counts honest when the result page
+// combines database and ephemeral Burp records. Database-wide GROUP BY queries
+// cannot see the Burp source, so this branch summarizes the current merged page.
+func printVisibleTrafficBreakdown(records []*database.HTTPRecord) {
+	statusCounts := make(map[string]int64)
+	methodCounts := make(map[string]int64)
+	contentTypeCounts := make(map[string]int64)
+	sourceCounts := make(map[string]int64)
+	for _, record := range records {
+		statusCounts[statusBucket(record.StatusCode)]++
+		methodCounts[record.Method]++
+		contentTypeCounts[shortContentType(record.ResponseContentType)]++
+		sourceCounts[record.Source]++
+	}
+	if line := formatCountLine(statusCounts, 0, terminal.Green); line != "" {
+		fmt.Printf("  %s Status:   %s\n", terminal.Cyan(terminal.SymbolSparkle), line)
+	}
+	if line := formatCountLine(methodCounts, 0, terminal.Cyan); line != "" {
+		fmt.Printf("  %s Method:   %s\n", terminal.Cyan(terminal.SymbolSparkle), line)
+	}
+	if line := formatCountLine(contentTypeCounts, 6, terminal.Orange); line != "" {
+		fmt.Printf("  %s Type:     %s\n", terminal.Cyan(terminal.SymbolSparkle), line)
+	}
+	if line := formatCountLine(sourceCounts, 0, terminal.Cyan); line != "" {
+		fmt.Printf("  %s Source:   %s\n", terminal.Cyan(terminal.SymbolSparkle), line)
+	}
 }
 
 // formatCountLine renders a "key:count" list ordered by count desc (ties broken

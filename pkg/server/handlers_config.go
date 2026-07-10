@@ -109,7 +109,7 @@ func (h *Handlers) HandleUpdateConfig(c fiber.Ctx) error {
 		if h.configWatcher != nil {
 			h.configWatcher.MarkSelfWrite()
 		}
-		if err := config.SaveSettings(config.ConfigFilePath(), h.settings); err != nil {
+		if err := config.SaveSettings(h.effectiveConfigPath(), h.settings); err != nil {
 			zap.L().Error("Failed to save config", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 				Error:   "failed to save config",

@@ -109,4 +109,8 @@ type Result struct {
 	Diff                *Diff    `json:"diff"`
 	AdditionalGroups    int      `json:"additional_payload_groups,omitempty"`
 	Unmatched           []string `json:"unmatched_mutations,omitempty"`
+	// RawMutatedRequest is the complete request actually sent. It is retained
+	// for local integrations such as saving the exchange to Burp, but omitted
+	// from JSON where MutatedRequest remains the bounded preview.
+	RawMutatedRequest []byte `json:"-"`
 }

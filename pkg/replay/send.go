@@ -220,5 +220,6 @@ func Do(ctx context.Context, opts Options) (*Result, error) {
 		Diff:                diff,
 		AdditionalGroups:    additionalGroups,
 		Unmatched:           unmatched,
+		RawMutatedRequest:   append([]byte(nil), mutated...),
 	}, nil
 }

@@ -660,6 +660,12 @@ func (h *Handlers) HandleGetScan(c fiber.Ctx) error {
 			Code:  fiber.StatusInternalServerError,
 		})
 	}
+	if !inRequestProject(c, scan.ProjectUUID) {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrScanNotFound.Error(),
+			Code:  fiber.StatusNotFound,
+		})
+	}
 
 	return c.JSON(buildScanViews([]*database.Scan{scan})[0])
 }

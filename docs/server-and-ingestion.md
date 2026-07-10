@@ -309,6 +309,17 @@ All proxied HTTP traffic is automatically recorded in the database. HTTPS CONNEC
 
 ## Querying Ingested Data
 
+To merge live Burp Proxy history into the same traffic API, enable the Bridge
+listener in the Vigolium Burp extension and start the server with:
+
+```bash
+vigolium server --burp-bridge-url http://127.0.0.1:9009
+```
+
+The `/api/http-records` examples below then query the combined database and
+Burp result set. Live records are identified by `"source": "burp"`. No
+separate bridge search route is needed.
+
 ### List HTTP Records
 
 ```bash

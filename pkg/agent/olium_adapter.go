@@ -158,6 +158,11 @@ func buildOliumEngineWithSpec(cfg *config.OliumConfig, spec SessionSpec) (*oengi
 			reg.Register(vigtool.NewReplayRequestTool(sessCtx))
 			reg.Register(vigtool.NewAttackKitTool())
 		}
+		if spec.BurpBridgeTools != nil {
+			sessCtx := &vigtool.SessionsContext{ProjectUUID: spec.BurpBridgeTools.ProjectUUID}
+			reg.Register(vigtool.NewSearchBurpItemsTool(sessCtx))
+			reg.Register(vigtool.NewInspectBurpItemTool(sessCtx))
+		}
 		ecfg.Tools = reg
 	}
 
