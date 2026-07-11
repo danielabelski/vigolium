@@ -15,7 +15,7 @@ var (
 
 **Fix:** Add Vary: Origin wherever the Origin is reflected, and exclude credentialed CORS responses from shared caching.`
 
-	ModuleConfirmation = "Confirmed when a response reflects the request Origin into ACAO but omits the Vary: Origin header required for correct shared-cache behavior"
+	ModuleConfirmation = "Observed when reflected ACAO omits Vary: Origin; candidate only with shared-cache evidence, and confirmation requires an active cache hit across origins"
 	ModuleSeverity     = severity.Low
 	ModuleConfidence   = severity.Firm
 	ModuleTags         = []string{"misconfiguration", "header-security", "cache-poisoning", "light"}

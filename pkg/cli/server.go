@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -26,7 +25,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/input/source"
 	"github.com/vigolium/vigolium/pkg/modules"
-	"github.com/vigolium/vigolium/pkg/notify/webhook"
 	"github.com/vigolium/vigolium/pkg/queue"
 	"github.com/vigolium/vigolium/pkg/server"
 	"github.com/vigolium/vigolium/pkg/server/mitm"
@@ -102,6 +100,7 @@ Common modes:
   • --scan-on-receive: continuously scan ingested traffic as it arrives
   • --ingest-proxy-port: enable a transparent HTTP ingest proxy on a separate port
   • -A: disable auth (local development only)`,
+	Args: cobra.NoArgs,
 	RunE: runServerCmd,
 }
 
@@ -146,11 +145,13 @@ func init() {
 	flags.BoolVar(&serverOpts.PassiveOnly, "passive-only", false,
 		"With -S/--scan-on-receive, run passive modules only (no active scan traffic; includes secret detection)")
 
-	// Catchup scan group
+	// Catchup scan group (deprecated: catch-up is disabled — the live
+	// scan-on-receive scanner already covers post-cursor records; these flags are
+	// accepted for compatibility but no longer have any effect).
 	flags.IntVar(&serverOpts.CatchupThreads, "catchup-threads", 4,
-		"Workers for background scanning of unscanned records")
+		"Deprecated: no-op (catch-up scanning is disabled)")
 	flags.BoolVar(&serverOpts.DisableCatchup, "disable-catchup", false,
-		"Disable automatic background scanning of unscanned records")
+		"Deprecated: no-op (catch-up scanning is already disabled)")
 
 	// Agent warm session
 	flags.BoolVar(&serverOpts.DisableWarmSession, "disable-warm-session", false,
@@ -404,14 +405,28 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create hybrid task queue (in-memory buffer + disk spillover)
-	queueDir := filepath.Join(os.TempDir(), "vigolium-server-queue")
-	taskQueue, err := queue.NewQueue(queue.Config{
-		Type:          queue.QueueTypeHybrid,
-		DiskDir:       queueDir,
-		MaxPerSegment: 10000,
-		MemBufferSize: serverOpts.MemBufferSize,
-	})
+	// Task queue. Only scan-on-receive / full-native-on-receive actually run a
+	// consumer for it; every other server mode leaves it without a producer or
+	// consumer, so opening a LevelDB-backed hybrid queue there would only spawn
+	// idle drainer/cleanup goroutines and take an on-disk lock that blocks a second
+	// server instance on the same host. Use a zero-cost in-memory queue in that
+	// case, and give the durable queue a PID-scoped directory otherwise so two
+	// instances don't contend on the shared /tmp path.
+	var taskQueue queue.Queue
+	if globalScanOnReceive || globalFullNativeScanOnReceive {
+		queueDir := filepath.Join(os.TempDir(), fmt.Sprintf("vigolium-server-queue-%d", os.Getpid()))
+		taskQueue, err = queue.NewQueue(queue.Config{
+			Type:          queue.QueueTypeHybrid,
+			DiskDir:       queueDir,
+			MaxPerSegment: 10000,
+			MemBufferSize: serverOpts.MemBufferSize,
+		})
+	} else {
+		taskQueue, err = queue.NewQueue(queue.Config{
+			Type:          queue.QueueTypeMemory,
+			MemBufferSize: serverOpts.MemBufferSize,
+		})
+	}
 	if err != nil {
 		zap.L().Fatal("Failed to create queue", zap.Error(err))
 	}
@@ -585,8 +600,6 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 	queueSource := queue.NewQueueInputSource(taskQueue)
 
 	var inputSource source.InputSource
-	var serverScanCursorAt time.Time
-	var serverScanCursorUUID string
 	if globalScanOnReceive && db != nil && repo != nil {
 		// Create a persistent scan record for the server session
 		scanUUID := uuid.New().String()
@@ -605,9 +618,6 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 		if err := repo.CreateScanWithCursor(context.Background(), serverScan); err != nil {
 			zap.L().Warn("Failed to create server scan record", zap.Error(err))
 		}
-		// Capture cursor position for catchup scan to detect backlog behind it
-		serverScanCursorAt = serverScan.CursorAt
-		serverScanCursorUUID = serverScan.CursorUUID
 
 		// Reuse the server scan UUID so the runner tracks cursor on the same record
 		runnerOpts.ScanUUID = serverScan.UUID
@@ -675,12 +685,11 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 				terminal.InfoSymbol(),
 				terminal.Cyan(serverOpts.BurpBridgeURL))
 		}
-		if globalScanOnReceive && !serverOpts.DisableCatchup {
-			fmt.Printf("  %s Scan workers %s  %s Catchup workers %s\n",
+		if globalScanOnReceive {
+			// Catch-up is disabled (see startCatchupScan); only the live workers run.
+			fmt.Printf("  %s Scan workers %s\n",
 				terminal.InfoSymbol(),
-				terminal.Cyan(fmt.Sprintf("%d", globalConcurrency)),
-				sep,
-				terminal.Cyan(fmt.Sprintf("%d (starts in 5s)", serverOpts.CatchupThreads)))
+				terminal.Cyan(fmt.Sprintf("%d", globalConcurrency)))
 		} else {
 			fmt.Printf("  %s Scan workers %s\n",
 				terminal.InfoSymbol(),
@@ -737,27 +746,12 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
-	// Launch background catchup scan for unscanned backlog records
-	var catchupMu sync.Mutex
-	var catchupRunner *runner.Runner
-	if globalScanOnReceive && db != nil && repo != nil && !serverOpts.DisableCatchup {
-		go func() {
-			// 5-second cancellable delay — allows user to see startup and Ctrl+C if needed
-			select {
-			case <-time.After(5 * time.Second):
-			case <-ctx.Done():
-				return
-			}
-
-			cr := startCatchupScan(ctx, db, repo, settings,
-				serverScanCursorAt, serverScanCursorUUID,
-				serverOpts.CatchupThreads, runnerOpts)
-
-			catchupMu.Lock()
-			catchupRunner = cr
-			catchupMu.Unlock()
-		}()
-	}
+	// Catch-up scanning is disabled — the previous implementation re-scanned the
+	// live scan-on-receive range instead of the historical backlog it detected, so
+	// it only ever produced duplicate work. The live incremental scanner already
+	// covers post-cursor records; scan a pre-existing database explicitly with
+	// `vigolium scan`. The --catchup-threads/--disable-catchup flags are accepted
+	// (deprecated) but ignored.
 
 	// Wait for shutdown signal — either an OS signal or the API server
 	// goroutine cancelling the root context after a Listen error.
@@ -776,15 +770,6 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 
 	// Cancel context (idempotent; safe if already cancelled above)
 	cancel()
-
-	// Close catchup runner if running
-	catchupMu.Lock()
-	cr := catchupRunner
-	catchupMu.Unlock()
-	if cr != nil {
-		zap.L().Info("Stopping catchup scan...")
-		cr.Close()
-	}
 
 	// Close runner first (stops workers from dequeuing). Only present when
 	// scan-on-receive or full-native-on-receive was enabled.
@@ -807,123 +792,6 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 
 	zap.L().Info("Server shutdown complete")
 	return nil
-}
-
-// startCatchupScan checks for unscanned backlog records behind the server scan's
-// cursor and launches a separate runner to scan them at reduced concurrency.
-// Returns the runner (for shutdown) or nil if no backlog exists.
-func startCatchupScan(
-	ctx context.Context,
-	db *database.DB,
-	repo *database.Repository,
-	settings *config.Settings,
-	cursorAt time.Time,
-	cursorUUID string,
-	catchupThreads int,
-	baseOpts *types.Options,
-) *runner.Runner {
-	// Check if there are records behind the server scan's cursor
-	backlog, err := repo.CountRecordsAfterCursor(ctx, time.Time{}, "")
-	if err != nil {
-		zap.L().Warn("Failed to check backlog records", zap.Error(err))
-		return nil
-	}
-
-	// Count records that the live scan will handle (after cursor)
-	liveCount, err := repo.CountRecordsAfterCursor(ctx, cursorAt, cursorUUID)
-	if err != nil {
-		zap.L().Warn("Failed to count live records", zap.Error(err))
-		return nil
-	}
-
-	// Backlog = total records minus what the live scan will process
-	backlogCount := backlog - liveCount
-	if backlogCount <= 0 {
-		zap.L().Info("No backlog records to catch up on")
-		return nil
-	}
-
-	zap.L().Info("Checking for unscanned backlog records...",
-		zap.Int64("backlog_count", backlogCount))
-
-	// Create a separate scan record for the catchup
-	catchupScan := &database.Scan{
-		UUID:        fmt.Sprintf("server-catchup-%d", time.Now().UnixNano()),
-		ProjectUUID: database.DefaultProjectUUID,
-		Name:        "server-catchup",
-		Status:      "running",
-		Target:      strings.Join(globalTargets, ","),
-		Modules:     strings.Join(baseOpts.Modules, ","),
-		ScanSource:  "server-catchup",
-		ScanMode:    "incremental",
-		StartedAt:   time.Now(),
-	}
-	if err := repo.CreateScanWithCursor(ctx, catchupScan); err != nil {
-		zap.L().Warn("Failed to create catchup scan record", zap.Error(err))
-		return nil
-	}
-
-	// Re-check how many records the catchup scan needs to process (after cursor copy)
-	remaining, err := repo.CountRecordsAfterCursor(ctx, catchupScan.CursorAt, catchupScan.CursorUUID)
-	if err != nil {
-		zap.L().Warn("Failed to count catchup records", zap.Error(err))
-		return nil
-	}
-	if remaining <= 0 {
-		zap.L().Info("No backlog records to catch up on (already scanned)")
-		_ = repo.CompleteScan(ctx, catchupScan.UUID, "")
-		return nil
-	}
-
-	// Create one-shot input source — returns io.EOF when cursor catches up
-	catchupSource := database.NewOneShotDBInputSource(db, repo, catchupScan.UUID)
-
-	// Build runner options with reduced concurrency
-	catchupOpts := &types.Options{
-		Concurrency:    catchupThreads,
-		MaxPerHost:     baseOpts.MaxPerHost,
-		MaxHostError:   baseOpts.MaxHostError,
-		Timeout:        baseOpts.Timeout,
-		Retries:        baseOpts.Retries,
-		Verbose:        baseOpts.Verbose,
-		Silent:         baseOpts.Silent,
-		ProxyURL:       baseOpts.ProxyURL,
-		Modules:        baseOpts.Modules,
-		PassiveModules: baseOpts.PassiveModules,
-	}
-
-	catchupRunner, err := runner.NewWithInputSource(catchupOpts, catchupSource)
-	if err != nil {
-		zap.L().Warn("Failed to create catchup runner", zap.Error(err))
-		_ = repo.CompleteScan(ctx, catchupScan.UUID, err.Error())
-		return nil
-	}
-
-	catchupRunner.SetSettings(settings)
-	catchupRunner.SetRepository(repo)
-
-	scanUUID := catchupScan.UUID
-	zap.L().Info("Catchup scan started",
-		zap.String("scan_uuid", scanUUID),
-		zap.Int("workers", catchupThreads),
-		zap.Int64("backlog_records", remaining))
-
-	go func() {
-		var errMsg string
-		if err := catchupRunner.RunNativeScan(); err != nil {
-			zap.L().Error("Catchup scan error", zap.Error(err))
-			errMsg = err.Error()
-		}
-		if completeErr := repo.CompleteScan(context.Background(), scanUUID, errMsg); completeErr != nil {
-			zap.L().Error("Failed to complete catchup scan record", zap.Error(completeErr))
-		}
-		webhook.FireNativeScan(settings, repo, scanUUID)
-		if errMsg == "" {
-			zap.L().Info("Catchup scan completed", zap.String("scan_uuid", scanUUID))
-		}
-	}()
-
-	return catchupRunner
 }
 
 // parseAgentQueueTimeout parses a Go duration string for the agent queue timeout.

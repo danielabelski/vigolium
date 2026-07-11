@@ -597,6 +597,7 @@ vulnerable-nginx-status:
 	docker compose -f $(VULN_NGINX_DIR)/docker-compose.yaml ps
 
 # jsscan binary management
+.PHONY: update-jsscan ensure-jsscan verify-jsscan-fresh build-jsscan-current build-jsscan-all
 JSSCAN_SRC_DIR=platform/jsscan/bin
 JSSCAN_DST_DIR=internal/resources/deparos/jsscan
 
@@ -605,56 +606,58 @@ JSSCAN_RES_SRC_DIR=platform/jsscan/bin
 JSSCAN_RES_DST_DIR=internal/resources/deparos/jsscan
 JSSCAN_RES_BINS=jsscan-darwin-amd64 jsscan-darwin-arm64 jsscan-linux-amd64 jsscan-linux-arm64 jsscan-windows-amd64.exe
 
-# Build jsscan from source and copy binaries
-update-jsscan:
+# Build every release helper from source and copy binaries.
+build-jsscan-all update-jsscan:
 	@echo "$(PREFIX) Building jsscan from source..."
 	cd platform/jsscan && bun install --linker isolated --ignore-scripts && bun run build:bin
 	@echo "$(PREFIX) Copying jsscan binaries to $(JSSCAN_DST_DIR)..."
 	@mkdir -p $(JSSCAN_DST_DIR)
 	@cp -R $(JSSCAN_SRC_DIR)/* $(JSSCAN_DST_DIR)/
-	@echo "$(PREFIX) jsscan binaries updated"
+	@echo "$(PREFIX) jsscan release binaries updated"
 
-# Pre-test step: build jsscan from source if any binary is missing, is an LFS
-# pointer, or predates a required CLI capability. Size alone can't catch a stale
-# but full-size binary built against an older interface (e.g. before --beautify),
-# which passes the file check yet fails every js_beautify test at runtime — the
-# passive module swallows the "unknown option" error into a no-op. Since only the
-# host-arch binary can be executed here, probe its --help for the capabilities the
-# tests rely on; the cross-arch binaries are built from the same source in lockstep.
-JSSCAN_REQUIRED_CAPS=--beautify
+# Build and stage only the current host helper. Ordinary tests and development
+# do not need to spend time producing four binaries that cannot run locally.
+build-jsscan-current:
+	@set -e; \
+	os=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	arch=$$(uname -m); \
+	case "$$arch" in x86_64|amd64) arch=amd64 ;; arm64|aarch64) arch=arm64 ;; esac; \
+	name="jsscan-$$os-$$arch"; \
+	cd platform/jsscan; \
+	bun install --linker isolated --ignore-scripts; \
+	bun run build:bin:host; \
+	cd ../..; \
+	mkdir -p $(JSSCAN_RES_DST_DIR); \
+	cp "$(JSSCAN_SRC_DIR)/$$name" "$(JSSCAN_RES_DST_DIR)/$$name"
+
+# Pre-test step: compare the executable's compiled source fingerprint and
+# protocol contract with the current TypeScript tree. A source edit that keeps
+# the same flags must still invalidate the helper.
 ensure-jsscan:
-	@needs_build=0; \
-	for bin in $(JSSCAN_RES_BINS); do \
-		f="$(JSSCAN_RES_DST_DIR)/$$bin"; \
-		if [ ! -f "$$f" ] || [ $$(wc -c < "$$f" | tr -d ' ') -lt 1024 ]; then \
-			needs_build=1; \
-			break; \
-		fi; \
-	done; \
-	if [ $$needs_build -eq 0 ]; then \
-		os=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
-		arch=$$(uname -m); \
-		case "$$arch" in x86_64|amd64) arch=amd64 ;; arm64|aarch64) arch=arm64 ;; esac; \
-		host_bin="$(JSSCAN_RES_DST_DIR)/jsscan-$$os-$$arch"; \
-		if [ -x "$$host_bin" ]; then \
-			help=$$("$$host_bin" --help 2>&1 || true); \
-			for cap in $(JSSCAN_REQUIRED_CAPS); do \
-				if ! printf '%s' "$$help" | grep -q -- "$$cap"; then \
-					echo "$(PREFIX) jsscan host binary is missing capability '$$cap', rebuilding from source..."; \
-					needs_build=1; \
-					break; \
-				fi; \
-			done; \
-		fi; \
+	@set -e; \
+	os=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	arch=$$(uname -m); \
+	case "$$arch" in x86_64|amd64) arch=amd64 ;; arm64|aarch64) arch=arm64 ;; esac; \
+	host_bin="$(JSSCAN_RES_DST_DIR)/jsscan-$$os-$$arch"; \
+	source_hash=$$(cd platform/jsscan && bun scripts/source-fingerprint.ts); \
+	needs_build=0; \
+	if [ ! -x "$$host_bin" ] || [ $$(wc -c < "$$host_bin" 2>/dev/null || echo 0) -lt 1024 ]; then \
+		needs_build=1; \
+	else \
+		caps=$$("$$host_bin" --capabilities 2>/dev/null || true); \
+		printf '%s' "$$caps" | grep -Fq '"protocolVersion":2' || needs_build=1; \
+		printf '%s' "$$caps" | grep -Fq "\"sourceHash\":\"$$source_hash\"" || needs_build=1; \
+		printf '%s' "$$caps" | grep -Fq '"profiles"' || needs_build=1; \
 	fi; \
 	if [ $$needs_build -eq 1 ]; then \
-		echo "$(PREFIX) jsscan binaries missing, invalid, or stale, building from source..."; \
-		cd platform/jsscan && bun install --linker isolated --ignore-scripts && bun run build:bin; \
-		cd ../..; \
-		mkdir -p $(JSSCAN_RES_DST_DIR); \
-		cp $(JSSCAN_SRC_DIR)/* $(JSSCAN_RES_DST_DIR)/; \
-		echo "$(PREFIX) jsscan binaries built and copied"; \
+		echo "$(PREFIX) jsscan host helper missing or stale; rebuilding..."; \
+		$(MAKE) --no-print-directory build-jsscan-current; \
+	else \
+		echo "$(PREFIX) jsscan host helper is fresh ($$source_hash)"; \
 	fi
+
+verify-jsscan-fresh:
+	@$(MAKE) --no-print-directory ensure-jsscan
 
 # vigolium-audit security audit binary management.
 # Source lives under platform/vigolium-audit/. `bun run build` produces a host

@@ -19,14 +19,25 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
+
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 const (
 	caCertFile = "vigolium-ca.pem"
 	caKeyFile  = "vigolium-ca-key.pem"
+
+	// maxLeafCacheEntries bounds the per-host leaf certificate cache so a proxy
+	// intercepting a very large set of hosts can't retain a leaf per host for the
+	// whole process lifetime. Re-minting an evicted leaf is cheap and safe.
+	maxLeafCacheEntries = 4096
 )
+
+func newLeafCache() *lru.Cache[string, *tls.Certificate] {
+	c, _ := lru.New[string, *tls.Certificate](maxLeafCacheEntries)
+	return c
+}
 
 // CA is a self-signed certificate authority. Use LoadOrCreateCA to obtain one,
 // then TLSConfigForHost to terminate a client TLS connection while impersonating
@@ -39,8 +50,7 @@ type CA struct {
 
 	leafKey *ecdsa.PrivateKey // single private key reused by all leaves
 
-	mu    sync.RWMutex
-	cache map[string]*tls.Certificate // host -> minted leaf
+	cache *lru.Cache[string, *tls.Certificate] // host -> minted leaf, bounded LRU
 }
 
 // LoadOrCreateCA loads the CA from dir, generating and persisting a fresh one
@@ -97,7 +107,7 @@ func loadCA(certPath, keyPath string) (*CA, error) {
 		key:      caKey,
 		certPath: certPath,
 		leafKey:  leafKey,
-		cache:    make(map[string]*tls.Certificate),
+		cache:    newLeafCache(),
 	}, nil
 }
 
@@ -154,7 +164,7 @@ func generateCA(certPath, keyPath string) (*CA, error) {
 		key:      caKey,
 		certPath: certPath,
 		leafKey:  leafKey,
-		cache:    make(map[string]*tls.Certificate),
+		cache:    newLeafCache(),
 	}, nil
 }
 
@@ -198,10 +208,7 @@ func (c *CA) LeafFor(host string) (*tls.Certificate, error) {
 		return nil, fmt.Errorf("empty host for leaf certificate")
 	}
 
-	c.mu.RLock()
-	cert, ok := c.cache[host]
-	c.mu.RUnlock()
-	if ok {
+	if cert, ok := c.cache.Get(host); ok {
 		return cert, nil
 	}
 
@@ -210,13 +217,12 @@ func (c *CA) LeafFor(host string) (*tls.Certificate, error) {
 		return nil, err
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	// Another goroutine may have raced us to mint the same host.
-	if existing, ok := c.cache[host]; ok {
+	// The LRU is internally synchronized. PeekOrAdd atomically returns an entry a
+	// concurrent goroutine may have minted first, so all callers for a host share
+	// one leaf without holding a lock across the (CPU-bound) minting above.
+	if existing, ok, _ := c.cache.PeekOrAdd(host, minted); ok {
 		return existing, nil
 	}
-	c.cache[host] = minted
 	return minted, nil
 }
 

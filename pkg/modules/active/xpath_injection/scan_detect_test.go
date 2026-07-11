@@ -68,6 +68,20 @@ func xpathBooleanFalse(v string) bool {
 // string-context value (e.g. admin' or '1'='1).
 var xpathCondRe = regexp.MustCompile(`'\s*(or|and)\s*'([^']*)'='([^']*)$`)
 
+// xpathTrueFns / xpathFalseFns are the exact XPath-core-function sub-expressions the
+// module's engine discriminator injects, split by their (constant) boolean value. A
+// faithful XPath engine evaluates the true set to true and the false set to false; the
+// operand sets are chosen so no true sub-expression is a substring of a false one, so a
+// simple Contains match reproduces real XPath semantics for the mock.
+var (
+	xpathTrueFns = []string{
+		`string-length('vig')>0`, `string-length('xyzzy1')>2`,
+		`local-name(.)=local-name(.)`, `count(.)>=0`,
+		`normalize-space('x')='x'`, `boolean(1)`,
+	}
+	xpathFalseFns = []string{`string-length('vig')>999`, `count(.)>999`}
+)
+
 // xpathRender simulates //user[name='<v>'] over a fixed dataset and returns the page
 // a real XPath engine yields: the always-true page (predicate forced true → all
 // records), the always-false page (forced false → none), or the baseline (the query
@@ -81,6 +95,23 @@ func xpathRender(v string) string {
 		nonePage = "<html><body>no matching record found for that query</body></html>"
 		basePage = "<html><body>profile card for the single matched account</body></html>"
 	)
+	// A genuine XPath engine evaluates core-function tautologies as TRUE and
+	// contradictions as FALSE regardless of the trailing comparison, so an
+	// `... or <true-fn> or ...` predicate forces the full record set and an
+	// `... and <false-fn> and ...` predicate forces none. These functions have no SQL
+	// equivalent, which is exactly how the module's engine discriminator tells an XPath
+	// sink apart from a SQL boolean oracle sharing ' or '1'='1. The true/false operand
+	// sets are disjoint substrings so matching is unambiguous.
+	for _, trueFn := range xpathTrueFns {
+		if strings.Contains(v, trueFn) {
+			return allPage
+		}
+	}
+	for _, falseFn := range xpathFalseFns {
+		if strings.Contains(v, falseFn) {
+			return nonePage
+		}
+	}
 	m := xpathCondRe.FindStringSubmatch(v)
 	if m == nil {
 		return basePage // no injected clause → plain name lookup
@@ -110,12 +141,123 @@ func TestBoolean_DetectsOracle(t *testing.T) {
 	defer srv.Close()
 
 	client := modtest.Requester(t)
-	rr := modtest.Request(t, srv.URL+"/lookup?id=admin")
+	// An XML content-type gives the boolean leg its required XPath-context evidence —
+	// a realistic XML web service backing the lookup.
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/lookup?id=admin"), "application/xml", `<?xml version="1.0"?><users/>`)
 	ip := modtest.InsertionPoint(t, rr, "id")
 
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.Len(t, res, 1, "expected a boolean-oracle XPath finding")
+}
+
+// TestNoFalsePositive_XPathOracleWithoutContext: the SAME endpoint as
+// TestBoolean_DetectsOracle — one that evaluates real XPath boolean logic — but served
+// as text/html from a non-XML path with a generic parameter, i.e. with NO XML/XPath
+// context evidence. The tech-stack gate must skip the boolean leg entirely, so even a
+// genuine-looking oracle is not reported without positive XML evidence. This is the core
+// FP-reduction guarantee: a boolean differential on an ordinary web page (where SQL is
+// far more likely than XPath) is never labelled XPath.
+func TestNoFalsePositive_XPathOracleWithoutContext(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(xpathRender(r.URL.Query().Get("id"))))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/lookup?id=admin"), "text/html; charset=utf-8", "<html></html>")
+	ip := modtest.InsertionPoint(t, rr, "id")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a boolean oracle without XML/XPath context must not be reported (tech-stack gate)")
+}
+
+// sqlBoolLookup renders WHERE category='<v>' with boolean semantics IDENTICAL to a
+// real XPath name lookup for the shared ' or '1'='1 / ' and '1'='2 payloads (OR-true→all
+// rows, AND-false→none, inert OR-false/AND-true→baseline). The one difference — and the
+// only thing that tells the two engines apart — is that an XPath CORE FUNCTION is a SQL
+// syntax error: string-length()/local-name() never reach the all-rows page. This models
+// the ginandjuice.shop `category` SQL injection, whose boolean oracle is byte-for-byte
+// what the XPath boolean leg looks for.
+func sqlBoolLookup(v string) string {
+	const (
+		allPage  = "<html><body>directory listing: admin alice bob carol dave erin frank grace heidi</body></html>"
+		nonePage = "<html><body>no matching record found for that query</body></html>"
+		basePage = "<html><body>profile card for the single matched account</body></html>"
+		errPage  = "<html><body>500 Internal Server Error: SQL syntax error near unexpected token</body></html>"
+	)
+	// A SQL engine cannot parse XPath functions — the whole statement errors out.
+	if strings.Contains(v, "string-length(") || strings.Contains(v, "local-name(") ||
+		strings.Contains(v, "count(") || strings.Contains(v, "normalize-space(") ||
+		strings.Contains(v, "boolean(") {
+		return errPage
+	}
+	m := xpathCondRe.FindStringSubmatch(v)
+	if m == nil {
+		return basePage
+	}
+	op, a, b := m[1], m[2], m[3]
+	cmp := a == b
+	switch {
+	case op == "or" && cmp:
+		return allPage
+	case op == "and" && !cmp:
+		return nonePage
+	default:
+		return basePage
+	}
+}
+
+// TestNoFalsePositive_SQLBooleanOracle: the reported real-world false positive — a
+// SQL-injectable parameter (the classic ginandjuice.shop `category`) on a plain text/html
+// page. Its ' or '1'='1 / ' and '1'='2 boolean oracle is identical to XPath's, but the
+// endpoint shows NO XML/XPath context (HTML content-type, non-XML path, generic param),
+// so the tech-stack gate skips the boolean leg outright — the boolean oracle is never
+// even probed. Must NOT be flagged as XPath.
+func TestNoFalsePositive_SQLBooleanOracle(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sqlBoolLookup(r.URL.Query().Get("category"))))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/catalog?category=Gin"), "text/html; charset=utf-8", "<html></html>")
+	ip := modtest.InsertionPoint(t, rr, "category")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a SQL boolean oracle on a non-XML endpoint (ginandjuice.shop category) must not be reported as XPath injection")
+}
+
+// TestNoFalsePositive_SQLBackedXMLService: defense in depth for when the tech-stack gate
+// DOES pass — an XML/SOAP web service whose parameter is actually SQL-injectable. The
+// endpoint has XML context (application/xml), so the boolean leg runs and every generic
+// check passes just as it would for XPath; only the multi-round XPath-core-function
+// discriminator separates them, because string-length()/local-name()/count()/… are SQL
+// syntax errors that reproduce neither the true nor the false page. Must NOT be flagged.
+func TestNoFalsePositive_SQLBackedXMLService(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sqlBoolLookup(r.URL.Query().Get("category"))))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/services/catalog?category=Gin"), "application/xml", `<?xml version="1.0"?><catalog/>`)
+	ip := modtest.InsertionPoint(t, rr, "category")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a SQL-backed XML service must not be reported as XPath injection")
 }
 
 // TestNoFalsePositive_LiteralKeyedDifferential: an endpoint that keys on the literal
@@ -143,7 +285,7 @@ func TestNoFalsePositive_LiteralKeyedDifferential(t *testing.T) {
 	defer srv.Close()
 
 	client := modtest.Requester(t)
-	rr := modtest.Request(t, srv.URL+"/lookup?id=admin")
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/lookup?id=admin"), "application/xml", `<?xml version="1.0"?><r/>`)
 	ip := modtest.InsertionPoint(t, rr, "id")
 
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
@@ -173,7 +315,7 @@ func TestNoFalsePositive_InconsistentAcrossOperands(t *testing.T) {
 	defer srv.Close()
 
 	client := modtest.Requester(t)
-	rr := modtest.Request(t, srv.URL+"/lookup?id=admin")
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/lookup?id=admin"), "application/xml", `<?xml version="1.0"?><r/>`)
 	ip := modtest.InsertionPoint(t, rr, "id")
 
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
@@ -201,7 +343,7 @@ func TestNoFalsePositive_KeywordDifferential(t *testing.T) {
 	defer srv.Close()
 
 	client := modtest.Requester(t)
-	rr := modtest.Request(t, srv.URL+"/lookup?id=admin")
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/lookup?id=admin"), "application/xml", `<?xml version="1.0"?><r/>`)
 	ip := modtest.InsertionPoint(t, rr, "id")
 
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
@@ -229,7 +371,7 @@ func TestNoFalsePositive_FlappingRedirect(t *testing.T) {
 	defer srv.Close()
 
 	client := modtest.Requester(t)
-	rr := modtest.Request(t, srv.URL+"/workflow/lookup?id=admin")
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/workflow/lookup?id=admin"), "application/xml", `<?xml version="1.0"?><r/>`)
 	ip := modtest.InsertionPoint(t, rr, "id")
 
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
@@ -248,7 +390,7 @@ func TestNoFalsePositive_StaticShell(t *testing.T) {
 	defer srv.Close()
 
 	client := modtest.Requester(t)
-	rr := modtest.Request(t, srv.URL+"/app?id=admin")
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/app?id=admin"), "application/xml", `<?xml version="1.0"?><r/>`)
 	ip := modtest.InsertionPoint(t, rr, "id")
 
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})

@@ -2,6 +2,7 @@ package configcmd
 
 import (
 	"fmt"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -14,19 +15,23 @@ import (
 )
 
 func newLsCmd(deps Deps, example string) *cobra.Command {
-	return &cobra.Command{
+	var showSecrets bool
+	cmd := &cobra.Command{
 		Use:     "ls [filter]",
 		Aliases: []string{"list", "view"},
 		Short:   "Display current configuration",
-		Long:    "Display current configuration settings. Optionally filter by key (substring or fuzzy subsequence match, e.g. \"store\" matches \"storage.*\"). Filters containing glob metacharacters (* ? [ ]) are matched as glob patterns against the full key or any dot-segment, e.g. \"kno*\" matches \"known_issue_scan.*\".",
+		Long:    "Display current configuration settings. Sensitive values (API keys, tokens, credentials) are redacted by default; pass --show-secrets to reveal them in plaintext. Optionally filter by key (substring or fuzzy subsequence match, e.g. \"store\" matches \"storage.*\"). Filters containing glob metacharacters (* ? [ ]) are matched as glob patterns against the full key or any dot-segment, e.g. \"kno*\" matches \"known_issue_scan.*\".",
 		Example: example,
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runConfigLs(deps, args)
+			return runConfigLs(deps, args, showSecrets)
 		},
 	}
+	cmd.Flags().BoolVar(&showSecrets, "show-secrets", false, "Reveal sensitive values (API keys, tokens, credentials) in plaintext instead of [redacted]; prints a warning to stderr")
+	return cmd
 }
 
-func runConfigLs(deps Deps, args []string) error {
+func runConfigLs(deps Deps, args []string, showSecrets bool) error {
 	settings, err := config.LoadSettings(deps.ConfigFlag())
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -45,7 +50,12 @@ func runConfigLs(deps Deps, args []string) error {
 		filter = strings.ToLower(args[0])
 	}
 
-	force := deps.Force()
+	// Secret reveal is gated exclusively on the purpose-specific --show-secrets
+	// flag, never on the generic --force. This keeps API keys and tokens out of
+	// agent transcripts and CI logs unless plaintext is explicitly requested.
+	if showSecrets {
+		fmt.Fprintf(os.Stderr, "%s Revealing sensitive configuration values in plaintext.\n", terminal.WarningSymbol())
+	}
 	count := 0
 	for _, entry := range entries {
 		if filter != "" && !keyMatches(strings.ToLower(entry.Key), filter) {
@@ -53,7 +63,7 @@ func runConfigLs(deps Deps, args []string) error {
 		}
 
 		displayValue := entry.Value
-		if entry.Sensitive && !force {
+		if entry.Sensitive && !showSecrets {
 			if entry.Value != "" && entry.Value != "<nil>" {
 				displayValue = "[redacted]"
 			} else {

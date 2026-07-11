@@ -303,7 +303,17 @@ func (h *Handlers) HandleScanURL(c fiber.Ctx) error {
 		}
 	}
 
-	go h.runBackgroundURLScan(scanID, req.URL, rr, moduleIDs, req.NoPassive)
+	if !h.tryStartNativeScan(func() {
+		h.runBackgroundURLScan(scanID, req.URL, rr, moduleIDs, req.NoPassive)
+	}) {
+		if h.repo != nil {
+			_ = h.repo.CompleteScan(context.Background(), scanID, "rejected: too many concurrent scans")
+		}
+		return c.Status(fiber.StatusServiceUnavailable).JSON(ErrorResponse{
+			Error: "too many concurrent scans; retry shortly",
+			Code:  fiber.StatusServiceUnavailable,
+		})
+	}
 
 	return c.Status(fiber.StatusAccepted).JSON(ScanResponse{
 		ProjectUUID: projectUUID,
@@ -404,7 +414,17 @@ func (h *Handlers) HandleScanRequest(c fiber.Ctx) error {
 		}
 	}
 
-	go h.runBackgroundURLScan(scanID, target, rr, moduleIDs, req.NoPassive)
+	if !h.tryStartNativeScan(func() {
+		h.runBackgroundURLScan(scanID, target, rr, moduleIDs, req.NoPassive)
+	}) {
+		if h.repo != nil {
+			_ = h.repo.CompleteScan(context.Background(), scanID, "rejected: too many concurrent scans")
+		}
+		return c.Status(fiber.StatusServiceUnavailable).JSON(ErrorResponse{
+			Error: "too many concurrent scans; retry shortly",
+			Code:  fiber.StatusServiceUnavailable,
+		})
+	}
 
 	return c.Status(fiber.StatusAccepted).JSON(ScanResponse{
 		ProjectUUID: projectUUID,
@@ -458,6 +478,41 @@ func buildRequestFromParams(target, method, body string, headers map[string]stri
 // `◆ finding` lines, periodic `◆ [status]` lines, and a closing
 // `✔ Native scan completed` line. Every line is also appended (ANSI-stripped,
 // timestamped) to {sessions_dir}/{scanID}/runtime.log.
+// tryStartNativeScan reserves an admission slot for a url/request background scan
+// and launches fn on a tracked goroutine (so Close can wait for it and so a burst
+// of requests can't spawn unbounded goroutines). Returns false when the
+// concurrency limit is reached — the caller should reject with 503. The slot is
+// released and the WaitGroup decremented when fn returns.
+func (h *Handlers) tryStartNativeScan(fn func()) bool {
+	if h.nativeScanSem == nil { // handler built without NewHandlers (tests): don't bound
+		go fn()
+		return true
+	}
+	select {
+	case h.nativeScanSem <- struct{}{}:
+	default:
+		return false
+	}
+	h.nativeScanWG.Add(1)
+	go func() {
+		defer h.nativeScanWG.Done()
+		defer func() { <-h.nativeScanSem }()
+		fn()
+	}()
+	return true
+}
+
+// nativeScanContext returns the context url/request scans run under: derived from
+// the server-lifetime runCtx so Close (via runCancel) stops them, falling back to
+// Background for handlers built without a server context.
+func (h *Handlers) nativeScanContext() (context.Context, context.CancelFunc) {
+	parent := h.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithCancel(parent)
+}
+
 func (h *Handlers) runBackgroundURLScan(scanID, target string, rr *httpmsg.HttpRequestResponse, moduleIDs []string, noPassive bool) {
 	// Any panic escaping this goroutine (nil deref in a module, panic inside
 	// a goroutine spawned by a module, etc.) would otherwise take the entire
@@ -583,7 +638,11 @@ func (h *Handlers) runBackgroundURLScan(scanID, target string, rr *httpmsg.HttpR
 
 	scanExecutor = core.NewExecutor(executorCfg, src, active, passive)
 
-	ctx := context.Background()
+	// Derive from the server-lifetime context so a graceful shutdown cancels this
+	// scan instead of leaving it to run (up to MaxDuration) against a context
+	// nothing can cancel.
+	ctx, cancel := h.nativeScanContext()
+	defer cancel()
 	var errMsg string
 	_, execErr := scanExecutor.Execute(ctx)
 	scanDone.Store(true)

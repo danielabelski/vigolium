@@ -2,6 +2,7 @@ import type { ParseResult } from '@babel/parser';
 import * as t from '@babel/types';
 import type { Transform } from '../ast-utils';
 import { traverse, type NodePath, type TraverseOptions } from '../ast-utils/babel';
+import { getEngineState, type AnalysisContext, type AxiosInstanceState } from '../context';
 import { tracebackVariables } from '../traceback/tracebackVariables';
 import { appendPattern, appendExtractedRequest } from './utils';
 import { getTrackedVariablesMap } from './globalVariableTracking';
@@ -36,14 +37,14 @@ const AXIOS_BODY_METHODS = new Set(['post', 'put', 'patch']);
  * Populated by collectAxiosInstances() for `const api = axios.create({ baseURL, headers })`
  * style instances so that relative URLs in `api.get('/users')` can be joined onto baseURL.
  */
-interface AxiosInstanceConfig {
-  baseURL: string;
-  headers: string[];
+type AxiosInstanceConfig = AxiosInstanceState;
+
+function axiosInstances(): Map<string, AxiosInstanceConfig> {
+  return getEngineState().axiosInstances;
 }
-const axiosInstances: Map<string, AxiosInstanceConfig> = new Map();
 
 export function clearAxiosInstances(): void {
-  axiosInstances.clear();
+  axiosInstances().clear();
 }
 
 /**
@@ -106,7 +107,7 @@ export function collectAxiosInstances(
       }
     }
     if (requireBaseURL && !baseURL) return;
-    axiosInstances.set(name, { baseURL, headers });
+    axiosInstances().set(name, { baseURL, headers });
   };
 
   traverse(ast, {
@@ -135,7 +136,7 @@ export function collectAxiosInstances(
 function resolveReceiver(objectNode: t.Node): AxiosInstanceConfig | null {
   if (t.isIdentifier(objectNode)) {
     if (objectNode.name === 'axios') return { baseURL: '', headers: [] };
-    return axiosInstances.get(objectNode.name) ?? null;
+    return axiosInstances().get(objectNode.name) ?? null;
   }
   return null;
 }
@@ -145,6 +146,7 @@ function resolveReceiver(objectNode: t.Node): AxiosInstanceConfig | null {
  * instance default headers. Splits multi-valued URLs (from conditionals).
  */
 function emitFromUrlNode(args: {
+  analysisContext: AnalysisContext;
   urlNode: t.Node | null | undefined;
   method: string;
   instance: AxiosInstanceConfig;
@@ -154,7 +156,7 @@ function emitFromUrlNode(args: {
   trackedVars: TrackedVariableMap;
   context?: ResolutionContext;
 }): void {
-  const { urlNode, method, instance, configObj, dataNode, path, trackedVars, context } = args;
+  const { analysisContext, urlNode, method, instance, configObj, dataNode, path, trackedVars, context } = args;
 
   // Per-call baseURL on the config object overrides the instance baseURL.
   let baseURL = instance.baseURL;
@@ -194,18 +196,22 @@ function emitFromUrlNode(args: {
       }
     }
 
-    appendExtractedRequest(createExtractedRequest({
+    appendExtractedRequest(analysisContext, createExtractedRequest({
       url: joined,
       method: method.toUpperCase(),
       params,
       body,
       headers: mergedHeaders,
       cookies,
-    }));
+    }), {
+      extractor: 'axios', client: 'axios', confidence: 'high',
+      node: path.node, functionName: context?.currentFunction,
+    });
   }
 }
 
 export function createAxiosRequestTransform(
+  analysisContext: AnalysisContext,
   ast: ParseResult<t.File> | null = null,
   sourceCode: string = '',
 ): Transform {
@@ -229,12 +235,14 @@ export function createAxiosRequestTransform(
             if (t.isIdentifier(node.callee) && node.callee.name === 'axios') {
               const arg0 = node.arguments[0];
               const arg1 = node.arguments[1];
+              analysisContext.claimRequestNode(node);
 
-              const result = tracebackVariables(path, [], { ast, sourceCode });
-              appendPattern(result, 'axiosRequest');
+              if (analysisContext.has('requestEvidence')) {
+                appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'axiosRequest', path.node);
+              }
 
               for (const iteration of effectiveIterations) {
-                const context = createResolutionContext(currentFunction, iteration);
+                const context = createResolutionContext(currentFunction, iteration, path);
 
                 if (t.isObjectExpression(arg0)) {
                   // axios({ url, method, params, data, headers, baseURL })
@@ -242,7 +250,7 @@ export function createAxiosRequestTransform(
                   if (!urlNode || !isValidUrlNode(urlNode)) continue;
                   const method = extractProperty(arg0, 'method', trackedVars, context) || 'GET';
                   emitFromUrlNode({
-                    urlNode, method, instance: { baseURL: '', headers: [] },
+                    analysisContext, urlNode, method, instance: { baseURL: '', headers: [] },
                     configObj: arg0, path, trackedVars, context,
                   });
                 } else if (isValidUrlNode(arg0)) {
@@ -252,7 +260,7 @@ export function createAxiosRequestTransform(
                     ? extractProperty(configObj, 'method', trackedVars, context) || 'GET'
                     : 'GET';
                   emitFromUrlNode({
-                    urlNode: arg0, method, instance: { baseURL: '', headers: [] },
+                    analysisContext, urlNode: arg0, method, instance: { baseURL: '', headers: [] },
                     configObj, path, trackedVars, context,
                   });
                 }
@@ -267,12 +275,14 @@ export function createAxiosRequestTransform(
 
               const instance = resolveReceiver(node.callee.object);
               if (!instance) return; // not axios global and not a known instance
+              analysisContext.claimRequestNode(node);
 
-              const result = tracebackVariables(path, [], { ast, sourceCode });
-              appendPattern(result, 'axiosRequest');
+              if (analysisContext.has('requestEvidence')) {
+                appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'axiosRequest', path.node);
+              }
 
               for (const iteration of effectiveIterations) {
-                const context = createResolutionContext(currentFunction, iteration);
+                const context = createResolutionContext(currentFunction, iteration, path);
 
                 if (method.toLowerCase() === 'request') {
                   // instance.request(config)
@@ -281,7 +291,7 @@ export function createAxiosRequestTransform(
                   const urlNode = findProperty(cfg, 'url');
                   if (!urlNode || !isValidUrlNode(urlNode)) continue;
                   const reqMethod = extractProperty(cfg, 'method', trackedVars, context) || 'GET';
-                  emitFromUrlNode({ urlNode, method: reqMethod, instance, configObj: cfg, path, trackedVars, context });
+                  emitFromUrlNode({ analysisContext, urlNode, method: reqMethod, instance, configObj: cfg, path, trackedVars, context });
                   continue;
                 }
 
@@ -293,11 +303,11 @@ export function createAxiosRequestTransform(
                   const dataNode = node.arguments[1] && !t.isFunction(node.arguments[1])
                     ? node.arguments[1] : null;
                   const configObj = t.isObjectExpression(node.arguments[2]) ? node.arguments[2] : undefined;
-                  emitFromUrlNode({ urlNode, method, instance, configObj, dataNode, path, trackedVars, context });
+                  emitFromUrlNode({ analysisContext, urlNode, method, instance, configObj, dataNode, path, trackedVars, context });
                 } else {
                   // axios.get(url, config) / delete / head / options
                   const configObj = t.isObjectExpression(node.arguments[1]) ? node.arguments[1] : undefined;
-                  emitFromUrlNode({ urlNode, method, instance, configObj, path, trackedVars, context });
+                  emitFromUrlNode({ analysisContext, urlNode, method, instance, configObj, path, trackedVars, context });
                 }
               }
             }

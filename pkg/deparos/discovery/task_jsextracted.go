@@ -2,422 +2,387 @@ package discovery
 
 import (
 	"context"
-	"encoding/json"
 	"hash/fnv"
 	"net/url"
-	"strconv"
+	"sort"
 	"strings"
 
 	"github.com/vigolium/vigolium/pkg/deparos/discovery/payload"
 	"github.com/vigolium/vigolium/pkg/deparos/jsscan"
 )
 
-// JSExtractedRequestTask processes HTTP requests extracted from JavaScript files.
-// One task per directory, processes ALL extracted requests from jsscan.
-// Generates GET + POST (json) + POST (form) + original method variants.
-//
-// Priority 3 - same level as observed extensions.
+// JSExtractedRequestTask replays source-scoped request templates. The registry
+// returns each new template once, so adding crawler directories cannot multiply
+// request traffic by directories × endpoints.
 type JSExtractedRequestTask struct {
 	dirURL               *url.URL
 	depth                uint16
 	cachedHash           uint64
-	getExtractedRequests func() []jsscan.ExtractedRequest
+	getExtractedRequests func() []jsscan.ExtractedRequest // v1 compatibility
+	getRequestTemplates  func() []ExtractedRequestTemplate
 }
 
-// JSExtractedRequestTaskConfig contains configuration for creating a JSExtractedRequestTask.
 type JSExtractedRequestTaskConfig struct {
 	DirURL               *url.URL
 	Depth                uint16
 	GetExtractedRequests func() []jsscan.ExtractedRequest
+	GetRequestTemplates  func() []ExtractedRequestTemplate
 }
 
-// RequestVariant represents a single HTTP request variant to execute.
 type RequestVariant struct {
-	Method      string
-	URL         string
-	Body        string
-	ContentType string // application/json or application/x-www-form-urlencoded
+	Method       string
+	URL          string
+	Body         string
+	ContentType  string
+	Headers      []string
+	TemplateID   string
+	SourceURL    string
+	Extractor    string
+	Confidence   string
+	ReplayTier   string // exact | conservative | mutation
+	Generated    bool
+	SourceMapped bool
 }
 
-// nonReplayableMethods are pseudo-methods jsscan emits for non-HTTP protocols
-// (WebSocket, Server-Sent Events). They are recorded as extracted requests for
-// discovery/reporting but must never be replayed as HTTP request variants.
 var nonReplayableMethods = map[string]struct{}{
-	"WS":  {}, // new WebSocket(url)
-	"SSE": {}, // new EventSource(url)
+	"WS":  {},
+	"SSE": {},
 }
 
-// isReplayableMethod reports whether an extracted request method maps to a real
-// HTTP verb that can safely be replayed against the target.
 func isReplayableMethod(method string) bool {
 	_, skip := nonReplayableMethods[strings.ToUpper(method)]
 	return !skip
 }
 
-// NewJSExtractedRequestTask creates a new JS extracted request task with cached hash.
 func NewJSExtractedRequestTask(cfg *JSExtractedRequestTaskConfig) *JSExtractedRequestTask {
 	task := &JSExtractedRequestTask{
-		dirURL:               cfg.DirURL,
-		depth:                cfg.Depth,
+		dirURL: cfg.DirURL, depth: cfg.Depth,
 		getExtractedRequests: cfg.GetExtractedRequests,
+		getRequestTemplates:  cfg.GetRequestTemplates,
 	}
 	task.cachedHash = task.computeHash()
 	return task
 }
 
-// Hash returns the cached hash computed at creation time.
-func (t *JSExtractedRequestTask) Hash() uint64 {
-	return t.cachedHash
-}
+func (t *JSExtractedRequestTask) Hash() uint64 { return t.cachedHash }
 
-// computeHash computes FNV-1a 64-bit hash for task deduplication.
-// Hash includes directory URL to allow same endpoints tested against different directories.
 func (t *JSExtractedRequestTask) computeHash() uint64 {
 	h := fnv.New64a()
-
-	// Include priority
-	h.Write([]byte{PriorityJSExtractedRequest})
-	h.Write([]byte{0})
-
-	// Include task type marker
+	h.Write([]byte{PriorityJSExtractedRequest, 0})
 	h.Write([]byte("jsextracted"))
+	// Keep directory in the scheduling hash. Each execution atomically claims
+	// only newly-added templates, so later JS discoveries still get a chance to
+	// replay without reprocessing older templates.
 	h.Write([]byte{0})
-
-	// Include directory URL (normalized)
 	h.Write([]byte(t.dirURL.Scheme))
 	h.Write([]byte("://"))
 	h.Write([]byte(t.dirURL.Host))
 	h.Write([]byte(t.dirURL.Path))
-
 	return h.Sum64()
 }
 
-// Priority returns the task's priority level.
-func (t *JSExtractedRequestTask) Priority() uint8 {
-	return PriorityJSExtractedRequest
-}
-
-// Description returns a human-readable task description.
+func (t *JSExtractedRequestTask) Priority() uint8 { return PriorityJSExtractedRequest }
 func (t *JSExtractedRequestTask) Description() string {
 	return "JS extracted requests (" + t.dirURL.Path + ")"
 }
-
-// FoundByName returns a short identifier for result attribution.
-func (t *JSExtractedRequestTask) FoundByName() string {
-	return "js-extracted"
-}
-
-// PayloadProvider returns nil - this task iterates extracted requests directly.
-func (t *JSExtractedRequestTask) PayloadProvider() payload.Provider {
-	return nil
-}
-
-// FullURL returns the directory URL.
-func (t *JSExtractedRequestTask) FullURL() []byte {
-	return []byte(t.dirURL.String())
-}
-
-// Extension returns empty string - this task doesn't test extensions.
-func (t *JSExtractedRequestTask) Extension() string {
-	return ""
-}
-
-// Depth returns the discovery depth.
-func (t *JSExtractedRequestTask) Depth() uint16 {
-	return t.depth
-}
-
-// IsFromSpider returns false.
-func (t *JSExtractedRequestTask) IsFromSpider() bool {
-	return false
-}
-
-// DirURL returns the directory URL for coordinator access.
-func (t *JSExtractedRequestTask) DirURL() *url.URL {
-	return t.dirURL
-}
-
-// GetExtractedRequestsFunc returns the function to get extracted requests.
+func (t *JSExtractedRequestTask) FoundByName() string               { return "js-extracted" }
+func (t *JSExtractedRequestTask) PayloadProvider() payload.Provider { return nil }
+func (t *JSExtractedRequestTask) FullURL() []byte                   { return []byte(t.dirURL.String()) }
+func (t *JSExtractedRequestTask) Extension() string                 { return "" }
+func (t *JSExtractedRequestTask) Depth() uint16                     { return t.depth }
+func (t *JSExtractedRequestTask) IsFromSpider() bool                { return false }
+func (t *JSExtractedRequestTask) DirURL() *url.URL                  { return t.dirURL }
 func (t *JSExtractedRequestTask) GetExtractedRequestsFunc() func() []jsscan.ExtractedRequest {
 	return t.getExtractedRequests
 }
 
-// Expand iterates through all extracted requests and emits URL variants.
-// For each extracted request, generates GET + POST variants with merged paths.
 func (t *JSExtractedRequestTask) Expand(ctx context.Context, callback func(url string, depth uint16)) error {
-	requests := t.getExtractedRequests()
-
-	for i := range requests {
+	for _, variant := range t.GenerateAllVariants() {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-
-		variants := t.generateVariants(&requests[i])
-		for _, v := range variants {
-			if v.URL != "" {
-				callback(v.URL, t.depth)
-			}
+		if variant.URL != "" {
+			callback(variant.URL, t.depth)
 		}
 	}
-
 	return nil
 }
 
-// GenerateAllVariants returns all request variants for coordinator to execute.
-// This is called by coordinator to get Method/Body/ContentType for each request.
 func (t *JSExtractedRequestTask) GenerateAllVariants() []RequestVariant {
-	requests := t.getExtractedRequests()
-	var allVariants []RequestVariant
-
-	for i := range requests {
-		variants := t.generateVariants(&requests[i])
-		allVariants = append(allVariants, variants...)
+	if t.getRequestTemplates != nil {
+		templates := t.getRequestTemplates()
+		variants := make([]RequestVariant, 0, len(templates))
+		for i := range templates {
+			variants = append(variants, t.generateTemplateVariants(&templates[i])...)
+		}
+		return deduplicateReplayVariants(variants)
 	}
 
-	return allVariants
-}
-
-// generateVariants generates all HTTP request variants for a single extracted request.
-// Returns: GET, POST(json), POST(form), and original method variants.
-func (t *JSExtractedRequestTask) generateVariants(req *jsscan.ExtractedRequest) []RequestVariant {
-	resolvedURL := t.resolveRequestURL(req)
-	if resolvedURL == "" {
+	// Temporary v1 compatibility for direct unit/API users. Legacy requests are
+	// replayed exactly; method/content-type permutations are no longer implicit.
+	if t.getExtractedRequests == nil {
 		return nil
 	}
+	requests := t.getExtractedRequests()
+	variants := make([]RequestVariant, 0, len(requests))
+	for i := range requests {
+		variants = append(variants, t.generateVariants(&requests[i])...)
+	}
+	return deduplicateReplayVariants(variants)
+}
 
-	params := ReplaceTemplateVars(req.Params)
-	body := ReplaceTemplateVars(req.Body)
+func (t *JSExtractedRequestTask) generateTemplateVariants(template *ExtractedRequestTemplate) []RequestVariant {
+	fact := &template.Request
+	confidence := fact.Provenance.Confidence
+	if confidence == "low" || !isReplayableMethod(fact.Method.Rendered) {
+		return nil // Tier C: discovery hint only; never direct network traffic.
+	}
+	method := strings.ToUpper(fact.Method.Rendered)
+	if method == "" {
+		method = "GET"
+	}
+	query := renderFactFields(fact.Query)
+	body := ""
+	contentType := ""
+	if fact.Body != nil {
+		body = ReplaceTemplateVars(fact.Body.Value.Rendered)
+		contentType = fact.Body.ContentType
+	}
+	headers := safeReplayHeaders(fact)
+	if contentType == "" {
+		contentType = headerValue(headers, "Content-Type")
+	}
+
+	urls := append([]string{fact.URL.Rendered}, fact.URL.Alternatives...)
+	maxURLs := 3
+	replayTier := "exact"
+	if confidence == "medium" {
+		maxURLs = 2
+		replayTier = "conservative"
+	}
+	variants := make([]RequestVariant, 0, min(maxURLs, len(urls)))
+	for _, candidate := range urls {
+		if len(variants) >= maxURLs {
+			break
+		}
+		resolved := resolveSourceAwareURL(candidate, template.SourceURL, t.dirURL)
+		if resolved == "" {
+			continue
+		}
+		resolved = mergeRenderedQuery(resolved, query)
+		variants = append(variants, RequestVariant{
+			Method: method, URL: resolved, Body: body, ContentType: contentType,
+			Headers: append([]string(nil), headers...), TemplateID: template.ID,
+			SourceURL: template.SourceURL, Extractor: fact.Provenance.Extractor,
+			Confidence: confidence, ReplayTier: replayTier,
+			SourceMapped: sourceMappedFact(fact),
+		})
+	}
+	return variants
+}
+
+func (t *JSExtractedRequestTask) generateVariants(req *jsscan.ExtractedRequest) []RequestVariant {
 	method := strings.ToUpper(req.Method)
 	if method == "" {
 		method = "GET"
 	}
-
-	// Non-HTTP pseudo-methods (WS/SSE) are recorded but never replayed as HTTP.
 	if !isReplayableMethod(method) {
 		return nil
 	}
-
-	var variants []RequestVariant
-
-	// Variant 1: GET with params as query string
-	getURL := resolvedURL
-	if params != "" {
-		if strings.Contains(getURL, "?") {
-			getURL += "&" + params
-		} else {
-			getURL += "?" + params
-		}
+	resolved := resolveSourceAwareURL(req.URL, "", t.dirURL)
+	if resolved == "" {
+		return nil
 	}
-	variants = append(variants, RequestVariant{
-		Method: "GET",
-		URL:    getURL,
-	})
-
-	// Variant 2 & 3: POST with both Content-Types
-	if method != "GET" || body != "" || params != "" {
-		postBody := body
-		if postBody == "" && params != "" {
-			postBody = params
-		}
-
-		// POST with JSON
-		jsonBody := t.convertToJSON(postBody)
-		variants = append(variants, RequestVariant{
-			Method:      "POST",
-			URL:         resolvedURL,
-			Body:        jsonBody,
-			ContentType: "application/json",
-		})
-
-		// POST with form-urlencoded
-		formBody := t.convertToForm(postBody)
-		variants = append(variants, RequestVariant{
-			Method:      "POST",
-			URL:         resolvedURL,
-			Body:        formBody,
-			ContentType: "application/x-www-form-urlencoded",
-		})
-	}
-
-	// Variant 4+: Original method if not GET/POST
-	if method != "GET" && method != "POST" {
-		methodBody := body
-		if methodBody == "" && params != "" {
-			methodBody = params
-		}
-
-		// Original method with JSON
-		jsonBody := t.convertToJSON(methodBody)
-		variants = append(variants, RequestVariant{
-			Method:      method,
-			URL:         resolvedURL,
-			Body:        jsonBody,
-			ContentType: "application/json",
-		})
-
-		// Original method with form-urlencoded
-		formBody := t.convertToForm(methodBody)
-		variants = append(variants, RequestVariant{
-			Method:      method,
-			URL:         resolvedURL,
-			Body:        formBody,
-			ContentType: "application/x-www-form-urlencoded",
-		})
-	}
-
-	return variants
+	resolved = mergeRenderedQuery(resolved, req.Params)
+	headers := safeLegacyHeaders(req.Headers)
+	return []RequestVariant{{
+		Method: method, URL: resolved, Body: ReplaceTemplateVars(req.Body),
+		ContentType: headerValue(headers, "Content-Type"), Headers: headers,
+		Confidence: "medium", ReplayTier: "conservative", Extractor: "legacy-v1",
+	}}
 }
 
-// resolveRequestURL resolves the extracted request URL against the directory URL.
-// Uses MergePathWithBase for intelligent path merging.
-func (t *JSExtractedRequestTask) resolveRequestURL(req *jsscan.ExtractedRequest) string {
-	rawURL := req.URL
-	if rawURL == "" {
+func resolveSourceAwareURL(rawURL, sourceURL string, fallback *url.URL) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" || strings.HasPrefix(rawURL, "${") || rawURL == "${X}" || rawURL == "${unknown}" {
 		return ""
 	}
-
-	// Normalize template variables: ${apiURL} → 1
 	rawURL = ReplaceTemplateVars(rawURL)
-
-	// Parse the extracted URL to separate path from query params
-	parsedReq, err := url.Parse(rawURL)
+	reference, err := url.Parse(rawURL)
 	if err != nil {
 		return ""
 	}
-
-	var resolvedPath string
-
-	// Case 1: Absolute URL with scheme and host
-	if parsedReq.Scheme != "" && parsedReq.Host != "" {
-		// Different host - use as-is
-		if parsedReq.Host != t.dirURL.Host {
-			return rawURL
+	if reference.IsAbs() {
+		reference.Fragment = ""
+		return reference.String()
+	}
+	base := fallback
+	if sourceURL != "" {
+		if parsed, parseErr := url.Parse(sourceURL); parseErr == nil && parsed.Scheme != "" && parsed.Host != "" {
+			base = parsed
 		}
-		// Same host - use path only
-		resolvedPath = parsedReq.Path
+	}
+	if base == nil || base.Scheme == "" || base.Host == "" {
+		return ""
+	}
+	resolved := base.ResolveReference(reference)
+	resolved.Fragment = ""
+	return resolved.String()
+}
+
+func mergeRenderedQuery(rawURL, renderedQuery string) string {
+	if renderedQuery == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	renderedQuery = ReplaceTemplateVars(renderedQuery)
+	if u.RawQuery == "" {
+		u.RawQuery = renderedQuery
 	} else {
-		// Case 2 & 3: Absolute path or relative path - merge with directory
-		pathOnly := parsedReq.Path
-		if pathOnly == "" {
-			pathOnly = "/"
-		}
-
-		// Use MergePathWithBase for intelligent path merging
-		dirPath := t.dirURL.Path
-		if dirPath == "" {
-			dirPath = "/"
-		}
-		mergedPath := payload.MergePathWithBase(pathOnly, dirPath)
-		if mergedPath == "" {
-			return "" // Skip (parent, exact match, etc.)
-		}
-		resolvedPath = mergedPath
+		u.RawQuery += "&" + renderedQuery
 	}
-
-	// Build final URL with original query params from extracted request
-	result := *t.dirURL
-	result.Path = resolvedPath
-	result.RawQuery = parsedReq.RawQuery // Keep original query params
-	result.Fragment = ""
-	return result.String()
+	return u.String()
 }
 
-// convertToJSON converts a body string to JSON format.
-// If already JSON, returns as-is. Otherwise, converts form-encoded to JSON.
-func (t *JSExtractedRequestTask) convertToJSON(body string) string {
-	if body == "" {
-		return "{}"
+func renderFactFields(fields []jsscan.FieldTemplate) string {
+	parts := make([]string, 0, len(fields))
+	for _, field := range fields {
+		parts = append(parts,
+			url.QueryEscape(ReplaceTemplateVars(field.Name.Rendered))+"="+
+				url.QueryEscape(ReplaceTemplateVars(field.Value.Rendered)))
 	}
+	return strings.Join(parts, "&")
+}
 
+func parseTemplateFields(value string) url.Values {
+	fields, err := url.ParseQuery(value)
+	if err == nil {
+		return fields
+	}
+	return url.Values{"value": []string{value}}
+}
+
+func splitHeader(header string) (string, string) {
+	name, value, found := strings.Cut(header, ":")
+	if !found {
+		return strings.TrimSpace(header), ""
+	}
+	return strings.TrimSpace(name), strings.TrimSpace(value)
+}
+
+func isSensitiveHeader(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return lower == "authorization" || lower == "proxy-authorization" || lower == "cookie" ||
+		lower == "x-api-key" || strings.Contains(lower, "csrf") || strings.Contains(lower, "xsrf")
+}
+
+func isBrowserControlledHeader(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return lower == "host" || lower == "content-length" || lower == "connection" || lower == "upgrade" ||
+		lower == "origin" || lower == "referer" || strings.HasPrefix(lower, "sec-")
+}
+
+func safeReplayHeaders(fact *jsscan.HTTPRequestFact) []string {
+	if fact == nil {
+		return nil
+	}
+	result := make([]string, 0, len(fact.Headers))
+	protocolHandshake := fact.Provenance.Extractor == "websocket-handshake"
+	for _, header := range fact.Headers {
+		name, value := header.Name.Rendered, header.Value.Rendered
+		controlled := isBrowserControlledHeader(name)
+		if protocolHandshake && (strings.EqualFold(name, "Connection") || strings.EqualFold(name, "Upgrade") || strings.HasPrefix(strings.ToLower(name), "sec-websocket-")) {
+			controlled = false
+		}
+		if name == "" || header.Sensitive || isSensitiveHeader(name) || controlled ||
+			!header.Name.Static || !header.Value.Static {
+			continue
+		}
+		result = append(result, name+": "+value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func safeLegacyHeaders(headers []string) []string {
+	result := make([]string, 0, len(headers))
+	for _, header := range headers {
+		name, value := splitHeader(header)
+		if name == "" || isSensitiveHeader(name) || isBrowserControlledHeader(name) || ContainsTemplateVar(value) {
+			continue
+		}
+		result = append(result, name+": "+value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func headerValue(headers []string, wanted string) string {
+	for _, header := range headers {
+		name, value := splitHeader(header)
+		if strings.EqualFold(name, wanted) {
+			return value
+		}
+	}
+	return ""
+}
+
+func headerSliceToMap(headers []string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(headers))
+	for _, header := range headers {
+		name, value := splitHeader(header)
+		if name != "" {
+			result[name] = value
+		}
+	}
+	return result
+}
+
+func inferBodyKind(body string, headers []string) string {
+	contentType := headerValue(headers, "Content-Type")
 	trimmed := strings.TrimSpace(body)
-
-	// Already JSON
-	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
-		return body
+	if strings.Contains(strings.ToLower(contentType), "json") || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return "json"
 	}
-
-	// Convert form-encoded to JSON
-	values, err := url.ParseQuery(body)
-	if err != nil {
-		// Can't parse, wrap as simple JSON
-		return `{"data":"` + escapeJSONString(body) + `"}`
+	if strings.Contains(strings.ToLower(contentType), "x-www-form-urlencoded") || strings.Contains(body, "=") {
+		return "form"
 	}
-
-	jsonMap := make(map[string]interface{})
-	for k, v := range values {
-		if len(v) == 1 {
-			jsonMap[k] = v[0]
-		} else {
-			jsonMap[k] = v
-		}
-	}
-
-	jsonBytes, err := json.Marshal(jsonMap)
-	if err != nil {
-		return "{}"
-	}
-	return string(jsonBytes)
+	return "text"
 }
 
-// convertToForm converts a body string to form-urlencoded format.
-// If already form-encoded, returns as-is. Otherwise, converts JSON to form.
-func (t *JSExtractedRequestTask) convertToForm(body string) string {
-	if body == "" {
-		return ""
-	}
-
-	trimmed := strings.TrimSpace(body)
-
-	// Not JSON - assume already form-encoded
-	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
-		return body
-	}
-
-	// Convert JSON to form-encoded
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(body), &data); err != nil {
-		// Can't parse JSON, return as-is
-		return body
-	}
-
-	values := url.Values{}
-	for k, v := range data {
-		switch val := v.(type) {
-		case string:
-			values.Set(k, val)
-		case float64:
-			// Format number without trailing zeros
-			if val == float64(int64(val)) {
-				values.Set(k, strconv.FormatInt(int64(val), 10))
-			} else {
-				values.Set(k, strconv.FormatFloat(val, 'f', -1, 64))
+func deduplicateReplayVariants(variants []RequestVariant) []RequestVariant {
+	seen := make(map[string]int, len(variants))
+	result := make([]RequestVariant, 0, len(variants))
+	for _, variant := range variants {
+		key := variant.Method + "\x00" + variant.URL + "\x00" + variant.Body + "\x00" + strings.Join(variant.Headers, "\x00")
+		if index, ok := seen[key]; ok {
+			if variant.SourceMapped && !result[index].SourceMapped {
+				result[index] = variant
 			}
-		case bool:
-			if val {
-				values.Set(k, "true")
-			} else {
-				values.Set(k, "false")
-			}
-		case nil:
-			values.Set(k, "")
-		default:
-			// For complex types, marshal to JSON string
-			jsonVal, _ := json.Marshal(val)
-			values.Set(k, string(jsonVal))
+			continue
 		}
+		seen[key] = len(result)
+		result = append(result, variant)
 	}
-
-	return values.Encode()
+	return result
 }
 
-// escapeJSONString escapes a string for use in JSON.
-func escapeJSONString(s string) string {
-	b, err := json.Marshal(s)
-	if err != nil {
-		return s
+func sourceMappedFact(fact *jsscan.HTTPRequestFact) bool {
+	if fact == nil {
+		return false
 	}
-	// Remove surrounding quotes
-	return string(b[1 : len(b)-1])
+	for _, step := range fact.Provenance.ResolutionSteps {
+		if step.Kind == "source-map" {
+			return true
+		}
+	}
+	return false
 }

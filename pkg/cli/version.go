@@ -19,7 +19,7 @@ var (
 	Description        = "High-fidelity vulnerability scanner that combines speed, modularity, and precision"
 	Author             = "@j3ssie"
 	InitialContributor = "@theblackturtle"
-	Version            = "v0.2.4"
+	Version            = "v0.2.5"
 	Commit             = ""
 	BuildTime          = ""
 )
@@ -31,6 +31,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show version information",
 	Long:  "Print Vigolium version, build time, git commit, and author/contributor info. Pair with -j/--json to emit a machine-readable JSON object instead.",
+	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		printVersion()
 	},

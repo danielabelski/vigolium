@@ -18,6 +18,7 @@ var strategyCmd = &cobra.Command{
 	Long: "Inspect built-in scanning strategies (lite, balanced, deep) and the phases they bundle, " +
 		"the scan intensity levels that tune how hard agent and native scans run, the available agent modes, " +
 		"and the installed scanning profiles. Pass a strategy to a scan with --strategy.",
+	Args: cobra.NoArgs,
 	RunE: runStrategy,
 }
 

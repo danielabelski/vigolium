@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/url"
 	"testing"
 
@@ -14,6 +15,109 @@ import (
 	"github.com/vigolium/vigolium/pkg/deparos/jsscan"
 	"github.com/vigolium/vigolium/pkg/deparos/spider"
 )
+
+func TestExtractionRepositoryStoresTypedJSScanFacts(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	repo := NewExtractionRepository(db)
+	fact := jsscan.HTTPRequestFact{
+		Kind: "httpRequest", ID: "http-test", Client: "fetch",
+		URL:    jsscan.ValueTemplate{Rendered: "/api/users", Static: true},
+		Method: jsscan.ValueTemplate{Rendered: "POST", Static: true},
+		Query: []jsscan.FieldTemplate{{
+			Name:  jsscan.ValueTemplate{Rendered: "page", Static: true},
+			Value: jsscan.ValueTemplate{Rendered: "${page}", Static: false},
+		}},
+		Headers: []jsscan.HeaderTemplate{{
+			Name:  jsscan.ValueTemplate{Rendered: "Content-Type", Static: true},
+			Value: jsscan.ValueTemplate{Rendered: "application/json", Static: true},
+		}},
+		Body:       &jsscan.BodyTemplate{Kind: "json", ContentType: "application/json", Value: jsscan.ValueTemplate{Rendered: `{"id":"${id}"}`, Static: false}},
+		Provenance: jsscan.Provenance{Extractor: "fetch", Confidence: "high", ModulePath: "src/api.ts", Start: &jsscan.SourceLocation{Line: 42}},
+	}
+
+	require.NoError(t, repo.BatchStoreJSScanFacts(10, 20, "https://example.com/assets/app.js", []jsscan.HTTPRequestFact{fact, fact}))
+	require.NoError(t, repo.StoreJSScanFact(10, 20, "https://cdn.example.net/chunk.js", &fact))
+	models, err := repo.GetJSScanRequests(20)
+	require.NoError(t, err)
+	require.Len(t, models, 2, "same source/fact should deduplicate while distinct sources survive")
+
+	for _, model := range models {
+		require.Equal(t, 2, model.SchemaVersion)
+		require.Equal(t, "httpRequest", model.RecordKind.String)
+		require.Equal(t, "high", model.Confidence.String)
+		require.Equal(t, "fetch", model.Extractor.String)
+		require.Equal(t, "src/api.ts", model.ModulePath.String)
+		require.Equal(t, int64(42), model.SourceLine.Int64)
+		require.Contains(t, model.URL, "/api/users?page=%24%7Bpage%7D")
+		var stored jsscan.HTTPRequestFact
+		require.NoError(t, json.Unmarshal([]byte(model.TemplateJSON.String), &stored))
+		require.Equal(t, fact.ID, stored.ID)
+	}
+}
+
+func TestExtractionRepositorySeparatesCapabilityFactsFromHTTPReplay(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	repo := NewExtractionRepository(db)
+	provenance := jsscan.Provenance{Extractor: "capability-test", Confidence: "high", Start: &jsscan.SourceLocation{Line: 7}}
+	result := &jsscan.ScanResult{
+		GraphQLOperations: []jsscan.GraphQLOperationFact{{Kind: "graphqlOperation", ID: "g1", Endpoint: &jsscan.ValueTemplate{Rendered: "/graphql"}, OperationType: "query", Transport: "http", Provenance: provenance}},
+		WebSockets:        []jsscan.WebSocketFact{{Kind: "websocket", ID: "w1", URL: jsscan.ValueTemplate{Rendered: "wss://example.test/ws"}, Provenance: provenance}},
+		EventSources:      []jsscan.EventSourceFact{{Kind: "eventSource", ID: "e1", URL: jsscan.ValueTemplate{Rendered: "/events"}, Provenance: provenance}},
+		ClientRoutes:      []jsscan.ClientRouteFact{{Kind: "clientRoute", ID: "r1", Path: jsscan.ValueTemplate{Rendered: "/users/:id"}, RouteType: "page", Provenance: provenance}},
+		BrowserFlows:      []jsscan.BrowserSecurityFlowFact{{Kind: "browserSecurityFlow", ID: "b1", FlowType: "unsafePostMessage", Provenance: provenance}},
+	}
+	require.NoError(t, repo.BatchStoreJSScanCapabilityFacts(10, 30, "https://example.test/assets/app.js", result))
+	replayRows, err := repo.GetJSScanRequests(30)
+	require.NoError(t, err)
+	require.Empty(t, replayRows, "metadata must never enter the HTTP replay query")
+	metadataRows, err := repo.GetJSScanCapabilityFacts(30)
+	require.NoError(t, err)
+	require.Len(t, metadataRows, 5)
+	kinds := make(map[string]bool)
+	for _, row := range metadataRows {
+		kinds[row.RecordKind.String] = true
+		require.Equal(t, 2, row.SchemaVersion)
+		require.Equal(t, int64(7), row.SourceLine.Int64)
+		require.NotEmpty(t, row.TemplateJSON.String)
+	}
+	for _, kind := range []string{"graphqlOperation", "websocket", "eventSource", "clientRoute", "browserSecurityFlow"} {
+		require.True(t, kinds[kind], "missing %s", kind)
+	}
+}
+
+func TestExtractionRepositoryStoresSourceMapArtifactsImmutably(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	repo := NewExtractionRepository(db)
+	artifact := &JSScanSourceArtifactModel{
+		SourceNodeID: 11, SessionID: 22,
+		GeneratedURL: "https://example.test/assets/app.js",
+		VirtualURL:   "https://example.test/assets/app.js#source=src%2Fapi.ts",
+		SourcePath:   "src/api.ts", Language: "ts", ContentSHA256: "sha-1",
+		Content: `fetch('/api/from-map')`,
+	}
+	require.NoError(t, repo.StoreJSScanSourceArtifact(artifact))
+	require.NoError(t, repo.StoreJSScanSourceArtifact(artifact), "same immutable artifact must deduplicate")
+
+	otherSession := *artifact
+	otherSession.ID = 0
+	otherSession.Hash = ""
+	otherSession.SessionID = 23
+	require.NoError(t, repo.StoreJSScanSourceArtifact(&otherSession))
+
+	rows, err := repo.GetJSScanSourceArtifacts(22)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, "src/api.ts", rows[0].SourcePath)
+	require.Equal(t, `fetch('/api/from-map')`, rows[0].Content)
+	require.NotEmpty(t, rows[0].Hash)
+
+	all, err := repo.GetJSScanSourceArtifacts(0)
+	require.NoError(t, err)
+	require.Len(t, all, 2, "content dedup must remain session-aware")
+}
 
 // setupTestDB creates an in-memory SQLite database for testing.
 func setupTestDB(t *testing.T) *bun.DB {
@@ -42,6 +146,14 @@ func setupTestDB(t *testing.T) *bun.DB {
 		content_type TEXT,
 		headers TEXT,
 		cookies TEXT,
+		source_url TEXT,
+		record_kind TEXT,
+		confidence TEXT,
+		extractor TEXT,
+		module_path TEXT,
+		source_line INTEGER,
+		template_json TEXT,
+		schema_version INTEGER NOT NULL DEFAULT 1,
 		created_at INTEGER NOT NULL
 	)`)
 	if err != nil {
@@ -51,6 +163,26 @@ func setupTestDB(t *testing.T) *bun.DB {
 	_, err = db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_ext_hash ON extractions(hash)`)
 	if err != nil {
 		t.Fatalf("failed to create index: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS jsscan_source_artifacts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		source_node_id INTEGER NOT NULL,
+		session_id INTEGER NOT NULL,
+		hash TEXT NOT NULL,
+		generated_url TEXT NOT NULL,
+		virtual_url TEXT NOT NULL,
+		source_path TEXT NOT NULL,
+		language TEXT NOT NULL,
+		content_sha256 TEXT NOT NULL,
+		content TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	)`)
+	if err != nil {
+		t.Fatalf("failed to create source artifact table: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_jsscan_source_artifact_hash ON jsscan_source_artifacts(hash)`)
+	if err != nil {
+		t.Fatalf("failed to create source artifact index: %v", err)
 	}
 
 	return db

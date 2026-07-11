@@ -183,7 +183,9 @@ func emitAuditStatelessReport(ctx context.Context, db *database.DB, projectUUID,
 	// The throwaway temp DB holds only this run's data, so a project-scoped
 	// query returns exactly the audit's findings.
 	var findings []*database.Finding
-	q := scopeProjectBun(db.NewSelect().Model(&findings).OrderExpr("found_at DESC"), projectUUID)
+	q := scopeProjectBun(db.NewSelect().Model(&findings).
+		Where("record_kind IS NULL OR record_kind = '' OR record_kind = ?", database.RecordKindFinding).
+		OrderExpr("found_at DESC"), projectUUID)
 	if err := q.Scan(ctx); err != nil {
 		return fmt.Errorf("query findings for report: %w", err)
 	}

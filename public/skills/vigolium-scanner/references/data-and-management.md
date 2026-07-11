@@ -83,7 +83,7 @@ vigolium import ./src/vigolium-results --format html -o audit-report.html
 Notes:
 - Imported findings inherit the current project's UUID and default `finding_source = "import"` when the field is empty.
 - Unknown envelope types are counted and reported at the end (e.g. for forward-compatibility).
-- Use `--project-id` / `--project-name` (or `VIGOLIUM_PROJECT`) to target a specific project.
+- Use `--project-uuid` / `--project-name` (or `VIGOLIUM_PROJECT`) to target a specific project.
 
 ---
 
@@ -204,7 +204,7 @@ List database records with filtering, sorting, and display options.
 | `--method` | []string | — | Filter by HTTP method |
 | `--status` | []int | — | Filter by HTTP status code |
 | `--path` | string | — | Filter by URL path pattern |
-| `--scan-id` | string | — | Filter by scan session ID |
+| `--scan-uuid` | string | — | Filter by scan session ID |
 | `--severity` | string | — | Filter findings by severity |
 | `--min-risk` | int | `0` | Show only records with risk score at or above this value |
 | `--remark` | string | — | Filter records containing this text in remarks |
@@ -249,7 +249,7 @@ Show database statistics including record counts, finding breakdowns, and host s
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--detailed` | bool | `false` | Show per-host and per-module breakdown |
-| `--scan-id` | string | — | Stats for a specific scan session |
+| `--scan-uuid` | string | — | Stats for a specific scan session |
 | `--host` | string | — | Stats for a specific hostname |
 
 ### Examples
@@ -279,7 +279,7 @@ Export database records in various formats.
 | `--method` | — | []string | — | Filter by HTTP method |
 | `--status` | — | []int | — | Filter by status code |
 | `--path` | — | string | — | Filter by URL path pattern |
-| `--scan-id` | — | string | — | Filter by scan session ID |
+| `--scan-uuid` | — | string | — | Filter by scan session ID |
 | `--severity` | — | string | — | Filter by severity level |
 | `--from` | — | string | — | Export records created after this date (YYYY-MM-DD) |
 | `--to` | — | string | — | Export records created before this date (YYYY-MM-DD) |
@@ -313,32 +313,32 @@ Delete database records with filtering. Destructive operations require `--force`
 |------|------|---------|-------------|
 | `--all` | bool | `false` | Delete all records (requires `--force`) |
 | `--host` | string | — | Delete records matching hostname |
-| `--scan-id` | string | — | Delete records by scan session |
+| `--scan-uuid` | string | — | Delete records by scan session |
 | `--before` | string | — | Delete records before date (YYYY-MM-DD) |
 | `--status` | []int | — | Delete by HTTP status code |
 | `--severity` | string | — | Delete findings by severity |
 | `--dry-run` | bool | `false` | Show what would be deleted without deleting |
-| `--vacuum` | bool | `false` | Reclaim disk space after deletion (SQLite) |
 | `--orphans` | bool | `false` | Delete findings with no matching HTTP record |
 | `--findings-only` | bool | `false` | Delete findings only, keep HTTP records |
+| `--table` | string | — | Delete all rows from a specific table |
 
 ### Special behavior
 
-- `--force` with no filter flags: resets the entire SQLite database (deletes file + recreates)
-- `--all` without `--force`: error
-- Without `--force`: interactive confirmation prompt
+- VACUUM runs automatically after every delete to reclaim disk space (SQLite).
+- `db clean` with **no selector** is rejected (it never implicitly wipes the DB). Use `--all --force` to delete every row, or `db reset --force` to delete and recreate the database file.
+- `--all` without `--force`: error.
+- Without `--force`: interactive confirmation prompt.
 
 ### Examples
 
 ```bash
-vigolium db clean --scan-id my-scan
+vigolium db clean --scan-uuid my-scan
 vigolium db clean --host old-target.com --force
 vigolium db clean --before 2024-01-01 --dry-run
-vigolium db clean --all --force
+vigolium db clean --all --force        # delete every row (auto-VACUUM)
 vigolium db clean --orphans
 vigolium db clean --findings-only --severity info
-vigolium db clean --vacuum
-vigolium db clean --force  # reset entire database
+vigolium db reset --force              # delete + recreate the database file
 ```
 
 ---
@@ -368,7 +368,7 @@ Browse vulnerability findings with fuzzy search, filtering, raw display, and col
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--severity` | — | string | — | Filter by severity (comma-separated: critical,high,medium,low,info) |
-| `--scan-id` | — | string | — | Filter by scan session ID |
+| `--scan-uuid` | — | string | — | Filter by scan session ID |
 | `--module-type` | — | string | — | Filter by module type (active, passive, nuclei, secret-scan, agent, source-tools, oast, extension) |
 | `--finding-source` | — | string | — | Filter by finding source (audit, spa, agent, oast, source-tools, extension) |
 | `--id` | — | int | `0` | Filter by finding ID |
@@ -761,46 +761,19 @@ vigolium scope set origin.mode strict
 
 ---
 
-## source
+## source (provided via `--source`, not a standalone command)
 
-**Usage:** `vigolium source [flags]` (aliases: `src`)
+There is no `vigolium source` command. Application source code for whitebox /
+source-aware scanning is supplied per-run with the `--source` flag on the agent
+commands (`agent autopilot`, `agent swarm`, `agent query`, `agent audit`).
 
-Manage application source code links for whitebox scanning and SAST.
-
-### Subcommands
-
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| `source ls` | `list` | List linked source repos |
-| `source add` | — | Link source code to a hostname |
-| `source rm <id>` | — | Remove a source repo link |
-| `source scan <id>` | — | Run third-party security tools |
-
-### source add flags
-
-| Flag | Short | Type | Default | Description |
-|------|-------|------|---------|-------------|
-| `--hostname` | `-H` | string | — | Target hostname (**required**) |
-| `--path` | `-p` | string | — | Filesystem path to source root |
-| `--git` | `-g` | string | — | Git URL to clone |
-| `--name` | `-n` | string | dir basename | Display name |
-| `--language` | `-l` | string | — | Primary language |
-| `--framework` | `-f` | string | — | Framework (express, django, spring, etc.) |
-| `--repo-type` | — | string | auto-detected | Type: git, folder, archive |
-| `--scan-uuid` | — | string | — | Link to specific scan UUID |
-| `--tag` | — | []string | — | Tags (repeatable) |
-
-Note: `--path` and `--git` are mutually exclusive; one is required.
-
-### Examples
+`--source` accepts a local directory, a git URL (cloned automatically), a local
+`.zip`/`.tar.gz` archive, or a `gs://<project>/<key>` archive.
 
 ```bash
-vigolium source ls
-vigolium source add --hostname api.example.com --path ./api-source
-vigolium source add --hostname example.com --git https://github.com/org/repo
-vigolium source add --hostname api.example.com --path ./src -l go -f gin
-vigolium source scan 1
-vigolium source rm 2
+vigolium agent autopilot -t https://api.example.com --source ./api-source
+vigolium agent swarm -t https://example.com --source https://github.com/org/repo
+vigolium agent audit --source ./src            # source-only SAST/audit harness
 ```
 
 ---
@@ -861,7 +834,7 @@ vigolium project config
 
 **Usage:** `vigolium storage <subcommand>`
 
-Manage cloud-storage objects scoped to the **active project** (selected via `--project-id`, `--project-name`, or `VIGOLIUM_PROJECT`). Mirrors the REST endpoints under `/api/storage/*`.
+Manage cloud-storage objects scoped to the **active project** (selected via `--project-uuid`, `--project-name`, or `VIGOLIUM_PROJECT`). Mirrors the REST endpoints under `/api/storage/*`.
 
 **Requires** `storage.enabled: true` in `vigolium-configs.yaml` (or `VIGOLIUM_STORAGE_ENABLED=true`) plus `storage.driver`, `storage.bucket`, `storage.access_key`, and `storage.secret_key`. When storage is disabled, every subcommand prints a tip showing how to enable it and exits cleanly (no error).
 

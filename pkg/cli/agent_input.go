@@ -316,3 +316,21 @@ func prependVerbatimPrompt(instruction, verbatim string) string {
 	}
 	return verbatim + "\n\n" + instruction
 }
+
+// resolvePositionalPrompt trims the optional positional prompt (args[0]) shared
+// by `agent autopilot` and `agent swarm`, and rejects combining it with
+// --plan-file, which owns the instruction channel. It returns the trimmed prompt
+// ("" when none). The caller decides — from its own hasExplicitFlags — whether
+// the prompt drives the run through the intent parser or is preserved verbatim
+// as instruction context (a non-empty planFile always implies explicit flags, so
+// the guard fires only in the explicit-flags branch).
+func resolvePositionalPrompt(args []string, planFile string) (string, error) {
+	prompt := ""
+	if len(args) > 0 {
+		prompt = strings.TrimSpace(args[0])
+	}
+	if prompt != "" && planFile != "" {
+		return "", fmt.Errorf("positional prompt cannot be combined with --plan-file (the plan file owns the instruction channel); fold the guidance into the plan file instead")
+	}
+	return prompt, nil
+}

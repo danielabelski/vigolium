@@ -15,7 +15,7 @@ var (
 
 **Fix:** Enforce per-object authorization on every request so users only access identifiers they own, and avoid returning sensitive internal fields.`
 
-	ModuleConfirmation = "Indicated when a request parameter has a high-signal identifier name combined with a predictable value format, or when a JSON response exposes sensitive internal fields"
+	ModuleConfirmation = "Observation for likely object identifiers; sensitive response fields remain candidates until role/identity authorization is compared"
 	ModuleSeverity     = severity.Info
 	ModuleConfidence   = severity.Tentative
 	ModuleTags         = []string{"idor", "authentication", "light"}

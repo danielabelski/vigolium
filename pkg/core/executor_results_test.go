@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +15,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules"
+	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/work"
@@ -32,6 +34,24 @@ func (m *metaStub) Description() string { return m.desc }
 func (m *metaStub) Tags() []string      { return m.tags }
 
 var _ modules.Module = (*metaStub)(nil)
+
+type replacingHook struct {
+	replacement *output.ResultEvent
+}
+
+func (h *replacingHook) RunPreHooks(req *httpmsg.HttpRequestResponse) (*httpmsg.HttpRequestResponse, error) {
+	return req, nil
+}
+
+func (h *replacingHook) RunPostHooks(*output.ResultEvent) (*output.ResultEvent, error) {
+	return h.replacement, nil
+}
+
+type classifiedPassiveModule struct {
+	*trackingPassiveModule
+}
+
+func (m *classifiedPassiveModule) VulnClass() string { return "xss" }
 
 func TestAssignModuleInfo_DescriptionAndTags(t *testing.T) {
 	const block = "**What it means:** demo. **How it's exploited:** demo. **Fix:** demo."
@@ -131,6 +151,105 @@ func loadFindings(t *testing.T, db *database.DB) []*database.Finding {
 		t.Fatalf("load findings: %v", err)
 	}
 	return findings
+}
+
+func TestProcessResults_RecordKindsDoNotInflateFindingsOrCaps(t *testing.T) {
+	e, db := newRepoExecutor(t)
+	e.cfg.MaxFindingsPerModule = 1
+	var findings, candidates, observations int
+	e.cfg.OnResult = func(*output.ResultEvent) { findings++ }
+	e.cfg.OnCandidate = func(*output.ResultEvent) { candidates++ }
+	e.cfg.OnObservation = func(*output.ResultEvent) { observations++ }
+
+	mod := &trackingPassiveModule{id: "kind-test"}
+	e.processResults(context.Background(), []*output.ResultEvent{
+		{URL: "https://example.com/o", RecordKind: output.RecordKindObservation, EvidenceGrade: output.EvidenceGradeObservation},
+		{URL: "https://example.com/c", RecordKind: output.RecordKindCandidate, EvidenceGrade: output.EvidenceGradeCandidate},
+		{URL: "https://example.com/f1"},
+		{URL: "https://example.com/f2"}, // dropped by the finding-only cap
+	}, mod, nil)
+
+	assert.Equal(t, 1, findings)
+	assert.Equal(t, 1, candidates)
+	assert.Equal(t, 1, observations)
+	assert.Len(t, loadFindings(t, db), 3, "observation, candidate, and first finding should be retained")
+
+	defaultCount, err := database.NewFindingsQueryBuilder(db, database.QueryFilters{}).Count(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), defaultCount, "default vulnerability queries must exclude non-findings")
+	observationCount, err := database.NewFindingsQueryBuilder(db, database.QueryFilters{
+		RecordKinds: []string{database.RecordKindObservation},
+	}).Count(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), observationCount)
+}
+
+func TestProcessResults_CoordinationUsesPostHookEvent(t *testing.T) {
+	replacement := &output.ResultEvent{
+		ModuleID:         "hooked-module",
+		URL:              "https://example.com/after?id=1",
+		FuzzingParameter: "after",
+	}
+	e := &Executor{
+		hooks: &replacingHook{replacement: replacement},
+		scanCtx: &modkit.ScanContext{
+			ParamFindings: &modkit.ParameterFindingRegistry{},
+		},
+	}
+	mod := &classifiedPassiveModule{trackingPassiveModule: &trackingPassiveModule{id: "hooked-module"}}
+
+	e.processResults(context.Background(), []*output.ResultEvent{{
+		URL:              "https://example.com/before?id=1",
+		FuzzingParameter: "before",
+	}}, mod, nil)
+
+	assert.True(t, e.scanCtx.ParamFindings.HasFinding("https://example.com/after", "after", "xss"))
+	assert.False(t, e.scanCtx.ParamFindings.HasFinding("https://example.com/before", "before", "xss"), "pre-hook coordinates must not suppress unrelated work")
+}
+
+func TestProcessResults_DuplicateFindingDoesNotConsumeCap(t *testing.T) {
+	e, db := newRepoExecutor(t)
+	e.cfg.MaxFindingsPerModule = 2
+	var callbacks int
+	e.cfg.OnResult = func(*output.ResultEvent) { callbacks++ }
+	mod := &trackingPassiveModule{id: "dedup-cap-test"}
+
+	e.processResults(context.Background(), []*output.ResultEvent{
+		{URL: "https://example.com/a", DedupKey: "root-a"},
+		{URL: "https://example.com/a?second-evidence=1", DedupKey: "root-a"},
+		{URL: "https://example.com/b", DedupKey: "root-b"},
+	}, mod, nil)
+
+	assert.Equal(t, 2, callbacks, "only distinct root causes are dispatched")
+	assert.Len(t, loadFindings(t, db), 2, "duplicate evidence is merged and does not crowd out the second root cause")
+}
+
+func TestAdmitFinding_DuplicatesCannotRacePastRejectedCap(t *testing.T) {
+	e := &Executor{cfg: ExecutorConfig{MaxFindingsPerModule: 1}}
+	first, allowed := e.admitFinding("admitted-root", "cap-test")
+	assert.True(t, first)
+	assert.True(t, allowed)
+
+	const workers = 64
+	start := make(chan struct{})
+	results := make(chan bool, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, admitted := e.admitFinding("rejected-root", "cap-test")
+			results <- admitted
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	for admitted := range results {
+		assert.False(t, admitted, "a duplicate must inherit or repeat the rejected cap decision")
+	}
 }
 
 // TestProcessResults_BaselineFindingLinksWithoutDuplicateRecord proves a finding

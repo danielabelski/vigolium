@@ -8,35 +8,32 @@
 import type { ParseResult } from '@babel/parser';
 import type * as t from '@babel/types';
 import type { FunctionMap, FunctionDefinition, CallSite, Framework } from './types';
-import { detectFramework } from './frameworkDetector';
+import { detectFramework, hasWebpackStructureSignal } from './frameworkDetector';
 import { extractAngularFunctions } from './extractors/angularExtractor';
 import { extractWebpackFunctions } from './extractors/webpackExtractor';
 import { extractInnerFunctions } from './extractors/innerFunctionExtractor';
 import { indexCallSites } from './callSiteIndexer';
+import { getEngineState } from '../context/engine-state';
+import type { StructuralIndex } from '../structure';
 
 /**
  * Maximum depth for nested function call resolution.
  * Can be changed via setMaxResolutionDepth().
  */
-let MAX_RESOLUTION_DEPTH = 5;
-
 /**
  * Set the maximum depth for nested function call resolution.
  * @param depth - Maximum depth (default: 5)
  */
 export function setMaxResolutionDepth(depth: number): void {
-  MAX_RESOLUTION_DEPTH = depth;
+  getEngineState().maxResolutionDepth = Math.max(1, depth);
 }
 
 /**
  * Get the current maximum resolution depth.
  */
 export function getMaxResolutionDepth(): number {
-  return MAX_RESOLUTION_DEPTH;
+  return getEngineState().maxResolutionDepth;
 }
-
-// Global function map state
-let globalFunctionMap: FunctionMap = createEmptyFunctionMap();
 
 /**
  * Create an empty function map
@@ -53,30 +50,31 @@ export function createEmptyFunctionMap(): FunctionMap {
  * Get the current global function map
  */
 export function getFunctionMap(): FunctionMap {
-  return globalFunctionMap;
+  return getEngineState().functionMap;
 }
 
 /**
  * Clear the global function map
  */
 export function clearFunctionMap(): void {
-  globalFunctionMap = createEmptyFunctionMap();
+  getEngineState().functionMap = createEmptyFunctionMap();
 }
 
 /**
  * Register a function definition
  */
 export function registerFunction(def: FunctionDefinition): void {
-  globalFunctionMap.functions.set(def.fullName, def);
+  getFunctionMap().functions.set(def.fullName, def);
 }
 
 /**
  * Register a call site
  */
 export function registerCallSite(callSite: CallSite): void {
-  const sites = globalFunctionMap.callSites.get(callSite.targetFunction) || [];
+  const map = getFunctionMap();
+  const sites = map.callSites.get(callSite.targetFunction) || [];
   sites.push(callSite);
-  globalFunctionMap.callSites.set(callSite.targetFunction, sites);
+  map.callSites.set(callSite.targetFunction, sites);
 }
 
 /**
@@ -90,26 +88,28 @@ export function registerCallSite(callSite: CallSite): void {
  */
 export function buildFunctionMap(
   ast: ParseResult<t.File> | null,
-  sourceCode: string
+  sourceCode: string,
+  structuralIndex?: StructuralIndex,
 ): FunctionMap {
   // Clear previous state
   clearFunctionMap();
+  const functionMap = getFunctionMap();
 
   if (!ast) {
-    return globalFunctionMap;
+    return functionMap;
   }
 
   // Step 1: Detect framework
   const framework = detectFramework(sourceCode);
-  globalFunctionMap.framework = framework;
+  functionMap.framework = framework;
 
   // Step 2: Extract function definitions based on framework
-  extractFunctionDefinitions(ast, framework, sourceCode);
+  extractFunctionDefinitions(ast, framework, sourceCode, functionMap, structuralIndex);
 
   // Step 3: Index all call sites
-  indexCallSites(ast, globalFunctionMap, sourceCode);
+  indexCallSites(ast, functionMap, sourceCode, structuralIndex);
 
-  return globalFunctionMap;
+  return functionMap;
 }
 
 /**
@@ -118,15 +118,20 @@ export function buildFunctionMap(
 function extractFunctionDefinitions(
   ast: ParseResult<t.File>,
   framework: Framework,
-  sourceCode: string
+  sourceCode: string,
+  functionMap: FunctionMap,
+  structuralIndex?: StructuralIndex,
 ): void {
   // First, extract framework-specific functions (services, controllers, etc.)
-  // Always try webpack extraction since React/Vue/etc are often bundled with webpack
-  extractWebpackFunctions(ast, globalFunctionMap, sourceCode);
+  // Module graph extraction is substantially heavier than ordinary request
+  // dispatch. Run it only after cheap, high-recall bundle structure signals.
+  if (framework === 'webpack' || hasWebpackStructureSignal(sourceCode)) {
+    extractWebpackFunctions(ast, functionMap, sourceCode);
+  }
 
   switch (framework) {
     case 'angular':
-      extractAngularFunctions(ast, globalFunctionMap, sourceCode);
+      extractAngularFunctions(ast, functionMap, sourceCode);
       break;
     case 'webpack':
       // Already extracted above
@@ -142,7 +147,7 @@ function extractFunctionDefinitions(
   // Then, extract inner/local functions (works for all frameworks)
   // This catches function declarations and variable function expressions
   // that are nested inside services, directives, controllers, etc.
-  extractInnerFunctions(ast, globalFunctionMap, sourceCode);
+  extractInnerFunctions(ast, functionMap, sourceCode, structuralIndex);
 }
 
 /**
@@ -170,7 +175,7 @@ export function resolveFromFunctionMap(
   visited: Set<string> = new Set()
 ): string | Record<string, string> | null {
   // Prevent infinite recursion
-  if (depth >= MAX_RESOLUTION_DEPTH) return null;
+  if (depth >= getEngineState().maxResolutionDepth) return null;
 
   // Prevent cycles
   const visitKey = `${currentFunction}:${callSiteIndex}:${varName}`;
@@ -257,7 +262,7 @@ export function resolveFromFunctionMap(
  * Get the number of call sites for a function
  */
 export function getCallSiteCount(functionName: string): number {
-  return globalFunctionMap.callSites.get(functionName)?.length || 0;
+  return getFunctionMap().callSites.get(functionName)?.length || 0;
 }
 
 /**
@@ -291,6 +296,19 @@ export function getEffectiveIterations(functionName: string): EffectiveIteration
   }
 
   const iterations: EffectiveIteration[] = [];
+  const state = getEngineState();
+  const limit = state.limits.maxTemplateCombinations;
+  const addIteration = (iteration: EffectiveIteration): boolean => {
+    if (iterations.length >= limit) {
+      if (!state.limitHits.has('callsite_combination_limit_reached')) {
+        state.limitHits.add('callsite_combination_limit_reached');
+        state.reportLimit?.('callsite_combination_limit_reached', `Function call-site expansion limited to ${limit} combinations`);
+      }
+      return false;
+    }
+    iterations.push(iteration);
+    return true;
+  };
 
   for (let i = 0; i < callSites.length; i++) {
     const callSite = callSites[i];
@@ -302,18 +320,18 @@ export function getEffectiveIterations(functionName: string): EffectiveIteration
       if (parentCallSites.length > 0) {
         // For each parent call site, we need an iteration
         for (let j = 0; j < parentCallSites.length; j++) {
-          iterations.push({
+          if (!addIteration({
             callSiteIndex: i,
             parentCallSiteIndex: j,
-          });
+          })) return iterations;
         }
       } else {
         // Parent function has no call sites
-        iterations.push({ callSiteIndex: i });
+        if (!addIteration({ callSiteIndex: i })) return iterations;
       }
     } else {
       // Not inside a registered function
-      iterations.push({ callSiteIndex: i });
+      if (!addIteration({ callSiteIndex: i })) return iterations;
     }
   }
 
@@ -324,21 +342,21 @@ export function getEffectiveIterations(functionName: string): EffectiveIteration
  * Get all call sites for a function
  */
 export function getCallSites(functionName: string): CallSite[] {
-  return globalFunctionMap.callSites.get(functionName) || [];
+  return getFunctionMap().callSites.get(functionName) || [];
 }
 
 /**
  * Check if a function is registered
  */
 export function hasFunction(functionName: string): boolean {
-  return globalFunctionMap.functions.has(functionName);
+  return getFunctionMap().functions.has(functionName);
 }
 
 /**
  * Get function definition by name
  */
 export function getFunction(functionName: string): FunctionDefinition | undefined {
-  return globalFunctionMap.functions.get(functionName);
+  return getFunctionMap().functions.get(functionName);
 }
 
 /**

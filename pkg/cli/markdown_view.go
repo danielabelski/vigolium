@@ -94,6 +94,12 @@ func renderFindingMarkdown(f *database.Finding, records []*database.HTTPRecord, 
 	if f.FindingSource != "" {
 		meta = append(meta, "**Source:** "+f.FindingSource)
 	}
+	if f.RecordKind != "" {
+		meta = append(meta, "**Kind:** "+f.RecordKind)
+	}
+	if f.EvidenceGrade != "" {
+		meta = append(meta, "**Evidence:** "+f.EvidenceGrade)
+	}
 	if f.CVSSScore != 0 {
 		meta = append(meta, fmt.Sprintf("**CVSS:** %.1f", f.CVSSScore))
 	}

@@ -23,9 +23,6 @@ func (e *Executor) processResults(ctx context.Context, results []*output.ResultE
 		moduleType = database.ModuleTypePassive
 	}
 	for _, result := range results {
-		if !e.moduleFindingAllowed(m.ID()) {
-			continue
-		}
 		result.ModuleType = moduleType
 		result.FindingSource = database.FindingSourceDynamicAssessment
 		e.assignModuleInfo(result, m)
@@ -61,14 +58,16 @@ func (e *Executor) processResults(ctx context.Context, results []*output.ResultE
 			continue
 		}
 
-		e.emitResult(ctx, result, baselineReq)
+		emitted := e.emitResult(ctx, result, baselineReq)
 
 		// Cross-module finding dedup: mark (URL, param, vuln_class) as found
 		// so that lower-priority modules with the same vuln class can skip.
-		if vc, ok := m.(modules.VulnClassifier); ok && e.scanCtx != nil && e.scanCtx.ParamFindings != nil {
-			param := result.FuzzingParameter
-			if param != "" {
-				e.scanCtx.ParamFindings.MarkFound(paramFindingLocationKeyFromResult(result), param, vc.VulnClass())
+		if emitted.outcome == emissionFinding && emitted.event != nil {
+			if vc, ok := m.(modules.VulnClassifier); ok && e.scanCtx != nil && e.scanCtx.ParamFindings != nil {
+				param := emitted.event.FuzzingParameter
+				if param != "" {
+					e.scanCtx.ParamFindings.MarkFound(paramFindingLocationKeyFromResult(emitted.event), param, vc.VulnClass())
+				}
 			}
 		}
 	}
@@ -165,12 +164,49 @@ func (e *Executor) moduleFindingAllowed(moduleID string) bool {
 	return true
 }
 
+// admitFinding makes the finding-cap decision once for a final, post-hook
+// root-cause identity. first is true only for the goroutine that owns an
+// admitted identity; duplicates wait until that owner's decision is visible.
+func (e *Executor) admitFinding(id, moduleID string) (first, allowed bool) {
+	pending := &findingAdmission{ready: make(chan struct{})}
+	actual, loaded := e.caches.emittedFindingIDs.LoadOrStore(id, pending)
+	admission := actual.(*findingAdmission)
+	if loaded {
+		<-admission.ready
+		return false, admission.allowed
+	}
+
+	admission.allowed = e.moduleFindingAllowed(moduleID)
+	close(admission.ready)
+	if !admission.allowed {
+		// Do not retain an unbounded set of capped identities. A later retry may
+		// make another (still rejected) cap decision, but can never race past it.
+		e.caches.emittedFindingIDs.Delete(id)
+	}
+	return true, admission.allowed
+}
+
 // emitResult persists and dispatches a finding. baselineReq is an optional hint
 // set when result.Request is the unchanged baseline request: it supplies a
 // memoized request hash so the record-link cache lookup avoids allocating a temp
 // request and re-hashing the raw bytes. It is nil for findings carrying a
 // module-supplied (mutated) request.
-func (e *Executor) emitResult(ctx context.Context, result *output.ResultEvent, baselineReq *httpmsg.HttpRequest) {
+type emissionOutcome uint8
+
+const (
+	emissionDropped emissionOutcome = iota
+	emissionFinding
+	emissionMerged
+	emissionCandidate
+	emissionObservation
+)
+
+type emissionResult struct {
+	outcome emissionOutcome
+	event   *output.ResultEvent
+}
+
+func (e *Executor) emitResult(ctx context.Context, result *output.ResultEvent, baselineReq *httpmsg.HttpRequest) emissionResult {
 	// Run post-hooks (may modify or drop result)
 	if e.hooks != nil {
 		hooked, err := e.hooks.RunPostHooks(result)
@@ -178,14 +214,28 @@ func (e *Executor) emitResult(ctx context.Context, result *output.ResultEvent, b
 			zap.L().Debug("Post-hook error", zap.Error(err))
 		}
 		if hooked == nil {
-			return // Post-hook dropped this result
+			return emissionResult{outcome: emissionDropped} // Post-hook dropped this result
 		}
 		result = hooked
 	}
 
-	e.results.Store(true)
-	if e.statsTracker != nil {
-		e.statsTracker.IncrementFindings()
+	result.RecordKind = result.EffectiveRecordKind()
+	duplicateFinding := false
+	if result.IsFinding() {
+		first, allowed := e.admitFinding(result.ID(), result.ModuleID)
+		duplicateFinding = !first
+		// Only reportable vulnerabilities consume the finding cap. Retained
+		// observations/candidates have their own module-level dedup and must not
+		// crowd a later confirmed result out of the report.
+		if !allowed {
+			return emissionResult{outcome: emissionDropped}
+		}
+		if !duplicateFinding {
+			e.results.Store(true)
+			if e.statsTracker != nil {
+				e.statsTracker.IncrementFindings()
+			}
+		}
 	}
 
 	// Store finding in database (if enabled) and import HTTP evidence into http_records
@@ -222,9 +272,9 @@ func (e *Executor) emitResult(ctx context.Context, result *output.ResultEvent, b
 					findingRR = findingRR.WithResponse(httpmsg.NewHttpResponse([]byte(result.Response)))
 					var err error
 					if e.recordWriter != nil {
-						recordUUID, err = e.recordWriter.Write(ctx, findingRR, "finding", e.projectUUID)
+						recordUUID, err = e.recordWriter.Write(ctx, findingRR, string(result.RecordKind), e.projectUUID)
 					} else {
-						recordUUID, err = e.repo.SaveRecord(ctx, findingRR, "finding", e.projectUUID)
+						recordUUID, err = e.repo.SaveRecord(ctx, findingRR, string(result.RecordKind), e.projectUUID)
 					}
 					if err != nil {
 						zap.L().Warn("Failed to save finding http_record", zap.Error(err))
@@ -261,15 +311,31 @@ func (e *Executor) emitResult(ctx context.Context, result *output.ResultEvent, b
 		}
 	}
 
-	if e.cfg.OnResult != nil {
-		e.cfg.OnResult(result)
-	}
-
-	if e.cfg.Services != nil && e.cfg.Services.Notifier != nil && !result.DisableNotify {
-		if err := e.cfg.Services.Notifier.Send(result); err != nil {
-			zap.L().Debug("notifier send failed for finding",
-				zap.String("module", result.ModuleID), zap.Error(err))
+	switch result.RecordKind {
+	case output.RecordKindObservation:
+		if e.cfg.OnObservation != nil {
+			e.cfg.OnObservation(result)
 		}
+		return emissionResult{outcome: emissionObservation, event: result}
+	case output.RecordKindCandidate:
+		if e.cfg.OnCandidate != nil {
+			e.cfg.OnCandidate(result)
+		}
+		return emissionResult{outcome: emissionCandidate, event: result}
+	default:
+		if duplicateFinding {
+			return emissionResult{outcome: emissionMerged, event: result}
+		}
+		if e.cfg.OnResult != nil {
+			e.cfg.OnResult(result)
+		}
+		if e.cfg.Services != nil && e.cfg.Services.Notifier != nil && !result.DisableNotify {
+			if err := e.cfg.Services.Notifier.Send(result); err != nil {
+				zap.L().Debug("notifier send failed for finding",
+					zap.String("module", result.ModuleID), zap.Error(err))
+			}
+		}
+		return emissionResult{outcome: emissionFinding, event: result}
 	}
 }
 

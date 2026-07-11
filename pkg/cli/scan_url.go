@@ -83,9 +83,9 @@ func init() {
 
 	flags.StringVar(&scanURLMethod, "method", "GET", "HTTP method")
 	flags.StringVar(&scanURLBody, "body", "", "Request body")
-	flags.StringSliceVarP(&scanURLHeaders, "header", "H", nil, "Custom header (repeatable, e.g. -H 'Cookie: x=1')")
+	flags.StringArrayVarP(&scanURLHeaders, "header", "H", nil, "Custom header (repeatable, e.g. -H 'Cookie: x=1'). Commas are literal — repeat -H for multiple headers.")
 	flags.BoolVar(&scanURLNoPassive, "no-passive", false, "Skip passive modules")
-	flags.StringSliceVarP(&globalTargets, "target", "t", nil, "Target URL to scan (repeatable; alternative to the positional URL argument)")
+	flags.StringArrayVarP(&globalTargets, "target", "t", nil, "Target URL to scan (repeatable; alternative to the positional URL argument). Commas are literal.")
 	registerScanModuleFlags(flags)
 	registerModuleSelectionFlags(flags)
 	registerHTTPClientFlags(flags)
@@ -94,19 +94,33 @@ func init() {
 }
 
 // hasFileOutputFormat reports whether --format requests a file-materialized
-// format (jsonl/html/report/pdf) as opposed to the default console view. The
-// lightweight commands route to the Runner for these so the export tail
-// (finishStatelessExport / maybeGenerateReports / finishScanJSONLExport) runs.
-// Plain --json / --ci-output-format leave globalFormat at "console" and keep the
-// fast in-memory direct path, preserving the JSON shape AI agents consume.
+// format (jsonl/html/report/pdf/fs/sqlite) as opposed to the default console
+// view. The lightweight commands route to the Runner for these so the export
+// tail (finishStatelessExport / finishFSExport / maybeGenerateReports /
+// finishScanJSONLExport) runs — otherwise `--format fs` or `--format sqlite`
+// would be silently dropped on the fast in-memory direct path. Plain --json /
+// --ci-output-format leave globalFormat at "console" and keep the fast direct
+// path, preserving the JSON shape AI agents consume.
 func hasFileOutputFormat() bool {
 	for _, f := range parseFormats(globalFormat) {
-		switch f {
-		case "jsonl", "html", "report", "pdf":
+		switch strings.ToLower(f) {
+		case "jsonl", "html", "report", "pdf", "fs", "sqlite", "sqlite3", "db":
 			return true
 		}
 	}
 	return false
+}
+
+// validateGlobalFormats validates the raw --format string (rejecting unknown
+// formats and enforcing sqlite-requires-stateless) before the lightweight
+// scan-url/scan-request commands do any network work. It reuses
+// reconcileOutputFormats against a throwaway options value so the direct path
+// enforces exactly the same rules as the full `scan` runner path — previously an
+// unknown format (or fs/sqlite) could slip through unvalidated on the direct path.
+func validateGlobalFormats() error {
+	probe := types.DefaultOptions()
+	probe.OutputFormats = parseFormats(globalFormat)
+	return reconcileOutputFormats(probe)
 }
 
 // needsRunnerScan reports whether the request must run through the full
@@ -142,6 +156,11 @@ func runScanURLCmd(_ *cobra.Command, args []string) error {
 		return err
 	}
 	if err := validateModuleSelectionFlags(scanURLNoPassive); err != nil {
+		return err
+	}
+	// Validate --format before any network activity so an unknown format (or
+	// fs/sqlite) fails fast instead of being silently ignored on the direct path.
+	if err := validateGlobalFormats(); err != nil {
 		return err
 	}
 
@@ -209,6 +228,8 @@ type scanResult struct {
 	ScanDurationMs int64                 `json:"scan_duration_ms"`
 	ModulesRun     int                   `json:"modules_run"`
 	Findings       []*output.ResultEvent `json:"findings"`
+	Candidates     []*output.ResultEvent `json:"candidates,omitempty"`
+	Observations   []*output.ResultEvent `json:"observations,omitempty"`
 	Errors         []string              `json:"errors,omitempty"`
 }
 
@@ -503,6 +524,8 @@ func runScanWithRR(rr *httpmsg.HttpRequestResponse, target, method string) error
 	// Collect findings
 	var mu sync.Mutex
 	var findings []*output.ResultEvent
+	var candidates []*output.ResultEvent
+	var observations []*output.ResultEvent
 	var scanErrors []string
 
 	executorCfg := core.ExecutorConfig{
@@ -528,6 +551,16 @@ func runScanWithRR(rr *httpmsg.HttpRequestResponse, target, method string) error
 			// and [confidence] brackets surface module class and signal
 			// quality at a glance.
 			fmt.Fprint(os.Stderr, formatStreamingFindingLine(result))
+		},
+		OnCandidate: func(result *output.ResultEvent) {
+			mu.Lock()
+			candidates = append(candidates, result)
+			mu.Unlock()
+		},
+		OnObservation: func(result *output.ResultEvent) {
+			mu.Lock()
+			observations = append(observations, result)
+			mu.Unlock()
 		},
 		StatusInterval: 30 * time.Second,
 	}
@@ -597,6 +630,8 @@ func runScanWithRR(rr *httpmsg.HttpRequestResponse, target, method string) error
 		ScanDurationMs: duration.Milliseconds(),
 		ModulesRun:     len(active) + len(passive),
 		Findings:       findings,
+		Candidates:     candidates,
+		Observations:   observations,
 		Errors:         scanErrors,
 	}
 	if result.Findings == nil {
@@ -614,7 +649,7 @@ func runScanWithRR(rr *httpmsg.HttpRequestResponse, target, method string) error
 // --- Phase mode: delegates to the Runner for full-pipeline phases ---
 
 // buildPhaseOptions creates a *types.Options populated from global flags and phase flags.
-func buildPhaseOptions(target string) *types.Options {
+func buildPhaseOptions(target string) (*types.Options, error) {
 	opts := types.DefaultOptions()
 
 	// Target
@@ -640,10 +675,13 @@ func buildPhaseOptions(target string) *types.Options {
 	opts.ConfigPath = globalConfig
 	opts.ScopeOriginMode = globalScopeOrigin
 	opts.OutputFormats = parseFormats(globalFormat)
-	// reconcileOutputFormats errors are ignored here because buildPhaseOptions
-	// is called with already-validated global flags. It also sets
-	// DeferredJSONLExport, which the post-scan jsonl export keys off of.
-	_ = reconcileOutputFormats(opts)
+	// reconcileOutputFormats validates formats and sets DeferredJSONLExport, which
+	// the post-scan jsonl export keys off of. Propagate its error rather than
+	// discarding it: callers (runScanURLCmd/runScanRequestCmd) also pre-validate
+	// via validateGlobalFormats, but this keeps buildPhaseOptions self-consistent.
+	if rerr := reconcileOutputFormats(opts); rerr != nil {
+		return nil, rerr
+	}
 
 	// Output / persistence flags (shared with `vigolium scan`).
 	opts.Output = scanOpts.Output
@@ -667,7 +705,7 @@ func buildPhaseOptions(target string) *types.Options {
 		opts.ClusterRequests = false
 	}
 
-	return opts
+	return opts, nil
 }
 
 // validateRunnerScanOutput rejects output-format / -o combinations the export
@@ -697,7 +735,10 @@ func validateRunnerScanOutput(opts *types.Options) error {
 // crawls from the target URL like the full pipeline.
 func runRunnerScan(rr *httpmsg.HttpRequestResponse, target string) (err error) {
 	scanStart := time.Now()
-	opts := buildPhaseOptions(target)
+	opts, err := buildPhaseOptions(target)
+	if err != nil {
+		return err
+	}
 
 	if err := validateRunnerScanOutput(opts); err != nil {
 		return err

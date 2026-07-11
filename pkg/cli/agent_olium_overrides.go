@@ -22,7 +22,7 @@ type oliumOverrides struct {
 
 func registerOliumOverrideFlags(cmd *cobra.Command, o *oliumOverrides) {
 	f := cmd.Flags()
-	f.StringVar(&o.Provider, "provider", "", "Olium provider override: openai-codex-oauth | openai-api-key | openai-responses | anthropic-api-key | anthropic-oauth | anthropic-cli | anthropic-vertex | google-vertex | openai-compatible | anthropic-compatible (falls back to agent.olium.provider)")
+	f.StringVar(&o.Provider, "provider", "", oliumProviderFlagUsage)
 	f.StringVar(&o.Model, "model", "", "Olium model id override (falls back to agent.olium.model)")
 	f.StringVar(&o.OAuthCred, "oauth-cred", "", "Olium OAuth/SA credential file (openai-codex-oauth, anthropic-vertex, or google-vertex; falls back to agent.olium.oauth_cred_path or $GOOGLE_APPLICATION_CREDENTIALS)")
 	f.StringVar(&o.OAuthToken, "oauth-token", "", "Olium Anthropic OAuth bearer token (anthropic-oauth; falls back to agent.olium.oauth_token or $ANTHROPIC_API_KEY)")

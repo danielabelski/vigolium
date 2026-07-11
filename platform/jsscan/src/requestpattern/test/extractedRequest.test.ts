@@ -44,24 +44,6 @@ describe('extractedRequest', () => {
           "type": "extractedRequest",
           "url": "https://httpbin.org/get",
         },
-        {
-          "body": "",
-          "cookies": [],
-          "headers": [],
-          "method": "GET",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "https://httpbin.org/anything",
-        },
-        {
-          "body": "",
-          "cookies": [],
-          "headers": [],
-          "method": "GET",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "https://httpbin.org/get",
-        },
       ]
     `);
   });
@@ -84,15 +66,6 @@ describe('extractedRequest', () => {
           "type": "extractedRequest",
           "url": "/api/get",
         },
-        {
-          "body": "",
-          "cookies": [],
-          "headers": [],
-          "method": "POST",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "/api/get",
-        },
       ]
     `);
   });
@@ -110,6 +83,38 @@ describe('extractedRequest', () => {
     // Cookie header is split out into the cookies array, not headers.
     expect(req!.headers.some(h => h.toLowerCase().startsWith('cookie'))).toBe(false);
     expect(req!.cookies).toEqual(['session=xyz', 'theme=dark']);
+  });
+
+  test('XHR lifecycle uses the structural index once and separates repeated opens', async () => {
+    const result = await jsscan(`
+      function run() {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/first');
+        xhr.setRequestHeader('X-Lifecycle', 'first');
+        xhr.send('body-one');
+        xhr.open('POST', '/second');
+        xhr.setRequestHeader('X-Lifecycle', 'second');
+        xhr.send('body-two');
+      }
+    `, { profile: 'endpoints' });
+    const first = result.extractedRequests.find((request) => request.url === '/first');
+    const second = result.extractedRequests.find((request) => request.url === '/second');
+    expect(first).toMatchObject({ body: 'body-one', headers: ['X-Lifecycle: first'] });
+    expect(second).toMatchObject({ body: 'body-two', headers: ['X-Lifecycle: second'] });
+    expect(result.analysisContext.structuralIndex?.stats).toMatchObject({
+      fullTreePasses: 1,
+      xhrLifecycleQueries: 2,
+      xhrFallbackTraversals: 0,
+    });
+  });
+
+  test('XHR receivers with the same name in sibling scopes do not cross-contaminate', async () => {
+    const result = await jsscan(`
+      function alpha() { const xhr = new XMLHttpRequest(); xhr.open('POST', '/alpha'); xhr.send('a'); }
+      function beta() { const xhr = new XMLHttpRequest(); xhr.open('POST', '/beta'); xhr.send('b'); }
+    `, { profile: 'endpoints' });
+    expect(result.extractedRequests.find((request) => request.url === '/alpha')?.body).toBe('a');
+    expect(result.extractedRequests.find((request) => request.url === '/beta')?.body).toBe('b');
   });
 
   test('protocolRequest - WebSocket, EventSource, sendBeacon, GraphQL-over-fetch', async () => {
@@ -164,15 +169,6 @@ describe('extractedRequest', () => {
     expect(result.extractedRequests).toMatchInlineSnapshot(`
       [
         {
-          "body": "{"m_uid":"\${t}","m_access_token":"\${r}"}",
-          "cookies": [],
-          "headers": [],
-          "method": "POST",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "/orders/delete",
-        },
-        {
           "body": "",
           "cookies": [],
           "headers": [],
@@ -198,6 +194,15 @@ describe('extractedRequest', () => {
           "params": "id=1",
           "type": "extractedRequest",
           "url": "/orders/get",
+        },
+        {
+          "body": "{"m_uid":"\${t}","m_access_token":"\${r}"}",
+          "cookies": [],
+          "headers": [],
+          "method": "POST",
+          "params": "",
+          "type": "extractedRequest",
+          "url": "/orders/delete",
         },
         {
           "body": "",
@@ -245,6 +250,19 @@ describe('extractedRequest', () => {
     expect(result.extractedRequests).toMatchInlineSnapshot(`
       [
         {
+          "body": "",
+          "cookies": [
+            "zlp_token=\${zlpToken}",
+          ],
+          "headers": [
+            "Authorization: \${authorization}",
+          ],
+          "method": "GET",
+          "params": "limit=\${limit}&page=\${page}",
+          "type": "extractedRequest",
+          "url": "/v1/user-domain/contacts",
+        },
+        {
           "body": "mutation submitAsusFeedback {
               create_asus_feedback(
                 input: {
@@ -268,28 +286,6 @@ describe('extractedRequest', () => {
           "type": "extractedRequest",
           "url": "\${In}/user-management/v1/graphql",
         },
-        {
-          "body": "",
-          "cookies": [
-            "zlp_token=\${zlpToken}",
-          ],
-          "headers": [
-            "Authorization: \${authorization}",
-          ],
-          "method": "GET",
-          "params": "limit=\${limit}&page=\${page}",
-          "type": "extractedRequest",
-          "url": "/v1/user-domain/contacts",
-        },
-        {
-          "body": "",
-          "cookies": [],
-          "headers": [],
-          "method": "GET",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "/user-management/v1/graphql",
-        },
       ]
     `);
   });
@@ -307,6 +303,15 @@ describe('extractedRequest', () => {
           "params": "zp_trans_id=\${n}&trans_time=\${transTime}&title=\${l}&trans_amount=\${a}",
           "type": "extractedRequest",
           "url": "/support-center/feedback/transaction-history",
+        },
+        {
+          "body": "",
+          "cookies": [],
+          "headers": [],
+          "method": "GET",
+          "params": "zp_trans_id=\${n}&trans_time=\${transTime}&title=\${l}&trans_amount=\${a}",
+          "type": "extractedRequest",
+          "url": "/support-center/feedback/transaction-history/\${id}",
         },
       ]
     `);
@@ -345,15 +350,6 @@ describe('extractedRequest', () => {
     expect(result.extractedRequests).toMatchInlineSnapshot(`
       [
         {
-          "body": "{"data":"value"}",
-          "cookies": [],
-          "headers": [],
-          "method": "POST",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "/api/create",
-        },
-        {
           "body": "",
           "cookies": [],
           "headers": [],
@@ -371,6 +367,15 @@ describe('extractedRequest', () => {
           "type": "extractedRequest",
           "url": "/api/data",
         },
+        {
+          "body": "{"data":"value"}",
+          "cookies": [],
+          "headers": [],
+          "method": "POST",
+          "params": "",
+          "type": "extractedRequest",
+          "url": "/api/create",
+        },
       ]
     `);
   });
@@ -380,6 +385,24 @@ describe('extractedRequest', () => {
     const result = await jsscan(code);
     expect(result.extractedRequests).toMatchInlineSnapshot(`
       [
+        {
+          "body": "",
+          "cookies": [],
+          "headers": [],
+          "method": "GET",
+          "params": "userId=123",
+          "type": "extractedRequest",
+          "url": "/api/user",
+        },
+        {
+          "body": "",
+          "cookies": [],
+          "headers": [],
+          "method": "GET",
+          "params": "query=test&limit=10&page=1",
+          "type": "extractedRequest",
+          "url": "/api/user",
+        },
         {
           "body": "name=John&email=john@example.com",
           "cookies": [],
@@ -398,24 +421,6 @@ describe('extractedRequest', () => {
           "type": "extractedRequest",
           "url": "/api/user/456",
         },
-        {
-          "body": "",
-          "cookies": [],
-          "headers": [],
-          "method": "GET",
-          "params": "userId=123",
-          "type": "extractedRequest",
-          "url": "/api/user",
-        },
-        {
-          "body": "",
-          "cookies": [],
-          "headers": [],
-          "method": "GET",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "/api/user/",
-        },
       ]
     `);
   });
@@ -427,7 +432,8 @@ describe('extractedRequest', () => {
     const requests = result.extractedRequests.filter(r => r.type === 'extractedRequest');
     // First request: resolved params from first call site (loadData)
     // Second request: resolved params from second call site (loadOtherData)
-    // Third request: from genericRequestPattern4 which doesn't use function mapping
+    // Broad unresolved wrapper fallback is suppressed once precise call-site
+    // variants have been recovered.
     expect(requests).toMatchInlineSnapshot(`
       [
         {
@@ -436,6 +442,15 @@ describe('extractedRequest', () => {
           "headers": [],
           "method": "GET",
           "params": "contentId=123&category=news",
+          "type": "extractedRequest",
+          "url": "/api/comments",
+        },
+        {
+          "body": "",
+          "cookies": [],
+          "headers": [],
+          "method": "GET",
+          "params": "contentId=456&type=article",
           "type": "extractedRequest",
           "url": "/api/comments",
         },
@@ -450,8 +465,8 @@ describe('extractedRequest', () => {
     const requests = result.extractedRequests.filter(r => r.type === 'extractedRequest');
     // First request: fetch inside loadData with body
     // Second request: $http from CommentsService.getComments with resolved params from fillDownloads chain
-    // Third request: from genericRequestPattern4 (no function mapping)
-    // Fourth request: from genericRequestPattern4 for fetch (no function mapping)
+    // Broad unresolved service/fetch fallbacks are intentionally suppressed
+    // because precise adapters already recovered their params/method/body.
     expect(requests).toMatchInlineSnapshot(`
       [
         {
@@ -471,15 +486,6 @@ describe('extractedRequest', () => {
           "params": "contentId=\${scope.resourceFiles[0].id}&currentUserName=testUser",
           "type": "extractedRequest",
           "url": "/api/comments",
-        },
-        {
-          "body": "",
-          "cookies": [],
-          "headers": [],
-          "method": "GET",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "/api/load",
         },
       ]
     `);
@@ -592,24 +598,6 @@ describe('extractedRequest', () => {
           "type": "extractedRequest",
           "url": "/api/config",
         },
-        {
-          "body": "",
-          "cookies": [],
-          "headers": [],
-          "method": "GET",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "/api/settings",
-        },
-        {
-          "body": "",
-          "cookies": [],
-          "headers": [],
-          "method": "GET",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "/api/config",
-        },
       ]
     `);
   });
@@ -623,16 +611,7 @@ describe('extractedRequest', () => {
     expect(result.extractedRequests).toMatchInlineSnapshot(`
       [
         {
-          "body": "{"data":"\${data}"}",
-          "cookies": [],
-          "headers": [],
-          "method": "POST",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "/site-visits-api/notification/save",
-        },
-        {
-          "body": "msg=test",
+          "body": "{"data":"msg=test"}",
           "cookies": [],
           "headers": [],
           "method": "POST",
@@ -675,15 +654,6 @@ describe('extractedRequest', () => {
           "params": "limit=20&retries=3",
           "type": "extractedRequest",
           "url": "/api/data",
-        },
-        {
-          "body": "",
-          "cookies": [],
-          "headers": [],
-          "method": "GET",
-          "params": "",
-          "type": "extractedRequest",
-          "url": "/api/config",
         },
       ]
     `);
@@ -785,28 +755,50 @@ describe('extractedRequest', () => {
     expect(requests.some(r => r.url === '/initial/test')).toBe(true);
   });
 
-  test('genericVariableFilter - does NOT track generic names like id, key, name', async () => {
+  test('binding-aware tracking resolves generic names only through their lexical binding', async () => {
     const code = await readFile(join(TESTDATA_DIR, 'genericVariableFilter.js'), 'utf8');
     const result = await jsscan(code);
     // Filter to only extractedRequest type
     const requests = result.extractedRequests.filter(r => r.type === 'extractedRequest');
 
-    // Generic names should remain as ${...} placeholders
+    // A generic name is safe to resolve when the use points at the exact
+    // lexical binding. Generic object-property fallbacks remain suppressed.
     const itemsRequest = requests.find(r => r.url.includes('/api/items/'));
     expect(itemsRequest).toBeDefined();
-    expect(itemsRequest!.url).toBe('/api/items/${id}/details');
+    expect(itemsRequest!.url).toBe('/api/items/should-not-track/details');
 
     // Specific names should be resolved
     const usersRequest = requests.find(r => r.url === '/api/users/user-123');
     expect(usersRequest).toBeDefined();
 
-    // Check body - userId should be resolved, id and name should be placeholders
+    // Check body - both specific and exactly-bound generic names resolve.
     const saveRequest = requests.find(r => r.url === '/api/save' && r.method === 'POST');
     expect(saveRequest).toBeDefined();
     expect(saveRequest!.body).toContain('"userId":"user-123"');
-    expect(saveRequest!.body).toContain('"id":"${id}"');
-    expect(saveRequest!.body).toContain('"name":"${name}"');
+    expect(saveRequest!.body).toContain('"id":"should-not-track"');
+    expect(saveRequest!.body).toContain('"name":"should-not-track"');
     expect(saveRequest!.body).toContain('"userName":"john_doe"');
+  });
+
+  test('binding-aware tracking isolates same-named variables in sibling functions', async () => {
+    const result = await jsscan(`
+      function alpha() {
+        const id = 'alpha';
+        fetch('/api/items/' + id);
+      }
+      function beta() {
+        const id = 'beta';
+        fetch('/api/items/' + id);
+      }
+      const unrelated = { id: 'property-must-not-contaminate' };
+    `);
+    const urls = result.extractedRequests
+      .filter(r => r.type === 'extractedRequest')
+      .map(r => r.url);
+
+    expect(urls).toContain('/api/items/alpha');
+    expect(urls).toContain('/api/items/beta');
+    expect(urls).not.toContain('/api/items/property-must-not-contaminate');
   });
 
   test('templateLiteralTracking - resolves simple template literals', async () => {

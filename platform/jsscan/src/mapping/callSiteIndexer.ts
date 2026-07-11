@@ -10,10 +10,9 @@
  */
 
 import type { ParseResult } from '@babel/parser';
-import type { NodePath, Scope } from '@babel/traverse';
 import * as t from '@babel/types';
-import { traverse } from '../ast-utils/babel';
-import { babelGenerate } from '../ast-utils/babel';
+import { traverse, babelGenerate, type Binding, type NodePath, type Scope } from '../ast-utils/babel';
+import { buildStructuralIndex, type IndexedPropertyAssignment, type StructuralIndex } from '../structure';
 import type { FunctionMap, CallSite, ResolvedArgument } from './types';
 
 /**
@@ -75,13 +74,7 @@ interface FunctionRange {
 /**
  * Property assignment info for tracking variable mutations
  */
-interface PropertyAssignment {
-  line: number;
-  propName: string;
-  value: t.Node;
-  // The scope path where the variable was declared (for proper scoping)
-  declarationLine: number;
-}
+type PropertyAssignment = IndexedPropertyAssignment;
 
 /**
  * Index all call sites for registered functions
@@ -89,7 +82,8 @@ interface PropertyAssignment {
 export function indexCallSites(
   ast: ParseResult<t.File>,
   functionMap: FunctionMap,
-  _sourceCode: string
+  _sourceCode: string,
+  sharedIndex?: StructuralIndex,
 ): void {
   // Build function ranges from registered functions
   const functionRanges: FunctionRange[] = [];
@@ -103,63 +97,12 @@ export function indexCallSites(
   // Sort by start line for efficient lookup
   functionRanges.sort((a, b) => a.startLine - b.startLine);
 
-  // First pass: collect variable declarations and their property assignments
-  // Key: variableName, Value: list of property assignments with scope info
-  const variableAssignments = new Map<string, PropertyAssignment[]>();
-  const variableDeclarations = new Map<string, number[]>(); // varName -> list of declaration lines
+  // Reuse the pipeline's post-transform index. Direct callers build the same
+  // index once here, replacing the old declaration + assignment + call passes.
+  const structuralIndex = sharedIndex ?? buildStructuralIndex(ast);
+  const variableAssignments = structuralIndex.propertyAssignments;
 
-  // Collect all variable declarations (a variable may be declared multiple times in different scopes)
-  traverse(ast, {
-    VariableDeclarator(path) {
-      if (t.isIdentifier(path.node.id)) {
-        const varName = path.node.id.name;
-        const line = path.node.loc?.start.line || 0;
-        if (!variableDeclarations.has(varName)) {
-          variableDeclarations.set(varName, []);
-        }
-        variableDeclarations.get(varName)!.push(line);
-      }
-    },
-    noScope: true,
-  });
-
-  // Build a map of variable mutations (property assignments)
-  traverse(ast, {
-    AssignmentExpression(path) {
-      const left = path.node.left;
-      // Match: varName.property = value
-      if (t.isMemberExpression(left) && t.isIdentifier(left.object) && t.isIdentifier(left.property)) {
-        const varName = left.object.name;
-        const propName = left.property.name;
-        const line = path.node.loc?.start.line || 0;
-
-        // Find the closest declaration before this assignment
-        const declarations = variableDeclarations.get(varName) || [];
-        let declarationLine = 0;
-        for (const declLine of declarations) {
-          if (declLine < line && declLine > declarationLine) {
-            declarationLine = declLine;
-          }
-        }
-
-        if (!variableAssignments.has(varName)) {
-          variableAssignments.set(varName, []);
-        }
-
-        variableAssignments.get(varName)!.push({
-          line,
-          propName,
-          value: path.node.right,
-          declarationLine,
-        });
-      }
-    },
-    noScope: true,
-  });
-
-  // Second pass: index call sites with scope enabled
-  traverse(ast, {
-    CallExpression(path) {
+  const indexCall = (path: NodePath<t.CallExpression>) => {
       const callee = path.node.callee;
       const callLine = path.node.loc?.start.line || 0;
 
@@ -182,7 +125,7 @@ export function indexCallSites(
 
             if (functionMap.functions.has(fullName)) {
               const funcDef = functionMap.functions.get(fullName)!;
-              const resolvedArgs = resolveArguments(path, funcDef.params, variableAssignments, callLine);
+              const resolvedArgs = resolveArguments(path, funcDef.params, variableAssignments);
 
               const callSite: CallSite = {
                 targetFunction: fullName,
@@ -214,7 +157,7 @@ export function indexCallSites(
 
           if (targetName) {
             const funcDef = functionMap.functions.get(targetName)!;
-            const resolvedArgs = resolveArguments(path, funcDef.params, variableAssignments, callLine);
+            const resolvedArgs = resolveArguments(path, funcDef.params, variableAssignments);
 
             // Add to call sites with containing function info
             const callSite: CallSite = {
@@ -238,7 +181,7 @@ export function indexCallSites(
         // Check if this function is registered
         if (functionMap.functions.has(funcName)) {
           const funcDef = functionMap.functions.get(funcName)!;
-          const resolvedArgs = resolveArguments(path, funcDef.params, variableAssignments, callLine);
+          const resolvedArgs = resolveArguments(path, funcDef.params, variableAssignments);
 
           // Add to call sites with containing function info
           const callSite: CallSite = {
@@ -253,10 +196,8 @@ export function indexCallSites(
           functionMap.callSites.set(funcName, sites);
         }
       }
-    },
-    // Enable scope tracking for proper variable resolution
-    noScope: false,
-  });
+  };
+  for (const path of structuralIndex.callExpressions) indexCall(path);
 }
 
 /**
@@ -294,8 +235,7 @@ function getIdentifierName(node: t.Node): string | null {
 function resolveArguments(
   path: NodePath<t.CallExpression>,
   paramNames: string[],
-  variableAssignments: Map<string, PropertyAssignment[]>,
-  callLine: number
+  variableAssignments: Map<Binding, PropertyAssignment[]>,
 ): ResolvedArgument[] {
   const args = path.node.arguments;
   const result: ResolvedArgument[] = [];
@@ -308,7 +248,7 @@ function resolveArguments(
     const rawCode = generateMinifiedCode(arg);
 
     // Try to resolve argument value
-    const value = resolveArgumentValue(arg, path.scope, variableAssignments, callLine);
+    const value = resolveArgumentValue(arg, path.scope, variableAssignments, path.node.start ?? Number.MAX_SAFE_INTEGER);
 
     result.push({
       index: i,
@@ -329,8 +269,8 @@ function resolveArguments(
 function resolveArgumentValue(
   node: t.Node,
   scope: Scope | null,
-  variableAssignments: Map<string, PropertyAssignment[]>,
-  callLine: number
+  variableAssignments: Map<Binding, PropertyAssignment[]>,
+  callOffset: number
 ): string | Record<string, string> {
   // Object literal: { key: value, ... }
   if (t.isObjectExpression(node)) {
@@ -343,30 +283,19 @@ function resolveArgumentValue(
 
     // First, try to resolve from scope
     if (scope) {
-      const resolved = resolveIdentifier(node, scope, variableAssignments, callLine);
+      const resolved = resolveIdentifier(node, scope, variableAssignments, callOffset);
       if (resolved !== null) {
         return resolved;
       }
     }
 
     // Check if we have property assignments for this variable
-    const assignments = variableAssignments.get(varName);
+    const binding = scope?.getBinding(varName);
+    const assignments = binding ? variableAssignments.get(binding) : undefined;
     if (assignments) {
       const result: Record<string, string> = {};
-
-      // Find the most recent declaration line for this variable that's before the call
-      let relevantDeclarationLine = 0;
       for (const assignment of assignments) {
-        if (assignment.declarationLine < callLine && assignment.declarationLine > relevantDeclarationLine) {
-          relevantDeclarationLine = assignment.declarationLine;
-        }
-      }
-
-      // Collect property assignments that belong to this declaration scope
-      for (const assignment of assignments) {
-        if (assignment.line < callLine &&
-            assignment.line > relevantDeclarationLine &&
-            assignment.declarationLine === relevantDeclarationLine) {
+        if (assignment.offset < callOffset) {
           result[assignment.propName] = resolveNodeToString(assignment.value, scope);
         }
       }
@@ -574,8 +503,8 @@ function resolveNodeToString(node: t.Node, scope: Scope | null): string {
 function resolveIdentifier(
   node: t.Identifier,
   scope: Scope,
-  variableAssignments: Map<string, PropertyAssignment[]>,
-  callLine: number
+  variableAssignments: Map<Binding, PropertyAssignment[]>,
+  callOffset: number
 ): string | Record<string, string> | null {
   const binding = scope.getBinding(node.name);
   if (!binding) return null;
@@ -585,21 +514,18 @@ function resolveIdentifier(
   // Variable declarator: var x = value;
   if (bindingPath.isVariableDeclarator()) {
     const init = bindingPath.node.init;
-    const varName = node.name;
-    const declarationLine = bindingPath.node.loc?.start.line || 0;
+    const declarationOffset = bindingPath.node.start ?? 0;
 
     // Check for empty object initialization followed by property assignments
     // Pattern: var params = {}; params.key = value;
     if (t.isObjectExpression(init) && init.properties.length === 0) {
-      const assignments = variableAssignments.get(varName);
+      const assignments = variableAssignments.get(binding);
       if (assignments) {
         const result: Record<string, string> = {};
 
         // Collect property assignments that belong to this declaration
         for (const assignment of assignments) {
-          if (assignment.line < callLine &&
-              assignment.line > declarationLine &&
-              assignment.declarationLine === declarationLine) {
+          if (assignment.offset < callOffset && assignment.offset > declarationOffset) {
             result[assignment.propName] = resolveNodeToString(assignment.value, scope);
           }
         }
@@ -617,12 +543,10 @@ function resolveIdentifier(
       const result = resolveObjectLiteral(init, scope);
 
       // Also check for additional property assignments
-      const assignments = variableAssignments.get(varName);
+      const assignments = variableAssignments.get(binding);
       if (assignments) {
         for (const assignment of assignments) {
-          if (assignment.line < callLine &&
-              assignment.line > declarationLine &&
-              assignment.declarationLine === declarationLine) {
+          if (assignment.offset < callOffset && assignment.offset > declarationOffset) {
             result[assignment.propName] = resolveNodeToString(assignment.value, scope);
           }
         }

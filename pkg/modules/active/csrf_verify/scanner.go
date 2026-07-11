@@ -175,12 +175,23 @@ func (m *Module) ScanPerRequest(
 	if ctx.Request().Header("Cookie") == "" {
 		return nil, nil
 	}
-
-	// Dedup by method:host:path
-	dedupKey := utils.Sha1(fmt.Sprintf("%s:%s:%s", method, urlx.Host, urlx.Path))
-	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(dedupKey) {
+	hasSessionCookie := false
+	for _, name := range modkit.RequestCookieNames(ctx.Request().Header("Cookie")) {
+		if modkit.LikelySessionCookie(name) {
+			hasSessionCookie = true
+			break
+		}
+	}
+	if !hasSessionCookie {
 		return nil, nil
+	}
+	if scanCtx != nil {
+		scanCtx.ObserveResponseCookies(ctx)
+		for _, policy := range scanCtx.RequestCookiePolicies(ctx) {
+			if modkit.LikelySessionCookie(policy.Name) && (policy.SameSite == "strict" || policy.SameSite == "lax") {
+				return nil, nil
+			}
+		}
 	}
 
 	// Find CSRF token parameter
@@ -207,6 +218,14 @@ func (m *Module) ScanPerRequest(
 		return nil, nil
 	}
 
+	// Dedup after applicability checks so an irrelevant request shape cannot
+	// claim the route before a forgeable session-backed token is observed.
+	dedupKey := utils.Sha1(fmt.Sprintf("%s:%s:%s:%s", method, urlx.Host, urlx.Path, ctx.Request().IdentityFingerprint()))
+	diskSet := m.ds.Get(scanCtx.DedupMgr())
+	if diskSet != nil && diskSet.IsSeen(dedupKey) {
+		return nil, nil
+	}
+
 	// Get baseline status code + body (the original request carried a VALID token
 	// and succeeded). The body is used to confirm a mutated-token request was
 	// processed the SAME way, not merely returned some 2xx.
@@ -221,6 +240,16 @@ func (m *Module) ScanPerRequest(
 
 	for _, probe := range probes {
 		mutatedRaw, err := probe.mutate(ctx.Request().Raw(), csrfParamName, csrfParamType)
+		if err != nil {
+			continue
+		}
+		// Model a real cross-site submission. Origin/Referer enforcement will make
+		// this response diverge from the successful same-site baseline.
+		mutatedRaw, err = httpmsg.AddOrReplaceHeader(mutatedRaw, "Origin", "https://csrf-probe.invalid")
+		if err != nil {
+			continue
+		}
+		mutatedRaw, err = httpmsg.AddOrReplaceHeader(mutatedRaw, "Referer", "https://csrf-probe.invalid/probe")
 		if err != nil {
 			continue
 		}
@@ -266,11 +295,14 @@ func (m *Module) ScanPerRequest(
 				Request:          string(mutatedRaw),
 				FuzzingParameter: csrfParamName,
 				ExtractedResults: []string{probe.name},
+				RecordKind:       output.RecordKindCandidate,
+				EvidenceGrade:    output.EvidenceGradeDifferential,
+				DedupKey:         fmt.Sprintf("csrf-token-bypass|%s|%s|%s|%s", urlx.Host, method, urlx.Path, ctx.Request().IdentityFingerprint()),
 				Info: output.Info{
-					Name:        fmt.Sprintf("CSRF Token Not Validated: %s", probe.name),
-					Description: probe.desc,
-					Severity:    severity.High,
-					Confidence:  severity.Firm,
+					Name:        fmt.Sprintf("Potential CSRF Token Bypass: %s", probe.name),
+					Description: probe.desc + ". The cross-site response matched the valid-token baseline, but a durable unauthorized state change was not measured.",
+					Severity:    severity.Medium,
+					Confidence:  severity.Tentative,
 					Tags:        []string{"csrf", "token-bypass", "session"},
 					Reference:   []string{"https://portswigger.net/web-security/csrf/bypassing-token-validation"},
 				},

@@ -80,6 +80,25 @@ func (h *findingsHandlers) HandleListFindings(c fiber.Ctx) error {
 		filters.FindingSource = fs
 	}
 
+	// Record kind. Vulnerabilities remain the default; callers may explicitly
+	// request retained candidates/observations for triage and orchestration.
+	if kinds := c.Query("record_kind"); kinds != "" {
+		for _, raw := range strings.Split(kinds, ",") {
+			kind := strings.TrimSpace(strings.ToLower(raw))
+			switch kind {
+			case database.RecordKindFinding, database.RecordKindCandidate, database.RecordKindObservation:
+				filters.RecordKinds = append(filters.RecordKinds, kind)
+			case "":
+				continue
+			default:
+				return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{
+					Error: "invalid record_kind: " + raw,
+					Code:  fiber.StatusBadRequest,
+				})
+			}
+		}
+	}
+
 	// Repo name
 	if rn := c.Query("repo_name"); rn != "" {
 		filters.RepoName = rn

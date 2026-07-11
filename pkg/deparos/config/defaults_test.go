@@ -75,6 +75,17 @@ func TestDefaultConfig(t *testing.T) {
 		// Timeout: 10 seconds
 		assert.Equal(t, 10*time.Second, cfg.Engine.Timeout, "timeout should be 10 seconds")
 	})
+
+	t.Run("jsscan safety defaults", func(t *testing.T) {
+		assert.True(t, cfg.JSScan.Enabled)
+		assert.Equal(t, "exact", cfg.JSScan.ReplayMode)
+		assert.True(t, cfg.JSScan.SourceMaps)
+		assert.True(t, cfg.JSScan.AssetGraph)
+		assert.False(t, cfg.JSScan.ProtocolHandshake)
+		assert.Equal(t, 500_000, cfg.JSScan.MaxASTNodes)
+		assert.LessOrEqual(t, cfg.JSScan.NormalInputMB, cfg.JSScan.MaxASTInputMB)
+		assert.LessOrEqual(t, cfg.JSScan.MaxASTInputMB, cfg.JSScan.HardInputMB)
+	})
 }
 
 func TestDefaultCustomExtensions(t *testing.T) {

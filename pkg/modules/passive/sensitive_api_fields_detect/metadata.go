@@ -15,7 +15,7 @@ var (
 
 **Fix:** Restrict responses to only the fields each caller is authorized to see, removing credentials and PII unless required.`
 
-	ModuleConfirmation = "Confirmed when JSON response body contains sensitive field names"
+	ModuleConfirmation = "Candidate when populated sensitive-looking JSON fields are present; confirmation requires role/schema or cross-identity authorization context"
 	ModuleSeverity     = severity.Medium
 	ModuleConfidence   = severity.Tentative
 	ModuleTags         = []string{"api", "info-disclosure", "light"}

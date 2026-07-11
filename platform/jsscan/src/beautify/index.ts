@@ -1,5 +1,4 @@
 import debug from 'debug';
-import { webcrack } from 'webcrack';
 
 const log = debug('jsscan:beautify');
 
@@ -53,6 +52,10 @@ export function looksWorthBeautifying(code: string): boolean {
  * and webpack/browserify-bundled rather than deliberately obfuscated.
  */
 export async function beautifyBundle(code: string): Promise<BeautifyResult> {
+	// Keep Webcrack out of the endpoints/DOM startup path. Bun may still package
+	// the dependency into a compiled helper, but its module graph and native
+	// initialization are not evaluated until a beautify profile actually runs.
+	const { webcrack } = await import('webcrack');
   const res = await webcrack(code, {
     deobfuscate: false,
     unminify: true,

@@ -1,10 +1,80 @@
 import type { NodePath } from '@babel/traverse';
 import type * as t from '@babel/types';
 import { createHash } from 'node:crypto';
+import type { AnalysisContext } from '../context';
+import type { Confidence, HttpClientKind, ResolutionStep } from '../protocol';
 import type { TracebackResult } from '../traceback/tracebackVariables';
 import type { ExtractedRequest } from './types';
 
-const checksums: Set<string> = new Set();
+export interface RequestEmission {
+    extractor: string;
+    client: HttpClientKind;
+    confidence: Confidence;
+    node?: t.Node | null;
+    functionName?: string;
+    evidence?: string;
+    resolutionSteps?: ResolutionStep[];
+}
+
+const CONFIDENCE_RANK: Record<Confidence, number> = {
+    low: 0,
+    medium: 1,
+    high: 2,
+};
+
+function recordOrigin(
+    context: AnalysisContext,
+    index: number,
+    emission: RequestEmission | undefined,
+    request: ExtractedRequest,
+): void {
+    const fallback = context.defaultOrigin();
+    const node = emission?.node;
+    const origin = emission ? {
+        client: emission.client,
+        provenance: {
+            extractor: emission.extractor,
+            confidence: emission.confidence,
+            ...(emission.functionName ? { functionName: emission.functionName } : {}),
+            ...(node?.loc?.start ? {
+                start: {
+                    line: node.loc.start.line,
+                    column: node.loc.start.column,
+                    ...(typeof node.start === 'number' ? { offset: node.start } : {}),
+                },
+            } : {}),
+            ...(node?.loc?.end ? {
+                end: {
+                    line: node.loc.end.line,
+                    column: node.loc.end.column,
+                    ...(typeof node.end === 'number' ? { offset: node.end } : {}),
+                },
+            } : {}),
+            ...(emission.evidence ? { evidence: emission.evidence } : {}),
+            ...(emission.resolutionSteps?.length ? { resolutionSteps: emission.resolutionSteps } : {}),
+        },
+        extractors: [emission.extractor],
+        alternatives: { url: [], method: [], params: [], body: [] },
+    } : fallback;
+
+    const existing = context.requestOrigins[index];
+    if (!existing) {
+        context.requestOrigins[index] = origin;
+        return;
+    }
+    existing.extractors = [...new Set([...existing.extractors, ...origin.extractors])];
+    const canonical = context.requests[index];
+    for (const field of ['url', 'method', 'params', 'body'] as const) {
+        if (request[field] !== canonical[field] && !existing.alternatives[field].includes(request[field])) {
+            existing.alternatives[field].push(request[field]);
+        }
+    }
+    if (CONFIDENCE_RANK[origin.provenance.confidence] > CONFIDENCE_RANK[existing.provenance.confidence]) {
+        existing.client = origin.client;
+        existing.provenance = origin.provenance;
+    }
+}
+
 const MAX_CODE_LENGTH = 5000;
 
 function generateChecksum(code: string): string {
@@ -13,17 +83,53 @@ function generateChecksum(code: string): string {
     return hash.digest('hex');
 }
 
-export function appendPattern(result: TracebackResult, patternType: string) {
+export function appendPattern(
+    context: AnalysisContext,
+    result: TracebackResult | (() => TracebackResult),
+    patternType: string,
+    node?: object,
+) {
+    if (!context.has('requestEvidence')) return;
+    if (typeof result === 'function') {
+        if (node && context.pendingEvidenceNodes.has(node)) return;
+        // Queue a small multiple of the output budget. Expensive traceback is
+        // executed only for nodes that ultimately contributed a retained,
+        // deduplicated request candidate.
+        if (context.pendingRequestEvidence.length >= context.limits.maxEvidenceRecords * 4) return;
+        if (node) context.pendingEvidenceNodes.add(node);
+        context.pendingRequestEvidence.push({ patternType, node, build: result });
+        return;
+    }
+    appendResolvedPattern(context, result, patternType);
+}
+
+function appendResolvedPattern(
+    context: AnalysisContext,
+    result: TracebackResult,
+    patternType: string,
+): void {
     if (result.code === '' || result.code.length > MAX_CODE_LENGTH) {
         return;
     }
     const checksum = generateChecksum(result.code);
 
-    if (!checksums.has(checksum)) {
-        checksums.add(checksum);
+    if (!context.patternDedup.has(checksum)) {
+        if (context.requestPatterns.length >= context.limits.maxEvidenceRecords) {
+            context.partial = true;
+            context.addDiagnostic({
+                type: 'diagnostic',
+                severity: 'warning',
+                stage: 'requestEvidence',
+                code: 'evidence_limit_reached',
+                message: `Request evidence limited to ${context.limits.maxEvidenceRecords} records`,
+                recoverable: true,
+            });
+            return;
+        }
+        context.patternDedup.add(checksum);
 
         const newPattern = {
-            type: 'requestPattern',
+            type: 'requestPattern' as const,
             patternType: patternType,
             code: result.code,
             functionName: result.functionName,
@@ -33,7 +139,27 @@ export function appendPattern(result: TracebackResult, patternType: string) {
             tracedVariables: [...result.tracedVariables]
         };
 
-        console.log(JSON.stringify(newPattern));
+        context.requestPatterns.push(newPattern);
+    }
+}
+
+export function flushPendingPatterns(context: AnalysisContext): void {
+    const pending = context.pendingRequestEvidence.splice(0);
+    for (const evidence of pending) {
+        if (context.requestPatterns.length >= context.limits.maxEvidenceRecords) break;
+        if (evidence.node && !context.retainedEvidenceNodes.has(evidence.node)) continue;
+        try {
+            context.evidenceBuilds++;
+            appendResolvedPattern(context, evidence.build(), evidence.patternType);
+        } catch (error) {
+            context.partial = true;
+            context.addDiagnostic({
+                type: 'diagnostic', severity: 'warning', stage: 'requestEvidence',
+                code: 'evidence_generation_failed',
+                message: error instanceof Error ? error.message : String(error),
+                recoverable: true,
+            });
+        }
     }
 }
 
@@ -106,9 +232,6 @@ export function collectAPIUrls(path: NodePath): string[] {
 
     return strings;
 }
-
-const extractedChecksums: Set<string> = new Set();
-const extractedRequests: ExtractedRequest[] = [];
 
 /**
  * Normalize template variables in a string for deduplication purposes.
@@ -298,47 +421,71 @@ function isFrontendFrameworkParams(params: string): boolean {
     return false;
 }
 
-export function appendExtractedRequest(request: ExtractedRequest) {
+export function appendExtractedRequest(
+    context: AnalysisContext,
+    request: ExtractedRequest,
+    emission?: RequestEmission,
+): boolean {
     // Skip if URL is empty or just a placeholder
     if (!request.url || request.url === '${unknown}') {
-        return;
+        return false;
     }
 
     // Skip non-HTTP schemes (data:, javascript:, mailto:, etc.)
     if (isNonHttpScheme(request.url)) {
-        return;
+        return false;
     }
 
     // Skip URLs that are purely variable placeholders
     if (isPureVariableUrl(request.url)) {
-        return;
+        return false;
     }
 
     // Skip invalid URLs (false positives like HTTP headers, event names, etc.)
     if (!isValidHttpUrl(request.url)) {
-        return;
+        return false;
     }
 
     // Skip frontend framework configs (React Router, Vue Router, Ionic Router, React components, etc.)
     if (isFrontendFrameworkParams(request.params)) {
-        return;
+        return false;
     }
 
-    const checksum = generateChecksum(
-        `${normalizeTemplateVars(request.url)}|${request.method}|${normalizeTemplateVars(request.params)}|${normalizeTemplateVars(request.body)}`
-    );
-
-    if (!extractedChecksums.has(checksum)) {
-        extractedChecksums.add(checksum);
-        extractedRequests.push(request);
+    const identity = [
+        normalizeTemplateVars(request.url),
+        request.method.toUpperCase(),
+        normalizeTemplateVars(request.params),
+        normalizeTemplateVars(request.body),
+    ].join('|');
+    const existingIndex = context.requestDedup.get(identity);
+    if (existingIndex !== undefined) {
+        const existing = context.requests[existingIndex];
+        existing.headers = [...new Set([...existing.headers, ...request.headers])];
+        existing.cookies = [...new Set([...existing.cookies, ...request.cookies])];
+        recordOrigin(context, existingIndex, emission, request);
+        return true;
     }
+
+    if (context.requests.length >= context.limits.maxRequests) {
+        context.partial = true;
+        context.addDiagnostic({
+            type: 'diagnostic',
+            severity: 'warning',
+            stage: 'endpoints',
+            code: 'request_limit_reached',
+            message: `Endpoint output limited to ${context.limits.maxRequests} records`,
+            recoverable: true,
+        });
+        return false;
+    }
+    const index = context.requests.length;
+    context.requestDedup.set(identity, index);
+    context.requests.push(request);
+    if (emission?.node) context.retainedEvidenceNodes.add(emission.node);
+    recordOrigin(context, index, emission, request);
+    return true;
 }
 
-export function getExtractedRequests(): ExtractedRequest[] {
-    return [...extractedRequests];
-}
-
-export function clearExtractedRequests(): void {
-    extractedRequests.length = 0;
-    extractedChecksums.clear();
+export function getExtractedRequests(context: AnalysisContext): ExtractedRequest[] {
+    return [...context.requests];
 }

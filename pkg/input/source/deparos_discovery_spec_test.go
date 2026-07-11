@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	deparosstorage "github.com/vigolium/vigolium/pkg/deparos/storage"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/work"
 )
@@ -14,8 +15,14 @@ import (
 // captureSaver is a RecordSaver test double that records how many records were
 // saved under each source label and hands back deterministic UUIDs.
 type captureSaver struct {
-	mu       sync.Mutex
-	bySource map[string]int
+	mu        sync.Mutex
+	bySource  map[string]int
+	artifacts []capturedArtifact
+}
+
+type capturedArtifact struct {
+	recordUUID, kind, filename, mediaType, sha256, metadata string
+	content                                                 []byte
 }
 
 func newCaptureSaver() *captureSaver {
@@ -38,6 +45,16 @@ func (c *captureSaver) SaveRecordBatch(_ context.Context, records []*httpmsg.Htt
 		uuids[i] = fmt.Sprintf("%s-%d", source, i)
 	}
 	return uuids, nil
+}
+
+func (c *captureSaver) SaveAnalysisArtifact(_ context.Context, recordUUID, kind, filename, mediaType, sha256 string, content []byte, metadata string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.artifacts = append(c.artifacts, capturedArtifact{
+		recordUUID: recordUUID, kind: kind, filename: filename, mediaType: mediaType,
+		sha256: sha256, content: append([]byte(nil), content...), metadata: metadata,
+	})
+	return nil
 }
 
 func newTestDiscoverySource(saver RecordSaver) *DeparosDiscoverySource {
@@ -143,6 +160,39 @@ func TestSaveAndEmit_EmitsWithoutUUIDsOnSaveFailure(t *testing.T) {
 	for i, it := range emitted {
 		assert.Emptyf(t, it.RecordUUID, "item %d should have no UUID after a failed save", i)
 	}
+}
+
+func TestPersistJSScanSourceArtifactsPromotesEphemeralContent(t *testing.T) {
+	saver := newCaptureSaver()
+	d := newTestDiscoverySource(saver)
+	siteMap, err := deparosstorage.NewSiteMap(deparosstorage.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer siteMap.Close()
+	generatedURL := "https://example.test/assets/app.js"
+	if err := siteMap.Extractions().StoreJSScanSourceArtifact(&deparosstorage.JSScanSourceArtifactModel{
+		SourceNodeID: 1, SessionID: siteMap.SessionDBID(), GeneratedURL: generatedURL,
+		VirtualURL: generatedURL + "#source=src%2Fapi.ts", SourcePath: "src/api.ts",
+		Language: "ts", ContentSHA256: "abc123", Content: `fetch('/api/from-map')`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := httpmsg.GetRawRequestFromURL(generatedURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.persistJSScanSourceArtifacts(context.Background(), siteMap,
+		[]*httpmsg.HttpRequestResponse{record}, []string{"record-uuid"})
+	if len(saver.artifacts) != 1 {
+		t.Fatalf("promoted %d artifacts, want 1", len(saver.artifacts))
+	}
+	artifact := saver.artifacts[0]
+	assert.Equal(t, "record-uuid", artifact.recordUUID)
+	assert.Equal(t, "source-map-original", artifact.kind)
+	assert.Equal(t, "src/api.ts", artifact.filename)
+	assert.Equal(t, `fetch('/api/from-map')`, string(artifact.content))
+	assert.Contains(t, artifact.metadata, generatedURL)
 }
 
 type failingSaver struct{}

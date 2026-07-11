@@ -197,7 +197,12 @@ func readChildStatsSQLite(output string) (childStats, bool) {
 		return childStats{}, false
 	}
 
-	rows, err := db.QueryContext(ctx, "SELECT severity, COUNT(*) FROM findings GROUP BY severity")
+	rows, err := db.QueryContext(ctx, "SELECT severity, COUNT(*) FROM findings WHERE record_kind IS NULL OR record_kind = '' OR record_kind = 'finding' GROUP BY severity")
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "record_kind") {
+		// Older standalone exports predate record_kind; every row in those files is
+		// a finding, so retain the legacy query as a read-only compatibility path.
+		rows, err = db.QueryContext(ctx, "SELECT severity, COUNT(*) FROM findings GROUP BY severity")
+	}
 	if err != nil {
 		return childStats{}, false
 	}

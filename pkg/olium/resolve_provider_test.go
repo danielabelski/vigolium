@@ -323,3 +323,36 @@ func TestResolveProviderAnthropicCompatible(t *testing.T) {
 		}
 	})
 }
+
+// TestProviderNamesMatchResolveProvider guards the single-source-of-truth
+// invariant: every name in ProviderNames is a real runtime provider (resolveProvider
+// never falls through to the "unknown provider" default for it), and an unknown
+// name IS rejected. This keeps ProviderNames — which drives `agent --list-agents`
+// and every `--provider` help string — from drifting away from the resolver switch.
+func TestProviderNamesMatchResolveProvider(t *testing.T) {
+	seen := map[string]bool{}
+	for _, name := range ProviderNames {
+		if seen[name] {
+			t.Errorf("ProviderNames has duplicate %q", name)
+		}
+		seen[name] = true
+
+		if !IsKnownProvider(name) {
+			t.Errorf("IsKnownProvider(%q) = false, want true", name)
+		}
+		// resolveProvider may still fail for a known provider (missing creds,
+		// binary, or base URL), but it must never report it as unknown.
+		_, _, _, err := resolveProvider(Options{Provider: name})
+		if err != nil && strings.Contains(err.Error(), "unknown provider") {
+			t.Errorf("provider %q in ProviderNames is not handled by resolveProvider: %v", name, err)
+		}
+	}
+
+	if IsKnownProvider("definitely-not-a-provider") {
+		t.Error("IsKnownProvider returned true for a bogus name")
+	}
+	if _, _, _, err := resolveProvider(Options{Provider: "definitely-not-a-provider"}); err == nil ||
+		!strings.Contains(err.Error(), "unknown provider") {
+		t.Errorf("expected unknown-provider error, got %v", err)
+	}
+}

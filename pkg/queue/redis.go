@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -57,6 +58,14 @@ type RedisQueue struct {
 
 	closed   atomic.Bool
 	closedCh chan struct{}
+
+	// pendingMsgIDs maps a dequeued task's ID → its Redis Stream message ID so Ack
+	// (which only receives the task ID via the Queue interface) can XACK the right
+	// message. Without it Ack was a no-op and completed messages stayed in the
+	// consumer group's pending-entries list forever, growing unbounded and getting
+	// redelivered by ClaimPendingTasks.
+	pendingMu     sync.Mutex
+	pendingMsgIDs map[string]string
 
 	// Metrics
 	totalEnqueued  atomic.Int64
@@ -126,6 +135,7 @@ func NewRedisQueue(cfg RedisQueueConfig) (*RedisQueue, error) {
 		blockTimeout:  cfg.BlockTimeout,
 		maxRetries:    cfg.MaxRetries,
 		closedCh:      make(chan struct{}),
+		pendingMsgIDs: make(map[string]string),
 	}, nil
 }
 
@@ -240,11 +250,16 @@ func (q *RedisQueue) Dequeue(ctx context.Context) (*ScanTask, error) {
 			continue
 		}
 
-		// Store message ID for later acknowledgment
+		// Store message ID for later acknowledgment — both in task metadata (for
+		// visibility) and in the queue's taskID→messageID map so Ack(taskID) can
+		// resolve the message to XACK.
 		task.Metadata = map[string]string{
 			"redis_message_id": msg.ID,
 		}
 		task.Status = TaskStatusProcessing
+		q.pendingMu.Lock()
+		q.pendingMsgIDs[task.ID] = msg.ID
+		q.pendingMu.Unlock()
 
 		q.totalDequeued.Add(1)
 		zap.L().Debug("Task dequeued from Redis",
@@ -255,15 +270,32 @@ func (q *RedisQueue) Dequeue(ctx context.Context) (*ScanTask, error) {
 	}
 }
 
-// Ack marks a task as completed and acknowledges the message.
+// Ack marks a task as completed and XACKs its Redis Stream message so it leaves
+// the consumer group's pending-entries list. The message ID is resolved from the
+// taskID→messageID map populated at Dequeue.
 func (q *RedisQueue) Ack(taskID string) error {
-	// Note: In Redis Streams, we need the message ID to ack.
-	// The message ID is stored in task metadata during Dequeue.
-	// For now, we'll use XACK with the stream and group.
-	// In production, you'd want to track the message ID.
+	q.pendingMu.Lock()
+	msgID, ok := q.pendingMsgIDs[taskID]
+	if ok {
+		delete(q.pendingMsgIDs, taskID)
+	}
+	q.pendingMu.Unlock()
+
+	if !ok {
+		// Not dequeued through this instance, or already acked — nothing to XACK.
+		zap.L().Debug("Ack: no pending Redis message for task", zap.String("task_id", taskID))
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := q.client.XAck(ctx, q.streamName, q.consumerGroup, msgID).Result(); err != nil {
+		return fmt.Errorf("failed to XACK message %s for task %s: %w", msgID, taskID, err)
+	}
 
 	q.totalCompleted.Add(1)
-	zap.L().Debug("Task acknowledged (Redis)", zap.String("task_id", taskID))
+	zap.L().Debug("Task acknowledged (Redis XACK)",
+		zap.String("task_id", taskID), zap.String("message_id", msgID))
 	return nil
 }
 

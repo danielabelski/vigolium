@@ -307,6 +307,45 @@ var providerAliases = map[string]string{
 	"anthropic-claude-cli": "anthropic-cli",
 }
 
+// ProviderNames is the canonical, ordered list of provider identifiers the
+// olium runtime accepts (the aliases in providerAliases resolve into these). It
+// is the single source of truth for provider discovery: resolveProvider's
+// validation error, `vigolium agent --list-agents`, and every `--provider` help
+// string read from it, so the CLI can never advertise a provider set that
+// diverges from what the runtime actually resolves. Keep this in sync with the
+// switch in resolveProvider.
+var ProviderNames = []string{
+	"openai-codex-oauth",
+	"openai-api-key",
+	"openai-responses",
+	"anthropic-api-key",
+	"anthropic-oauth",
+	"anthropic-cli",
+	"anthropic-claude-sdk-bridge",
+	"anthropic-vertex",
+	"google-vertex",
+	"openai-compatible",
+	"anthropic-compatible",
+}
+
+// ProviderNamesString renders ProviderNames joined by sep, for help text and
+// error messages.
+func ProviderNamesString(sep string) string {
+	return strings.Join(ProviderNames, sep)
+}
+
+// IsKnownProvider reports whether name (after alias resolution) is a provider the
+// runtime accepts.
+func IsKnownProvider(name string) bool {
+	canonical := CanonicalProviderName(name)
+	for _, p := range ProviderNames {
+		if p == canonical {
+			return true
+		}
+	}
+	return false
+}
+
 // CanonicalProviderName normalizes a provider string: it trims surrounding
 // whitespace, lowercases it, and resolves any registered alias to its
 // canonical name. An empty input is returned unchanged so callers can still

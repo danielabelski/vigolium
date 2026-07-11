@@ -124,9 +124,34 @@ type RecordWriter struct {
 	closed atomic.Bool
 	wg     sync.WaitGroup
 
+	// admitMu + admitWG form the shutdown admission gate. A write takes admitMu
+	// for read, checks closed, and (if open) adds itself to admitWG before
+	// enqueueing; Close takes admitMu for write to set closed, then admitWG.Wait()s
+	// for every in-flight enqueue to finish BEFORE cancelling the flush context.
+	// This guarantees the drain observes every admitted record (no orphan) and that
+	// an admitted write is never told it failed while its record was persisted —
+	// once admitted, a write only awaits its real result.
+	admitMu sync.RWMutex
+	admitWG sync.WaitGroup
+
 	// dedupCache maps a record's dedup key → UUID so a key already seen by this
 	// writer skips the per-record SELECT and the redundant insert. nil disables it.
 	dedupCache *lru.Cache[string, string]
+}
+
+// beginAdmit reserves an admission slot unless the writer is closing. On true the
+// caller MUST call w.admitWG.Done() exactly once after its enqueue attempt
+// finishes (whether the send succeeded or was abandoned on the caller's ctx).
+// Holding admitMu.RLock across the closed check + Add makes it impossible for a
+// write to admit after Close has taken the write lock and observed the count.
+func (w *RecordWriter) beginAdmit() bool {
+	w.admitMu.RLock()
+	defer w.admitMu.RUnlock()
+	if w.closed.Load() {
+		return false
+	}
+	w.admitWG.Add(1)
+	return true
 }
 
 // hashSeed is a package-level seed for consistent host hashing within
@@ -180,84 +205,100 @@ func NewRecordWriter(repo *Repository, cfg RecordWriterConfig) *RecordWriter {
 	return w
 }
 
+// pendingWrite is the outcome of admitting one record: either it resolved
+// immediately (cache hit, invalid input, or an enqueue abandoned on the caller's
+// ctx) with uuid/err set, or it was enqueued and its result must be awaited on
+// resultCh (dedupKey caches the resolved UUID on success).
+type pendingWrite struct {
+	dedupKey string
+	resultCh chan WriteResult
+	uuid     string
+	err      error
+	resolved bool
+}
+
+// admit converts a record, checks the dedup cache, and — on a miss — enqueues it
+// to its shard through the admission gate WITHOUT waiting. Shared by Write (one
+// record) and SaveRecordBatch (admit all, then await all), so a lone bulk caller
+// fills real writer batches instead of paying one flush interval per record.
+func (w *RecordWriter) admit(ctx context.Context, rr *httpmsg.HttpRequestResponse, source, projectUUID string) pendingWrite {
+	if rr == nil || rr.Request() == nil {
+		return pendingWrite{err: fmt.Errorf("invalid HttpRequestResponse"), resolved: true}
+	}
+	record := &HTTPRecord{}
+	if err := record.FromHttpRequestResponse(rr); err != nil {
+		return pendingWrite{err: fmt.Errorf("failed to convert request: %w", err), resolved: true}
+	}
+	record.Source = source
+	// Default the project UUID before the dedup lookup so it matches what
+	// SaveRecordsBatch persists. Otherwise an empty projectUUID makes the lookup
+	// filter on project_uuid="" while inserts land under DefaultProjectUUID, and
+	// duplicates slip through.
+	record.ProjectUUID = defaultProjectUUID(projectUUID)
+
+	// Fast path: a key already seen by this writer (cross-request repeat, common in
+	// discovery/spidering) skips both the dedup SELECT and the redundant insert. On
+	// a miss the flush goroutine runs the duplicate check in one batched query.
+	dedupKey := recordDedupKey(record)
+	if w.dedupCache != nil {
+		if existingUUID, ok := w.dedupCache.Get(dedupKey); ok {
+			return pendingWrite{uuid: existingUUID, resolved: true}
+		}
+	}
+
+	// Admission gate: once admitted, Close() waits for this enqueue to finish
+	// before draining, so the drain is guaranteed to flush the record and deliver
+	// its result — no orphaned request, and no "closed" error for a persisted row.
+	if !w.beginAdmit() {
+		return pendingWrite{err: ErrRecordWriterClosed, resolved: true}
+	}
+
+	resultCh := make(chan WriteResult, 1)
+	w.enqueued.Add(1)
+	shard := w.shardFor(record.Hostname)
+
+	// w.ctx is NOT cancelled while any admission is outstanding (Close waits for
+	// admitWG before cancelling), so the flush loop is alive and consuming; the
+	// send can only wait on buffer space, never on shutdown. Only the caller's own
+	// ctx can abandon the send.
+	select {
+	case shard.ch <- writeRequest{record: record, result: resultCh}:
+		w.admitWG.Done() // admitted; the drain now owns delivering our result
+		return pendingWrite{dedupKey: dedupKey, resultCh: resultCh}
+	case <-ctx.Done():
+		w.admitWG.Done() // never sent; nothing to deliver
+		return pendingWrite{err: ctx.Err(), resolved: true}
+	}
+}
+
+// await returns an admitted record's result, blocking on the flush loop / drain
+// (which always delivers exactly one result to an admitted request). Only the
+// caller's ctx may abandon the wait; a concurrent Close() no longer fails an
+// already-accepted write. Caches the resolved UUID on success.
+func (w *RecordWriter) await(ctx context.Context, p pendingWrite) (string, error) {
+	if p.resolved {
+		return p.uuid, p.err
+	}
+	var res WriteResult
+	select {
+	case res = <-p.resultCh:
+	case <-ctx.Done():
+		res = WriteResult{Err: ctx.Err()}
+	}
+	if res.Err == nil {
+		w.cacheDedup(p.dedupKey, res.UUID)
+	}
+	return res.UUID, res.Err
+}
+
 // Write enqueues a record for batched insertion.
 // It blocks until the record is persisted (or the context is cancelled).
 // This is safe to call from multiple goroutines concurrently.
 func (w *RecordWriter) Write(ctx context.Context, rr *httpmsg.HttpRequestResponse, source string, projectUUID string) (string, error) {
-	if rr == nil || rr.Request() == nil {
-		return "", fmt.Errorf("invalid HttpRequestResponse")
-	}
 	if w.closed.Load() {
 		return "", ErrRecordWriterClosed
 	}
-
-	record := &HTTPRecord{}
-	if err := record.FromHttpRequestResponse(rr); err != nil {
-		return "", fmt.Errorf("failed to convert request: %w", err)
-	}
-	record.Source = source
-	// Default the project UUID before the dedup lookup so it matches what
-	// SaveRecordsBatch persists. Otherwise an empty projectUUID makes the
-	// lookup filter on project_uuid="" while inserts land under
-	// DefaultProjectUUID, and duplicates slip through.
-	record.ProjectUUID = defaultProjectUUID(projectUUID)
-
-	// Fast path: a key already seen by this writer (cross-request repeat, common
-	// in discovery/spidering) skips both the dedup SELECT and the redundant
-	// insert without touching the database. On a miss the record is enqueued and
-	// the flush goroutine runs the duplicate check in a single batched query
-	// (findDuplicateRecordUUIDs) rather than a per-record SELECT on this hot path.
-	dedupKey := recordDedupKey(record)
-	if w.dedupCache != nil {
-		if existingUUID, ok := w.dedupCache.Get(dedupKey); ok {
-			return existingUUID, nil
-		}
-	}
-
-	resultCh := make(chan WriteResult, 1)
-	req := writeRequest{record: record, result: resultCh}
-
-	w.enqueued.Add(1)
-
-	shard := w.shardFor(record.Hostname)
-
-	select {
-	case shard.ch <- req:
-	case <-w.ctx.Done():
-		return "", ErrRecordWriterClosed
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
-
-	// Prefer a delivered result over a shutdown signal: when both Close()
-	// cancels w.ctx and flushLoop's drain has already written our result, the
-	// caller should see the success rather than ErrRecordWriterClosed.
-	select {
-	case res := <-resultCh:
-		if res.Err == nil {
-			w.cacheDedup(dedupKey, res.UUID)
-		}
-		return res.UUID, res.Err
-	default:
-	}
-
-	// w.ctx.Done() is required here: Go's select is non-deterministic, so the
-	// first select can pick `shard.ch <- req` even when w.ctx is already
-	// cancelled. If flushLoop has since exited (its drain in <-ctx.Done() exits
-	// once the channel reads `default`), our request is orphaned in the buffered
-	// channel and resultCh is never written. Without this branch, the caller
-	// blocks forever on a Close() that won the race.
-	select {
-	case res := <-resultCh:
-		if res.Err == nil {
-			w.cacheDedup(dedupKey, res.UUID)
-		}
-		return res.UUID, res.Err
-	case <-w.ctx.Done():
-		return "", ErrRecordWriterClosed
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
+	return w.await(ctx, w.admit(ctx, rr, source, projectUUID))
 }
 
 // cacheDedup records a dedup key → UUID mapping so a later Write of the same key
@@ -323,26 +364,61 @@ func (w *RecordWriter) SaveRecord(ctx context.Context, rr *httpmsg.HttpRequestRe
 	return w.Write(ctx, rr, source, projectUUID)
 }
 
-// SaveRecordBatch implements the network.RecordSaver interface by delegating
-// each record to Write. The flush loop handles the actual batching.
+// SaveRecordBatch enqueues every record to its shard BEFORE awaiting any result,
+// so a single bulk producer's records land in the same writer batch instead of
+// paying one flush interval per record (the trap of a Write-in-a-loop: Write
+// blocks until its record is flushed, so a lone producer never fills a batch).
+// Results are returned positionally aligned with the input — uuids[i] corresponds
+// to records[i] — including deduplicated, invalid, and failed entries, so callers
+// can't misassociate a UUID. The first error encountered is returned alongside
+// the (still complete) uuid slice.
 func (w *RecordWriter) SaveRecordBatch(ctx context.Context, records []*httpmsg.HttpRequestResponse, source string, projectUUID string) ([]string, error) {
-	uuids := make([]string, 0, len(records))
-	for _, rr := range records {
-		uuid, err := w.Write(ctx, rr, source, projectUUID)
-		if err != nil {
-			return uuids, err
-		}
-		uuids = append(uuids, uuid)
+	uuids := make([]string, len(records))
+	if len(records) == 0 {
+		return uuids, nil
 	}
-	return uuids, nil
+	if w.closed.Load() {
+		return uuids, ErrRecordWriterClosed
+	}
+
+	// Phase 1: admit ALL records without waiting, so they sit in the shard channels
+	// together and the flush loop coalesces them into real batches.
+	pend := make([]pendingWrite, len(records))
+	for i, rr := range records {
+		pend[i] = w.admit(ctx, rr, source, projectUUID)
+	}
+
+	// Phase 2: collect results in input order.
+	var firstErr error
+	for i := range pend {
+		uuid, err := w.await(ctx, pend[i])
+		uuids[i] = uuid
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return uuids, firstErr
 }
 
 // Close stops accepting new writes, flushes remaining records, and returns.
+//
+// Ordering matters: it marks the writer closed under the admission write lock (so
+// no new write can admit past this point), waits for every already-admitted
+// enqueue to finish landing in a shard channel, and only THEN cancels the flush
+// context. That guarantees the shutdown drain observes every admitted record —
+// none is orphaned in a channel after the flush loop exits, and every admitted
+// write receives its real result instead of a spurious "closed" error.
 func (w *RecordWriter) Close() {
-	if !w.closed.CompareAndSwap(false, true) {
+	w.admitMu.Lock()
+	if w.closed.Load() {
+		w.admitMu.Unlock()
 		return
 	}
-	w.cancel()
+	w.closed.Store(true)
+	w.admitMu.Unlock()
+
+	w.admitWG.Wait() // all in-flight enqueues have landed (or been abandoned)
+	w.cancel()       // now the drain sees every admitted record
 	w.wg.Wait()
 }
 

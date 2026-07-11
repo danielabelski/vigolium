@@ -217,6 +217,9 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 			URL:              urlx.String(),
 			Matched:          urlx.String(),
 			ExtractedResults: found,
+			RecordKind:       output.RecordKindCandidate,
+			EvidenceGrade:    output.EvidenceGradeCandidate,
+			DedupKey:         "sensitive-api-fields|" + host + "|" + urlx.Path + "|" + ctx.Request().IdentityFingerprint(),
 			Info: output.Info{
 				Name:        "Sensitive API Fields Detected",
 				Description: desc,

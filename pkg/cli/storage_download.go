@@ -32,10 +32,6 @@ func runStorageDownload(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if sc == nil {
-		return nil
-	}
-
 	key := args[0]
 	output, _ := cmd.Flags().GetString("output")
 

@@ -124,7 +124,7 @@ func init() {
 	f.StringVar(&autopilotInput, "input", "", "Raw input (curl command, raw HTTP, Burp XML, URL). Reads from stdin if piped")
 	f.BoolVar(&globalDBIsolate, "db-isolate", false, dbIsolateAgentFlagUsage)
 	f.StringVar(&autopilotRecordUUID, "record-uuid", "", "Use an HTTP record from the database as the seed input (looked up by UUID)")
-	f.StringVar(&autopilotOliumProvider, "provider", "", "Olium provider override: openai-codex-oauth | openai-api-key | anthropic-api-key | anthropic-oauth | anthropic-cli | anthropic-vertex | google-vertex | openai-compatible (falls back to agent.olium.provider config)")
+	f.StringVar(&autopilotOliumProvider, "provider", "", oliumProviderFlagUsage)
 	f.StringVar(&autopilotOliumModel, "model", "", "Olium model id override (falls back to agent.olium.model)")
 	f.StringVar(&autopilotSystemPrompt, "system-prompt", "", "Replace the built-in autopilot system prompt with this value (full replace; browser section is not auto-appended)")
 	f.StringVar(&autopilotSystemPromptFile, "system-prompt-file", "", "Path to a file whose contents replace the built-in autopilot system prompt (takes precedence over --system-prompt)")
@@ -170,10 +170,22 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 	defer syncLogger()
 	defer closeDatabaseOnExit()
 
-	// Natural language prompt: positional arg takes precedence when no explicit flags are set
+	// Natural-language prompt handling. With no explicit structured flags, the
+	// positional prompt drives the run through the LLM intent parser (extracts
+	// target/source/focus). With structured flags present, the positional prompt
+	// is NOT discarded — it is preserved verbatim as instruction context (scope
+	// rules, exploitation hints) prepended ahead of --instruction, while explicit
+	// flags still win for structured fields.
+	positionalPrompt, err := resolvePositionalPrompt(args, autopilotPlanFile)
+	if err != nil {
+		return err
+	}
 	hasExplicitFlags := autopilotTarget != "" || autopilotInput != "" || autopilotRecordUUID != "" || autopilotSource != "" || autopilotPlanFile != ""
-	if len(args) > 0 && !hasExplicitFlags {
-		return runAutopilotFromPrompt(args[0])
+	if positionalPrompt != "" && !hasExplicitFlags {
+		return runAutopilotFromPrompt(positionalPrompt)
+	}
+	if positionalPrompt != "" {
+		autopilotInstructionPrefix = positionalPrompt
 	}
 
 	intensity, err := agent.ValidateIntensity(autopilotIntensity)

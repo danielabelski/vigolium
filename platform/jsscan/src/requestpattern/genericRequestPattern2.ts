@@ -2,6 +2,7 @@ import type { ParseResult } from '@babel/parser';
 import type { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import type { Transform } from '../ast-utils';
+import type { AnalysisContext } from '../context';
 import { tracebackVariables } from '../traceback/tracebackVariables';
 import { appendPattern, appendExtractedRequest } from './utils';
 import { getTrackedVariablesMap } from './globalVariableTracking';
@@ -18,7 +19,11 @@ import {
   isValidUrlNode,
 } from './extractRequest';
 
-export function createGenericRequestPattern2Transform(ast: ParseResult<t.File> | null = null, sourceCode: string = ''): Transform {
+export function createGenericRequestPattern2Transform(
+  analysisContext: AnalysisContext,
+  ast: ParseResult<t.File> | null = null,
+  sourceCode: string = '',
+): Transform {
   return {
     name: 'genericRequestPattern2',
     tags: ['safe'],
@@ -46,9 +51,13 @@ export function createGenericRequestPattern2Transform(ast: ParseResult<t.File> |
             }
 
             if (isValidUrlNode(firstArg)) {
+              if (!analysisContext.isRequestNodeClaimed(path.node)) {
+                analysisContext.claimRequestNode(path.node);
+              }
               // Output existing requestPattern
-              const result = tracebackVariables(path, [], { ast, sourceCode });
-              appendPattern(result, 'genericRequestPattern2');
+              if (analysisContext.has('requestEvidence')) {
+                appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'genericRequestPattern2', path.node);
+              }
 
               // Extract structured request data
               // Pattern: obj.get(url, ...), obj.post(url, ...)
@@ -60,7 +69,7 @@ export function createGenericRequestPattern2Transform(ast: ParseResult<t.File> |
               const effectiveIterations = getEffectiveIterationsForFunction(currentFunction);
 
               for (const iteration of effectiveIterations) {
-                const context = createResolutionContext(currentFunction, iteration);
+                const context = createResolutionContext(currentFunction, iteration, path);
 
                 const urlResults = extractURL(firstArg, trackedVars, context);
 
@@ -76,13 +85,14 @@ export function createGenericRequestPattern2Transform(ast: ParseResult<t.File> |
                     if (t.isObjectExpression(secondArg)) {
                       // Pattern: xt.get(url, { params: {...} }) or xt.post(url, { data: {...} })
                       const paramsNode = findProperty(secondArg, 'params');
-                      const dataNode = findProperty(secondArg, 'data');
-
                       if (paramsNode) {
                         params = mergeParams(queryParams, objectToKeyValueWithNestedJSON(paramsNode, trackedVars, path, context));
                       }
-                      if (isBodyMethod && dataNode) {
-                        body = extractBody(dataNode, trackedVars, path, context);
+					  // For a method-specific client (`client.post(url, value)`), the
+					  // second argument is the body itself. Explicit Axios/Angular
+					  // adapters claim their config shapes before this fallback.
+					  if (isBodyMethod) {
+						body = extractBody(secondArg, trackedVars, path, context);
                       }
                     } else {
                       // Pattern: xt.post(url, body) - body could be CallExpression or Identifier
@@ -101,7 +111,10 @@ export function createGenericRequestPattern2Transform(ast: ParseResult<t.File> |
                     cookies: [],
                   });
 
-                  appendExtractedRequest(request);
+                  appendExtractedRequest(analysisContext, request, {
+                    extractor: 'generic-http-method', client: 'generic', confidence: 'medium',
+                    node: path.node, functionName: currentFunction,
+                  });
                 }
               }
             }

@@ -41,7 +41,35 @@ func (c *Config) Validate() error {
 	if err := c.Engine.Validate(); err != nil {
 		return fmt.Errorf("engine config: %w", err)
 	}
+	if err := c.JSScan.Validate(); err != nil {
+		return fmt.Errorf("jsscan config: %w", err)
+	}
 
+	return nil
+}
+
+func (c *JSScanConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	switch c.ReplayMode {
+	case "", "exact", "conservative", "off":
+	default:
+		return fmt.Errorf("replay_mode must be exact, conservative, or off")
+	}
+	if c.WorkerCount < 0 || c.WorkerCount > 16 || c.MemoryBudgetMB < 128 || c.CacheMB < 0 {
+		return fmt.Errorf("invalid worker_count/memory_budget_mb/cache_mb")
+	}
+	if c.JobTimeout < time.Second || c.JobTimeout > 5*time.Minute {
+		return fmt.Errorf("job_timeout must be 1s-5m")
+	}
+	if c.NormalInputMB < 1 || c.MaxASTInputMB < c.NormalInputMB || c.HardInputMB < c.MaxASTInputMB {
+		return fmt.Errorf("input limits must satisfy 1 <= normal_input_mb <= max_ast_input_mb <= hard_input_mb")
+	}
+	if c.MaxRequestsPerFile < 1 || c.MaxASTNodes < 1_000 || c.MaxASTNodes > 5_000_000 ||
+		c.MaxAssetDepth < 1 || c.MaxAssetsPerParent < 1 || c.MaxAssetsPerHost < 1 || c.MaxAssetsTotal < 1 {
+		return fmt.Errorf("request/asset limits must be positive and max_ast_nodes must be 1000-5000000")
+	}
 	return nil
 }
 

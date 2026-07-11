@@ -9,6 +9,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 const minMaxAge = 31536000 // 1 year in seconds
@@ -37,6 +38,14 @@ func New() *Module {
 	}
 	m.ModuleTags = ModuleTags
 	return m
+}
+
+func (m *Module) CanProcess(ctx *httpmsg.HttpRequestResponse) bool {
+	if ctx == nil || ctx.Request() == nil || ctx.Response() == nil {
+		return false
+	}
+	u, err := ctx.URL()
+	return err == nil && strings.EqualFold(u.Scheme, "https") && strings.Contains(strings.ToLower(ctx.Response().Header("Content-Type")), "text/html")
 }
 
 // ScanPerHost checks HSTS header for preload readiness once per host.
@@ -77,7 +86,7 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 	var issues []string
 
 	if hsts == "" {
-		issues = append(issues, "Strict-Transport-Security header is missing on HTTPS response")
+		return nil, nil // generic browser-policy posture owns missing HSTS
 	} else {
 		lower := strings.ToLower(hsts)
 		directives := strings.Split(lower, ";")
@@ -126,8 +135,13 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 			URL:              urlx.String(),
 			Request:          string(ctx.Request().Raw()),
 			ExtractedResults: issues,
+			RecordKind:       output.RecordKindObservation,
+			EvidenceGrade:    output.EvidenceGradeObservation,
+			DedupKey:         "hsts-preload-posture|" + host,
 			Info: output.Info{
 				Description: fmt.Sprintf("HSTS preload audit: %d issue(s) found", len(issues)),
+				Severity:    severity.Info,
+				Confidence:  severity.Certain,
 			},
 		},
 	}, nil

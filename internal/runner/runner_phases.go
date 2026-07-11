@@ -26,6 +26,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/knownissuescan"
 	"github.com/vigolium/vigolium/pkg/modules"
 	"github.com/vigolium/vigolium/pkg/modules/active/authz_compare"
+	"github.com/vigolium/vigolium/pkg/modules/active/nextjs_chunk_audit"
 	"github.com/vigolium/vigolium/pkg/modules/passive/secret_detect"
 	"github.com/vigolium/vigolium/pkg/notify"
 	"github.com/vigolium/vigolium/pkg/notify/discord"
@@ -528,6 +529,7 @@ func (r *Runner) buildInfrastructure() (*phaseInfra, error) {
 		Options:      r.options,
 		Notifier:     infra.notifier,
 		DedupManager: r.dedupManager,
+		RateLimiter:  buildScanRateLimiter(r.options.RateLimit),
 	}
 
 	if r.options.ShouldUseHostError() {
@@ -1052,6 +1054,29 @@ func (r *Runner) runKingfisherBatch(ctx context.Context, infra *phaseInfra, onRe
 	return nil
 }
 
+// freshenPerScanModules returns a copy of mods with per-scan-stateful active
+// modules replaced by fresh instances. Those modules keep mutable state that is
+// meaningful only within one scan — authz_compare's per-session compare clients
+// and nextjs_chunk_audit's per-host chunk/route discovery map — but the registry
+// stores one shared singleton of each (GetActiveModules copies the pointers). Two
+// concurrent server-mode scans sharing a singleton would race on / clobber that
+// state and leak it across scans. Swapping in a fresh instance for this scan's
+// slice leaves the registry singleton untouched. Modules whose per-scan state is
+// already isolated via dedup.Lazy(scanCtx.DedupMgr()) or ScanContext need no swap.
+func freshenPerScanModules(mods []modules.ActiveModule) []modules.ActiveModule {
+	out := make([]modules.ActiveModule, len(mods))
+	copy(out, mods)
+	for i, mod := range out {
+		switch mod.(type) {
+		case *authz_compare.Module:
+			out[i] = authz_compare.New()
+		case *nextjs_chunk_audit.Module:
+			out[i] = nextjs_chunk_audit.New()
+		}
+	}
+	return out
+}
+
 // runDynamicAssessmentPhase runs all modules on DB records with a feedback loop for newly discovered URLs.
 func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfra, activeModules []modules.ActiveModule, passiveModules []modules.PassiveModule) error {
 	phaseStart := time.Now()
@@ -1116,6 +1141,12 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 	if r.options.KnownIssueScanEnabled {
 		passiveModules = filterOutPassiveModule(passiveModules, secret_detect.ModuleID)
 	}
+
+	// Isolate per-scan-stateful modules from the shared registry singletons before
+	// wiring or running them, so concurrent server-mode scans can't race on or
+	// clobber each other's state (authz_compare's compare clients below, and
+	// nextjs_chunk_audit's per-host discovery map).
+	activeModules = freshenPerScanModules(activeModules)
 
 	// Wire compare session clients into the authz-compare module
 	if len(infra.compareSessions) > 0 {

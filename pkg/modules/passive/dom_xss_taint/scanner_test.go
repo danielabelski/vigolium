@@ -62,6 +62,14 @@ func TestDomXssTaint_AnalyzesJavaScriptResponse(t *testing.T) {
 	}
 }
 
+func TestDomXssTaint_DoesNotMislabelOpenRedirectFlow(t *testing.T) {
+	requireBinary(t)
+	js := `location.href = location.search;`
+	if n := scan(t, "application/javascript", js); n != 0 {
+		t.Fatalf("open redirect flow must not be labeled DOM XSS, got %d", n)
+	}
+}
+
 func TestDomXssTaint_IgnoresNonScriptResponses(t *testing.T) {
 	// No need for the binary: the gate/extraction returns early.
 	if n := scan(t, "application/json", `{"location.hash":"innerHTML eval"}`); n != 0 {
@@ -80,5 +88,20 @@ func TestDomXssTaint_GateSkipsWhenNoSink(t *testing.T) {
 	}
 	if !strings.Contains("location.hash", "location") {
 		t.Fatal("unreachable")
+	}
+}
+
+func TestDomXssTaint_GateCoversModernMessageAndHTMLAPIs(t *testing.T) {
+	if !gateSourceRe.MatchString(`addEventListener("message", event => use(event.data))`) {
+		t.Fatal("message-event source did not enter DOM analysis")
+	}
+	for _, sink := range []string{
+		`node.srcdoc = value`, `range.createContextualFragment(value)`,
+		`new DOMParser().parseFromString(value, "text/html")`,
+		`component({dangerouslySetInnerHTML: {__html: value}})`,
+	} {
+		if !gateSinkRe.MatchString(sink) {
+			t.Errorf("modern HTML sink did not enter DOM analysis: %s", sink)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/output"
 )
 
 // makeHTTPCtx builds a request/response pair where extraHeaders are appended to
@@ -58,6 +59,7 @@ func TestScanPerRequest_WildcardWithCredentials(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, results)
 	assert.Contains(t, results[0].Info.Description, "Wildcard")
+	assert.Equal(t, output.RecordKindObservation, results[0].RecordKind)
 }
 
 // TestScanPerRequest_NullOrigin drives a null ACAO value which should be flagged.
@@ -68,6 +70,7 @@ func TestScanPerRequest_NullOrigin(t *testing.T) {
 	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.NotEmpty(t, results)
+	assert.Equal(t, output.RecordKindCandidate, results[0].RecordKind)
 }
 
 // TestScanPerRequest_SameOriginCredentialsNotFlagged reproduces a real false
@@ -117,6 +120,7 @@ func TestScanPerRequest_ReflectedCrossOriginCredentialsFlagged(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, results, "a reflected cross-origin with credentials is a real CORS exposure")
 	assert.Contains(t, results[0].Info.Description, "reflected cross-origin")
+	assert.Equal(t, output.RecordKindCandidate, results[0].RecordKind, "passive reflection still requires active protected-data confirmation")
 }
 
 // TestScanPerRequest_NoCORS verifies a response without CORS headers is benign.

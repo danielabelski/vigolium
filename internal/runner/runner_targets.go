@@ -12,6 +12,7 @@ import (
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/internal/resources/wordlists"
 	"github.com/vigolium/vigolium/pkg/database"
+	deparosconfig "github.com/vigolium/vigolium/pkg/deparos/config"
 	"github.com/vigolium/vigolium/pkg/harvester"
 	"github.com/vigolium/vigolium/pkg/input/source"
 	"github.com/vigolium/vigolium/pkg/notify/telegram"
@@ -437,6 +438,25 @@ func (r *Runner) buildDeparosConfig(additionalTargets []string) source.DeparosDi
 			cfg.ObservedMaxItems = dc.Engine.ObservedMaxItems
 		}
 		cfg.DisableKingfisher = dc.Engine.DisableKingfisher
+
+		jobTimeout := 60 * time.Second
+		if dc.JSScan.JobTimeout != "" {
+			if parsed, err := time.ParseDuration(dc.JSScan.JobTimeout); err == nil {
+				jobTimeout = parsed
+			}
+		}
+		cfg.JSScan = &deparosconfig.JSScanConfig{
+			Enabled: boolPtrOr(dc.JSScan.Enabled, true), ReplayMode: dc.JSScan.ReplayMode,
+			SourceMaps: boolPtrOr(dc.JSScan.SourceMaps, true), AssetGraph: boolPtrOr(dc.JSScan.AssetGraph, true),
+			ProtocolHandshake: dc.JSScan.ProtocolHandshake,
+			WorkerCount:       dc.JSScan.WorkerCount, MemoryBudgetMB: dc.JSScan.MemoryBudgetMB, CacheMB: dc.JSScan.CacheMB,
+			WorkerMaxJobs: dc.JSScan.WorkerMaxJobs, WorkerMaxRSSMB: dc.JSScan.WorkerMaxRSSMB, JobTimeout: jobTimeout,
+			NormalInputMB: dc.JSScan.NormalInputMB, MaxASTInputMB: dc.JSScan.MaxASTInputMB, HardInputMB: dc.JSScan.HardInputMB,
+			MaxRequestsPerFile: dc.JSScan.MaxRequestsPerFile,
+			MaxASTNodes:        dc.JSScan.MaxASTNodes,
+			MaxAssetDepth:      dc.JSScan.MaxAssetDepth, MaxAssetsPerParent: dc.JSScan.MaxAssetsPerParent,
+			MaxAssetsPerHost: dc.JSScan.MaxAssetsPerHost, MaxAssetsTotal: dc.JSScan.MaxAssetsTotal,
+		}
 
 		// Prefix breaker
 		cfg.PrefixBreakerEnabled = dc.Engine.PrefixBreaker.Enabled

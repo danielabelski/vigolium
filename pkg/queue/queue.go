@@ -76,4 +76,9 @@ const (
 	// QueueTypeHybrid is an in-memory buffered queue that spills over to a disk/redis backend.
 	// Fast path avoids disk I/O on enqueue; a background goroutine drains spillover back to memory.
 	QueueTypeHybrid QueueType = "hybrid"
+
+	// QueueTypeMemory is a pure in-memory queue with no disk/network backend and no
+	// background goroutines — used where durable spillover isn't needed so startup
+	// avoids a LevelDB directory and its exclusive on-disk lock.
+	QueueTypeMemory QueueType = "memory"
 )

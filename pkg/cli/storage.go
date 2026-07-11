@@ -6,7 +6,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/storage"
-	"github.com/vigolium/vigolium/pkg/terminal"
 )
 
 var storageCmd = &cobra.Command{
@@ -24,49 +23,37 @@ func init() {
 	rootCmd.AddCommand(storageCmd)
 }
 
-// openStorageClient resolves the active project, loads settings, and returns a
-// connected storage client. When storage is disabled in config, it prints a tip
-// to the user and returns (nil, "", nil) so the caller can bail without error.
+// openStorageClient builds a connected storage client and resolves the active
+// project. Every storage subcommand explicitly requests storage, so a disabled
+// configuration is an error (nonzero exit) rather than a silent success —
+// automation must be able to tell "listed nothing" from "storage was off". The
+// disabled-storage error and client construction are shared with
+// requireStorageClient; this variant additionally resolves the project UUID.
 func openStorageClient() (*storage.Client, string, error) {
-	settings, err := config.LoadSettings(globalConfig)
-	if err != nil {
-		settings = config.DefaultSettings()
-	}
-
-	if !settings.Storage.IsEnabled() {
-		fmt.Printf("%s Cloud storage is not enabled.\n", terminal.WarningSymbol())
-		fmt.Printf("  Enable with: %s\n", terminal.Cyan("vigolium config set storage.enabled true"))
-		fmt.Printf("  Or set env: %s\n", terminal.Cyan(config.StorageEnabledEnvVar+"=true"))
-		fmt.Printf("  Then set %s, %s, %s, and %s in your config file.\n",
-			terminal.Gray("storage.bucket"),
-			terminal.Gray("storage.driver"),
-			terminal.Gray("storage.access_key"),
-			terminal.Gray("storage.secret_key"))
-		return nil, "", nil
-	}
-
-	projectUUID, err := resolveProjectUUID()
+	sc, err := requireStorageClient()
 	if err != nil {
 		return nil, "", err
 	}
-
-	sc, err := storage.NewClient(&settings.Storage)
+	projectUUID, err := resolveProjectUUID()
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to create storage client: %w", err)
+		return nil, "", err
 	}
 	return sc, projectUUID, nil
 }
 
 // requireStorageClient builds a connected storage client, returning a clear
-// error if storage is disabled. Use this when storage is not optional (e.g. the
-// user passed a gs:// URL); for opt-in commands, use openStorageClient instead.
+// error (with remediation) if storage is disabled. Used both for the opt-in
+// storage subcommands (via openStorageClient) and where storage is mandatory
+// (e.g. the user passed a gs:// URL).
 func requireStorageClient() (*storage.Client, error) {
 	settings, err := config.LoadSettings(globalConfig)
 	if err != nil {
 		settings = config.DefaultSettings()
 	}
 	if !settings.Storage.IsEnabled() {
-		return nil, fmt.Errorf("cloud storage is not enabled; enable with: vigolium config set storage.enabled true (or set %s=true)", config.StorageEnabledEnvVar)
+		return nil, fmt.Errorf("cloud storage is not enabled; enable with `vigolium config set storage.enabled true` "+
+			"(or set %s=true), then set storage.driver, storage.bucket, storage.access_key, and storage.secret_key",
+			config.StorageEnabledEnvVar)
 	}
 	sc, err := storage.NewClient(&settings.Storage)
 	if err != nil {

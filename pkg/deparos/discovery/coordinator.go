@@ -12,6 +12,7 @@ import (
 	"github.com/sourcegraph/conc"
 	"github.com/vigolium/vigolium/pkg/deparos/discovery/queue"
 	pkghttp "github.com/vigolium/vigolium/pkg/deparos/http"
+	"github.com/vigolium/vigolium/pkg/deparos/jsscan"
 	"github.com/vigolium/vigolium/pkg/deparos/responsechain"
 	"github.com/vigolium/vigolium/pkg/deparos/spider"
 	"github.com/vigolium/vigolium/pkg/deparos/storage"
@@ -47,11 +48,16 @@ type PayloadCoordinator struct {
 
 // CoordinatorMetrics tracks execution statistics.
 type CoordinatorMetrics struct {
-	PayloadsProcessed atomic.Uint64
-	TasksCompleted    atomic.Uint64
-	RequestsSent      atomic.Uint64
-	ActiveWorkers     atomic.Int32
-	InFlightItems     atomic.Int32 // Tracks work items being processed
+	PayloadsProcessed    atomic.Uint64
+	TasksCompleted       atomic.Uint64
+	RequestsSent         atomic.Uint64
+	ActiveWorkers        atomic.Int32
+	InFlightItems        atomic.Int32 // Tracks work items being processed
+	JSReplayExact        atomic.Uint64
+	JSReplayConservative atomic.Uint64
+	JSReplaySucceeded    atomic.Uint64
+	JSReplayFailed       atomic.Uint64
+	JSReplayDeduped      atomic.Uint64
 }
 
 // NewPayloadCoordinator creates a new coordinator with callbacks for execution.
@@ -352,8 +358,9 @@ func (c *PayloadCoordinator) executeJSFetchItem(
 	// linkfinder still extracts embedded paths and the file is recorded as an
 	// http_record (so secret-scanning and later phases see its body).
 	ct := resp.Header.Get("Content-Type")
+	isSourceMap := strings.HasSuffix(strings.ToLower(jsURL.Path), ".map")
 	if !isJavaScriptContentType(ct) && !isJSONContentType(ct) &&
-		!hasJavaScriptExtension(jsURL) && !hasJSONExtension(jsURL) {
+		!hasJavaScriptExtension(jsURL) && !hasJSONExtension(jsURL) && !isSourceMap {
 		logger.Debug("JS-fetch target is neither JavaScript nor JSON",
 			zap.String("url", item.URL),
 			zap.String("content-type", ct))
@@ -375,31 +382,47 @@ func (c *PayloadCoordinator) executeJSFetchItem(
 		logger.Debug("JS too large, skipping parse",
 			zap.String("url", item.URL),
 			zap.Int("size", len(body)))
+	case isSourceMap:
+		if cb.ProcessSourceMap != nil && len(body) <= maxSourceMapBytes {
+			cb.ProcessSourceMap(ctx, jsURL, body)
+		}
 	default:
 		// Content to pass to linkfinder (default: raw body, may be replaced by CodeRecord)
 		contentForLinkfinder := body
 
 		// Run jsscan to extract HTTP requests and transformed code (always,
 		// even for CDN-hosted bundles).
-		if cb.JSScanScanner != nil && cb.JSScanSem != nil {
-			// Acquire semaphore
-			select {
-			case cb.JSScanSem <- struct{}{}:
-				defer func() { <-cb.JSScanSem }()
-			case <-ctx.Done():
-				return
+		if cb.JSScanService != nil {
+			// SourceMap/X-SourceMap headers have the same policy as comment facts.
+			for _, headerName := range []string{"SourceMap", "X-SourceMap"} {
+				if reference := strings.TrimSpace(resp.Header.Get(headerName)); reference != "" && cb.ProcessAssetFacts != nil {
+					cb.ProcessAssetFacts(ctx, item.URL, body, []jsscan.AssetReferenceFact{{
+						Kind: "assetReference", AssetType: string(AssetSourceMap),
+						URL:             jsscan.ValueTemplate{Rendered: reference, Static: true},
+						ParentSourceURL: item.URL, Provenance: jsscan.Provenance{Extractor: "source-map-header", Confidence: "high"},
+					}})
+				}
 			}
-
-			// Run jsscan
-			scanResult, err := cb.JSScanScanner.Scan(ctx, body)
+			// Run through the shared broker; it owns weighted admission and cache.
+			options := jsscan.ScanOptions{Profile: jsscan.ProfileDiscovery, SourceURL: item.URL}
+			if cb.JSScanOptions != nil {
+				options = cb.JSScanOptions(jsscan.ProfileDiscovery, item.URL)
+			}
+			scanResult, err := cb.JSScanService.ScanWithOptions(ctx, body, options)
 			if err != nil {
 				logger.Debug("jsscan failed",
 					zap.String("url", item.URL),
 					zap.Error(err))
 			} else {
-				// Store extracted requests with dedup
+				// Retain typed source/provenance when protocol v2 facts are present.
 				newRequests := 0
-				if cb.AddExtractedRequest != nil {
+				if len(scanResult.RequestFacts) > 0 && cb.AddRequestFact != nil {
+					for i := range scanResult.RequestFacts {
+						if cb.AddRequestFact(item.URL, scanResult.RequestFacts[i]) {
+							newRequests++
+						}
+					}
+				} else if cb.AddExtractedRequest != nil {
 					for i := range scanResult.Requests {
 						if cb.AddExtractedRequest(&scanResult.Requests[i]) {
 							newRequests++
@@ -408,7 +431,9 @@ func (c *PayloadCoordinator) executeJSFetchItem(
 				}
 
 				// Persist to database
-				if cb.StoreJSScanRequests != nil && len(scanResult.Requests) > 0 {
+				if cb.StoreJSScanFacts != nil && len(scanResult.RequestFacts) > 0 {
+					cb.StoreJSScanFacts(jsURL, scanResult.RequestFacts)
+				} else if cb.StoreJSScanRequests != nil && len(scanResult.Requests) > 0 {
 					cb.StoreJSScanRequests(jsURL, scanResult.Requests)
 				}
 
@@ -424,6 +449,12 @@ func (c *PayloadCoordinator) executeJSFetchItem(
 						zap.String("url", item.URL),
 						zap.Int("original_size", len(body)),
 						zap.Int("transformed_size", len(contentForLinkfinder)))
+				}
+				if cb.ProcessAssetFacts != nil && len(scanResult.AssetFacts) > 0 {
+					cb.ProcessAssetFacts(ctx, item.URL, body, scanResult.AssetFacts)
+				}
+				if cb.ProcessJSScanCapabilities != nil {
+					cb.ProcessJSScanCapabilities(item.URL, scanResult)
 				}
 			}
 		}
@@ -460,7 +491,9 @@ func (c *PayloadCoordinator) executeJSFetchItem(
 	// pipeline so each is fetched and recorded. These chunk filenames are built
 	// at runtime and so are invisible to link extraction — the manifest is the
 	// only place they appear literally. Dispatches per framework by URL shape.
-	harvestSPAManifest(jsURL, body, cb)
+	if !isSourceMap {
+		harvestSPAManifest(jsURL, body, cb)
+	}
 
 	// Call OnResult to create finding (always, regardless of path extraction)
 	if cb.OnResult != nil {
@@ -590,9 +623,16 @@ func (c *PayloadCoordinator) executeJSExtractedRequestTask(ctx context.Context, 
 			}
 		}
 
-		// Dedup check with method and body (for variants with same URL but different bodies)
-		if cb.RequestCache.IsSeen(variant.Method, variant.URL, variant.Body) {
+		// Replay identity includes safe semantic headers as well as method/URL/body.
+		dedupBody := variant.Body + "\x00" + strings.Join(variant.Headers, "\x00")
+		if cb.RequestCache.IsSeen(variant.Method, variant.URL, dedupBody) {
+			c.metrics.JSReplayDeduped.Add(1)
 			continue
+		}
+		if variant.ReplayTier == "exact" {
+			c.metrics.JSReplayExact.Add(1)
+		} else {
+			c.metrics.JSReplayConservative.Add(1)
 		}
 
 		// Build HTTP request with method, body, and content-type
@@ -607,6 +647,7 @@ func (c *PayloadCoordinator) executeJSExtractedRequestTask(ctx context.Context, 
 
 		req, err := reqBuilder.Build()
 		if err != nil {
+			c.metrics.JSReplayFailed.Add(1)
 			logger.Debug("Failed to build JS extracted request",
 				zap.String("url", variant.URL),
 				zap.String("method", variant.Method),
@@ -616,12 +657,23 @@ func (c *PayloadCoordinator) executeJSExtractedRequestTask(ctx context.Context, 
 
 		// Set Content-Type header if specified
 		if variant.ContentType != "" && variant.Body != "" {
-			req.Header.Set("Content-Type", variant.ContentType)
+			if req.Header.Get("Content-Type") == "" {
+				req.Header.Set("Content-Type", variant.ContentType)
+			}
+		}
+		for _, header := range variant.Headers {
+			name, value := splitHeader(header)
+			// Explicit scan/auth configuration always wins over literals recovered
+			// from a public bundle.
+			if name != "" && req.Header.Get(name) == "" {
+				req.Header.Set(name, value)
+			}
 		}
 
 		// Send request with tracking
 		rc, err := c.sendTrackedRequest(ctx, req, variant.URL, cb)
 		if err != nil {
+			c.metrics.JSReplayFailed.Add(1)
 			logger.Debug("JS extracted request failed",
 				zap.String("url", variant.URL),
 				zap.String("method", variant.Method),
@@ -630,6 +682,7 @@ func (c *PayloadCoordinator) executeJSExtractedRequestTask(ctx context.Context, 
 		}
 
 		c.metrics.RequestsSent.Add(1)
+		c.metrics.JSReplaySucceeded.Add(1)
 
 		// Analyze response
 		found, err := cb.Analyzer.Analyze(ctx, req, rc)
@@ -657,8 +710,9 @@ func (c *PayloadCoordinator) executeJSExtractedRequestTask(ctx context.Context, 
 			cb.OnResult(&Result{
 				URL: parseURL(variant.URL),
 				Request: &storage.RequestData{
-					Method: variant.Method,
-					Body:   []byte(variant.Body),
+					Method:  variant.Method,
+					Headers: headerSliceToMap(variant.Headers),
+					Body:    []byte(variant.Body),
 				},
 				Metadata: &storage.DiscoveryMetadata{
 					FoundBy:   foundBy,

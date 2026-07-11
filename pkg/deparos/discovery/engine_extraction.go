@@ -67,6 +67,33 @@ func (e *Engine) storeJSScanRequests(jsURL *url.URL, reqs []jsscan.ExtractedRequ
 	}
 }
 
+func (e *Engine) storeJSScanFacts(jsURL *url.URL, facts []jsscan.HTTPRequestFact) {
+	if jsURL == nil {
+		return
+	}
+	e.storeJSScanFactsAtSource(jsURL, jsURL.String(), facts)
+}
+
+// storeJSScanFactsAtSource keeps the database node anchored to the fetched
+// generated asset while allowing source-map facts to retain their virtual
+// original-source URL. That source URL is authoritative for provenance and
+// source-relative replay after a discovery session is resumed.
+func (e *Engine) storeJSScanFactsAtSource(nodeURL *url.URL, sourceURL string, facts []jsscan.HTTPRequestFact) {
+	if e.storage == nil || nodeURL == nil || sourceURL == "" || len(facts) == 0 {
+		return
+	}
+	repo := e.storage.Extractions()
+	if repo == nil {
+		return
+	}
+	if err := repo.BatchStoreJSScanFacts(
+		e.getNodeIDForURL(nodeURL), e.storage.SessionDBID(), sourceURL, facts,
+	); err != nil {
+		logger.Warn("Failed to store typed jsscan facts",
+			zap.String("source", sourceURL), zap.Int("count", len(facts)), zap.Error(err))
+	}
+}
+
 // storeFormRequests persists form requests to database.
 // Called asynchronously after form extraction completes.
 func (e *Engine) storeFormRequests(sourceURL *url.URL, forms []*spider.FormRequest) {
@@ -135,6 +162,15 @@ func (e *Engine) loadExtractionsFromDB() error {
 
 	loadedCount := 0
 	for _, model := range jsRequests {
+		if model.SchemaVersion >= 2 && model.TemplateJSON.Valid {
+			var fact jsscan.HTTPRequestFact
+			if err := json.Unmarshal([]byte(model.TemplateJSON.String), &fact); err == nil {
+				if e.AddRequestFact(model.SourceURL.String, fact) {
+					loadedCount++
+				}
+				continue
+			}
+		}
 		req := convertModelToJSScanRequest(model)
 		// Use dedup to avoid duplicates
 		if e.AddExtractedRequest(&req) {
@@ -146,6 +182,57 @@ func (e *Engine) loadExtractionsFromDB() error {
 		logger.Info("Loaded jsscan extractions from DB",
 			zap.Int("loaded", loadedCount),
 			zap.Int("total", len(jsRequests)))
+	}
+
+	// Restore non-HTTP capability facts separately. Grouping by source preserves
+	// source-relative GraphQL endpoint and route resolution while WS/SSE records
+	// remain metadata-only.
+	capabilityRows, err := repo.GetJSScanCapabilityFacts(sessionID)
+	if err != nil {
+		return err
+	}
+	bySource := make(map[string]*jsscan.ScanResult)
+	for _, model := range capabilityRows {
+		if !model.TemplateJSON.Valid || !model.RecordKind.Valid {
+			continue
+		}
+		sourceURL := model.SourceURL.String
+		result := bySource[sourceURL]
+		if result == nil {
+			result = &jsscan.ScanResult{}
+			bySource[sourceURL] = result
+		}
+		payload := []byte(model.TemplateJSON.String)
+		switch model.RecordKind.String {
+		case "graphqlOperation":
+			var fact jsscan.GraphQLOperationFact
+			if json.Unmarshal(payload, &fact) == nil {
+				result.GraphQLOperations = append(result.GraphQLOperations, fact)
+			}
+		case "websocket":
+			var fact jsscan.WebSocketFact
+			if json.Unmarshal(payload, &fact) == nil {
+				result.WebSockets = append(result.WebSockets, fact)
+			}
+		case "eventSource":
+			var fact jsscan.EventSourceFact
+			if json.Unmarshal(payload, &fact) == nil {
+				result.EventSources = append(result.EventSources, fact)
+			}
+		case "clientRoute":
+			var fact jsscan.ClientRouteFact
+			if json.Unmarshal(payload, &fact) == nil {
+				result.ClientRoutes = append(result.ClientRoutes, fact)
+			}
+		case "browserSecurityFlow":
+			var fact jsscan.BrowserSecurityFlowFact
+			if json.Unmarshal(payload, &fact) == nil {
+				result.BrowserFlows = append(result.BrowserFlows, fact)
+			}
+		}
+	}
+	for sourceURL, result := range bySource {
+		e.processJSScanCapabilityFacts(sourceURL, result)
 	}
 
 	return nil
@@ -183,16 +270,30 @@ func (e *Engine) extractRoutesFromStoredJS() {
 		// transformed code that linkfinder reads more reliably. It parses/transforms
 		// the whole body, so skip it for very large bundles to keep this init step
 		// bounded — linkfinder (a cheap regex pass below) still mines their routes.
-		if e.jsscanScanner != nil && len(body) <= maxStoredJSScanBytes {
-			if sr, err := e.jsscanScanner.Scan(e.ctx, body); err == nil && sr != nil {
-				for i := range sr.Requests {
-					if e.AddExtractedRequest(&sr.Requests[i]) {
-						requests++
+		if e.jsscanService != nil && len(body) <= maxStoredJSScanBytes {
+			sourceURL := ""
+			if u := node.URL(); u != nil {
+				sourceURL = u.String()
+			}
+			if sr, err := e.jsscanService.ScanWithOptions(e.ctx, body, e.jsScanOptions(jsscan.ProfileDiscovery, sourceURL)); err == nil && sr != nil {
+				if len(sr.RequestFacts) > 0 {
+					for i := range sr.RequestFacts {
+						if e.AddRequestFact(sourceURL, sr.RequestFacts[i]) {
+							requests++
+						}
+					}
+				} else {
+					for i := range sr.Requests {
+						if e.AddExtractedRequest(&sr.Requests[i]) {
+							requests++
+						}
 					}
 				}
 				if sr.HasCode() {
 					body = []byte(sr.Code.Content)
 				}
+				e.processAssetFacts(e.ctx, sourceURL, resp.Body, sr.AssetFacts)
+				e.processJSScanCapabilityFacts(sourceURL, sr)
 			}
 		}
 

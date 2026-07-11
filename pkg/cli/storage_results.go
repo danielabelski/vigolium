@@ -33,10 +33,6 @@ func runStorageResults(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if sc == nil {
-		return nil
-	}
-
 	scanUUID := args[0]
 	if _, err := storage.ValidateKey(scanUUID); err != nil {
 		return fmt.Errorf("invalid scan UUID: %w", err)

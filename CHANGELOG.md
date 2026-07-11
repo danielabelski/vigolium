@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.2.5] - 2026-07-11
+
+Two-way Burp Suite integration through a new loopback **live bridge**, paired with the [`burp-vigolium`](https://github.com/vigolium/burp-vigolium) extension **v0.2.0**, plus a round of reliability and correctness hardening across the server, config handling, and scanner internals. See the [Burp Suite guide](https://docs.vigolium.com/getting-started/burp-suite) for setup and usage.
+
+### Added
+
+- **Burp Suite live bridge (bidirectional traffic sync)** — Vigolium can now read live traffic straight out of a running Burp Suite and write traffic back into Burp's **Target → Site map**, over an opt-in, loopback-only listener that the extension exposes (default `http://127.0.0.1:9009`, loopback-bind only, no credentials). Point Vigolium at it with the new `--burp-bridge-url` flag (or the `VIGOLIUM_BURP_BRIDGE_URL` env var). Live Burp rows are merged into the ordinary traffic views labelled `source: burp`, and the usual filters, sorting, pagination, JSON output, and record-detail workflow keep working. Imports are idempotent — new requests are inserted, changed responses refresh the existing row, and unchanged traffic is skipped. Implemented in `pkg/burpbridge` (client), `pkg/olium/vigtool/burp_bridge.go` (agent tool), and `pkg/server/handlers_burp_bridge.go` (server-side merge).
+- **New CLI flags for fetching Burp traffic directly** — bring Burp's Proxy history and Site map into Vigolium (and push traffic back) without leaving the CLI:
+  - `vigolium traffic --burp-bridge-url <url>` — merge live Burp Proxy history with the local database in the `traffic` view.
+  - `vigolium traffic --save-to-vigolium-db [--all]` — persist bridge-visible Burp history into Vigolium's database (the current page, or every matching record with `--all`).
+  - `vigolium traffic --save-to-burp` — copy selected Vigolium database traffic into Burp's Target Site map.
+  - `vigolium replay --record-uuid <uuid> --save-to-burp` — save a mutated replay and its fresh response back into Burp's Site map.
+  - `vigolium import --burp-bridge-url <url>` — persist all bridge-visible Proxy history into the database in one shot.
+  - `vigolium server --burp-bridge-url <url>` — merge live Burp rows into `GET /api/http-records` for the UI and API.
+- **Companion extension — [`burp-vigolium`](https://github.com/vigolium/burp-vigolium) v0.2.0** — ships the loopback live-bridge listener and on-demand / interval **Target Site map snapshots** (idempotent, incrementally chunked upload; `Ctrl+Alt+S`), a dedicated **Bridge** tab/panel, and direct context-menu dispatch from Proxy History, Site map, and Repeater. Site-map snapshots are ingested by Vigolium's `POST /api/burp/sitemap/snapshot` endpoint.
+
+### Fixed
+
+- General reliability, correctness, and false-positive hardening across the server, config handling, WAF/CDN detection, and scanner internals.
+
 ## [v0.2.4] - 2026-07-09
 
 Catch-all / echo-server false-positive hardening across the endpoint-exposure module families. No new modules (registry stays at 198 active + 115 passive) — 31 existing active modules gain a shared confirmation guard against hosts that answer every path with the same 200 body. The release also hardens browser-launch reliability (a crash-on-startup system Chromium now falls through to a working browser, and `doctor` smoke-launches the browser instead of trusting its `--version` banner), makes hand-picked module runs skip the broad `known-issue-scan` pass by default, fixes a jsscan large-output truncation, and closes an npm-publish staleness bug that shipped v0.2.2 binaries as 0.2.3.

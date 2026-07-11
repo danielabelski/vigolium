@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -227,9 +226,14 @@ type Engine struct {
 	kingfisherBatchSeq atomic.Int64
 	kingfisherBatchMap map[string]string // filename → URL for mapping findings back
 
-	// JSScan infrastructure for endpoint extraction from JS files
-	jsscanScanner          *jsscan.Scanner
-	jsscanSem              chan struct{}             // Semaphore to limit concurrent scans
+	// JSScan infrastructure for endpoint extraction from JS files. Admission,
+	// caching, and worker concurrency are owned by the shared service.
+	jsscanService          *jsscan.Service
+	jsscanStatsBaseline    jsscan.ServiceStats
+	requestTemplatesOnce   sync.Once
+	requestTemplates       RequestTemplateRegistry
+	jsAssetGraphOnce       sync.Once
+	jsAssetGraph           *JSAssetGraph
 	extractedRequests      []jsscan.ExtractedRequest // Collected requests for future task generation
 	extractedRequestsMu    sync.Mutex                // Protects extractedRequests slice
 	extractedRequestsDedup *dedup.DiskSet            // Deduplication using hash
@@ -454,6 +458,7 @@ func NewEngineWithContext(parentCtx context.Context, cfg *config.Config, st stor
 		seenBodyHashes:       seenBodyHashesDS,
 		dedupBasePath:        dedupBasePath,
 		requestCache:         reqCache,
+		requestTemplates:     NewRequestTemplateRegistry(),
 		ctx:                  ctx,
 		cancel:               cancel,
 	}
@@ -505,22 +510,49 @@ func NewEngineWithContext(parentCtx context.Context, cfg *config.Config, st stor
 		logger.Info("Kingfisher secret scanning disabled by user")
 	}
 
-	// Initialize jsscan scanner for JS endpoint extraction
-	// IMPORTANT: Must be initialized BEFORE coordinator so callbacks capture non-nil scanner
-	jsScanScanner, err := jsscan.NewScanner(jsscan.DefaultConfig())
-	if err != nil {
-		logger.Warn("Failed to initialize jsscan scanner", zap.Error(err))
+	// Initialize the process-wide jsscan service before coordinator callbacks.
+	// Discovery and passive modules deliberately share one admission/cache path.
+	if cfg.JSScan.Enabled {
+		serviceConfig := jsscan.DefaultServiceConfig()
+		if cfg.JSScan.MemoryBudgetMB > 0 {
+			serviceConfig.MemoryBudgetBytes = int64(cfg.JSScan.MemoryBudgetMB) * 1024 * 1024
+		}
+		if cfg.JSScan.CacheMB > 0 {
+			serviceConfig.CacheBytes = int64(cfg.JSScan.CacheMB) * 1024 * 1024
+		}
+		serviceConfig.WorkerCount = cfg.JSScan.WorkerCount
+		if serviceConfig.WorkerCount <= 0 && cfg.Engine.JSScanConcurrency > 0 {
+			serviceConfig.WorkerCount = cfg.Engine.JSScanConcurrency
+		}
+		serviceConfig.WorkerMaxJobs = cfg.JSScan.WorkerMaxJobs
+		if cfg.JSScan.WorkerMaxRSSMB > 0 {
+			serviceConfig.WorkerMaxRSSBytes = int64(cfg.JSScan.WorkerMaxRSSMB) * 1024 * 1024
+		}
+		if cfg.JSScan.NormalInputMB > 0 {
+			serviceConfig.NormalInputBytes = int64(cfg.JSScan.NormalInputMB) * 1024 * 1024
+		}
+		if cfg.JSScan.MaxASTInputMB > 0 {
+			serviceConfig.MaxASTInputBytes = int64(cfg.JSScan.MaxASTInputMB) * 1024 * 1024
+		}
+		if cfg.JSScan.HardInputMB > 0 {
+			serviceConfig.HardInputBytes = int64(cfg.JSScan.HardInputMB) * 1024 * 1024
+		}
+		if configureErr := jsscan.ConfigureDefaultService(serviceConfig); configureErr != nil {
+			logger.Debug("Shared jsscan service already configured", zap.Error(configureErr))
+		}
+		jsScanService, serviceErr := jsscan.DefaultService()
+		if serviceErr != nil {
+			logger.Warn("Failed to initialize jsscan service", zap.Error(serviceErr))
+		} else {
+			engine.jsscanService = jsScanService
+			engine.jsscanStatsBaseline = jsScanService.Stats()
+			if readyErr := jsScanService.EnsureReady(); readyErr != nil {
+				logger.Error("jsscan EnsureBinary error", zap.Error(readyErr))
+			}
+			logger.Info("Using shared jsscan service", zap.String("checksum", jsScanService.Checksum()))
+		}
 	} else {
-		engine.jsscanScanner = jsScanScanner
-		jsscanConc := cfg.Engine.JSScanConcurrency
-		if jsscanConc <= 0 {
-			jsscanConc = runtime.NumCPU()
-		}
-		engine.jsscanSem = make(chan struct{}, jsscanConc)
-		if err := jsScanScanner.EnsureBinary(); err != nil {
-			logger.Error("jsscan EnsureBinary error", zap.Error(err))
-		}
-		logger.Info("Using jsscan", zap.String("checksum", jsScanScanner.Checksum()))
+		logger.Info("JavaScript intelligence disabled by configuration")
 	}
 
 	// Initialize coordinator with callbacks (after scanners are set)
@@ -693,10 +725,59 @@ func (e *Engine) Stop() {
 		e.wg.Wait()
 	}()
 
+	e.logJSScanSummary()
+
 	logger.Debug("Cleaning up engine resources")
 	e.cleanup()
 
 	logger.Info("Discovery engine stopped")
+}
+
+func (e *Engine) logJSScanSummary() {
+	if e.jsscanService == nil {
+		return
+	}
+	current := e.jsscanService.Stats()
+	baseline := e.jsscanStatsBaseline
+	delta := func(now, before int64) int64 {
+		if now < before {
+			return now
+		}
+		return now - before
+	}
+	high, medium, hints := 0, 0, 0
+	if e.requestTemplates != nil {
+		for _, template := range e.requestTemplates.All() {
+			switch template.Confidence {
+			case "high":
+				high++
+			case "medium":
+				medium++
+			default:
+				hints++
+			}
+		}
+	}
+	cacheHits := delta(current.CacheHits, baseline.CacheHits)
+	cacheMisses := delta(current.CacheMisses, baseline.CacheMisses)
+	rejected := delta(current.RejectedJobs, baseline.RejectedJobs)
+	logger.Info("JavaScript analysis summary",
+		zap.Int64("files", cacheHits+cacheMisses+rejected),
+		zap.Int64("cache_hits", cacheHits),
+		zap.Int64("worker_jobs", delta(current.WorkerStarted, baseline.WorkerStarted)),
+		zap.Int64("coalesced_jobs", delta(current.Coalesced, baseline.Coalesced)),
+		zap.Int("high_confidence_requests", high),
+		zap.Int("conservative_requests", medium),
+		zap.Int("hints", hints),
+		zap.Int64("degraded_files", delta(current.DegradedJobs, baseline.DegradedJobs)),
+		zap.Int64("lexical_fallbacks", delta(current.FallbackJobs, baseline.FallbackJobs)),
+		zap.Int64("rejected_files", rejected),
+		zap.Int64("worker_restarts", delta(current.WorkerRestarts, baseline.WorkerRestarts)),
+		zap.Uint64("exact_replays", e.coordinator.Metrics().JSReplayExact.Load()),
+		zap.Uint64("conservative_replays", e.coordinator.Metrics().JSReplayConservative.Load()),
+		zap.Uint64("successful_replays", e.coordinator.Metrics().JSReplaySucceeded.Load()),
+		zap.Uint64("failed_replays", e.coordinator.Metrics().JSReplayFailed.Load()),
+		zap.Uint64("deduplicated_replays", e.coordinator.Metrics().JSReplayDeduped.Load()))
 }
 
 // GetState returns current engine state.
@@ -729,27 +810,32 @@ func (e *Engine) setState(newState State) {
 // newCallbacks creates a Callbacks struct with engine's handlers.
 func (e *Engine) newCallbacks() *Callbacks {
 	return &Callbacks{
-		OnDirectoryDiscovered: e.OnDirectoryDiscovered,
-		OnFileDiscovered:      e.OnFileDiscovered,
-		OnResult:              e.onResult,
-		AddObservedName:       e.AddObservedNameTrusted,
-		AddObservedPath:       e.AddObservedPathTrusted,
-		QueueJSFetch:          func(urls []*url.URL) { e.queueJSFetch(urls, 0) },
-		HTTPClient:            e.httpClient,
-		Analyzer:              e.analyzer,
-		RedirectDetector:      NewRedirectDetector(),
-		MaxDepth:              uint16(e.config.Target.Recursion.MaxDepth),
-		RequestCache:          e.requestCache,
-		ErrorTracker:          e.errorTracker,
-		WAFBlockTracker:       e.wafBlockTracker,
-		WAFDetector:           e.wafDetector,
-		CustomHeaders:         e.config.Engine.CustomHeaders,
-		JSScanScanner:         e.jsscanScanner,
-		JSScanSem:             e.jsscanSem,
-		AddExtractedRequest:   e.AddExtractedRequest,
-		StoreJSScanRequests:   e.storeJSScanRequests,
-		ScopeChecker:          e.spiderScope,
-		PrefixBreaker:         e.prefixBreaker,
+		OnDirectoryDiscovered:     e.OnDirectoryDiscovered,
+		OnFileDiscovered:          e.OnFileDiscovered,
+		OnResult:                  e.onResult,
+		AddObservedName:           e.AddObservedNameTrusted,
+		AddObservedPath:           e.AddObservedPathTrusted,
+		QueueJSFetch:              func(urls []*url.URL) { e.queueJSFetch(urls, 0) },
+		HTTPClient:                e.httpClient,
+		Analyzer:                  e.analyzer,
+		RedirectDetector:          NewRedirectDetector(),
+		MaxDepth:                  uint16(e.config.Target.Recursion.MaxDepth),
+		RequestCache:              e.requestCache,
+		ErrorTracker:              e.errorTracker,
+		WAFBlockTracker:           e.wafBlockTracker,
+		WAFDetector:               e.wafDetector,
+		CustomHeaders:             e.config.Engine.CustomHeaders,
+		JSScanService:             e.jsscanService,
+		JSScanOptions:             e.jsScanOptions,
+		AddExtractedRequest:       e.AddExtractedRequest,
+		AddRequestFact:            e.AddRequestFact,
+		StoreJSScanRequests:       e.storeJSScanRequests,
+		StoreJSScanFacts:          e.storeJSScanFacts,
+		ProcessJSScanCapabilities: e.processJSScanCapabilityFacts,
+		ProcessAssetFacts:         e.processAssetFacts,
+		ProcessSourceMap:          e.processSourceMapResponse,
+		ScopeChecker:              e.spiderScope,
+		PrefixBreaker:             e.prefixBreaker,
 	}
 }
 
@@ -1063,6 +1149,10 @@ func (e *Engine) GetObservedFiles() *payload.ObservedProvider {
 // AddExtractedRequest adds an extracted request to the collection with deduplication.
 // Returns true if the request was new (not a duplicate).
 func (e *Engine) AddExtractedRequest(req *jsscan.ExtractedRequest) bool {
+	return e.addExtractedRequest(req, true)
+}
+
+func (e *Engine) addExtractedRequest(req *jsscan.ExtractedRequest, registerTemplate bool) bool {
 	if e.extractedRequestsDedup == nil || req == nil {
 		return false
 	}
@@ -1075,12 +1165,95 @@ func (e *Engine) AddExtractedRequest(req *jsscan.ExtractedRequest) bool {
 	e.extractedRequestsMu.Lock()
 	e.extractedRequests = append(e.extractedRequests, *req)
 	e.extractedRequestsMu.Unlock()
+	if registerTemplate {
+		e.templateRegistry().AddLegacy("", *req)
+	}
 
 	logger.Debug("Added extracted request",
 		zap.String("url", req.URL),
 		zap.String("method", req.Method))
 
 	return true
+}
+
+// AddRequestFact retains typed provenance and source URL while maintaining the
+// legacy request view used by existing reporting consumers.
+func (e *Engine) AddRequestFact(sourceURL string, fact jsscan.HTTPRequestFact) bool {
+	if !e.templateRegistry().Add(sourceURL, fact) {
+		return false
+	}
+	if fact.Provenance.Confidence == "low" || strings.HasPrefix(strings.TrimSpace(fact.URL.Rendered), "${") {
+		if hint := staticTemplatePath(fact.URL.Rendered); hint != "" && hint != "/" {
+			e.observedPaths.Add([]byte(hint))
+		}
+	}
+	legacy := jsscan.LegacyRequestFromFact(fact)
+	e.addExtractedRequest(&legacy, false)
+	logger.Debug("Added typed JS request template",
+		zap.String("source_url", sourceURL), zap.String("fact_id", fact.ID),
+		zap.String("confidence", fact.Provenance.Confidence), zap.String("extractor", fact.Provenance.Extractor))
+	return true
+}
+
+func (e *Engine) GetRequestTemplates() []ExtractedRequestTemplate {
+	return e.templateRegistry().All()
+}
+
+func (e *Engine) PendingRequestTemplates() []ExtractedRequestTemplate {
+	mode := strings.ToLower(strings.TrimSpace(e.config.JSScan.ReplayMode))
+	if mode == "off" {
+		return nil
+	}
+	templates := e.templateRegistry().PendingReplay()
+	if mode == "conservative" {
+		return templates
+	}
+	filtered := templates[:0]
+	for _, template := range templates {
+		if template.Confidence == "high" {
+			filtered = append(filtered, template)
+		}
+	}
+	return filtered
+}
+
+func (e *Engine) templateRegistry() RequestTemplateRegistry {
+	e.requestTemplatesOnce.Do(func() {
+		if e.requestTemplates == nil {
+			e.requestTemplates = NewRequestTemplateRegistry()
+		}
+	})
+	return e.requestTemplates
+}
+
+func (e *Engine) assetGraph() *JSAssetGraph {
+	e.jsAssetGraphOnce.Do(func() {
+		if e.jsAssetGraph == nil {
+			e.jsAssetGraph = NewJSAssetGraph(JSAssetGraphConfig{
+				MaxDepth:           e.config.JSScan.MaxAssetDepth,
+				MaxAssetsPerParent: e.config.JSScan.MaxAssetsPerParent,
+				MaxAssetsPerHost:   e.config.JSScan.MaxAssetsPerHost,
+				MaxAssetsTotal:     e.config.JSScan.MaxAssetsTotal,
+			})
+		}
+	})
+	return e.jsAssetGraph
+}
+
+func staticTemplatePath(raw string) string {
+	for {
+		start := strings.Index(raw, "${")
+		if start < 0 {
+			break
+		}
+		end := strings.IndexByte(raw[start+2:], '}')
+		if end < 0 {
+			return ""
+		}
+		end += start + 2
+		raw = raw[:start] + raw[end+1:]
+	}
+	return sanitizeObservedPath(raw)
 }
 
 // GetExtractedRequests returns collected requests (for future task generation).

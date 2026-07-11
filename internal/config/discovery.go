@@ -13,6 +13,7 @@ type DiscoveryConfig struct {
 	Wordlists                DiscoveryWordlistConfig  `yaml:"wordlists"`
 	Extensions               DiscoveryExtensionConfig `yaml:"extensions"`
 	Engine                   DiscoveryEngineConfig    `yaml:"engine"`
+	JSScan                   DiscoveryJSScanConfig    `yaml:"jsscan"`
 	SaveResponseBody         bool                     `yaml:"save_response_body"`
 	EnableMalformedPathProbe bool                     `yaml:"enable_malformed_path_probe"`
 	DedupClusterCap          *int                     `yaml:"dedup_cluster_cap"`   // cap near-identical discovery responses (same host/status/content-type, size & words within 0.5%) per cluster; nil=default(10), 0=disabled, N=keep at most N
@@ -22,6 +23,29 @@ type DiscoveryConfig struct {
 	PassiveModuleTags        []string                 `yaml:"passive_module_tags"` // run passive modules matching these tags during discovery (e.g., ["fingerprint"])
 	ReSpider                 DiscoveryReSpiderConfig  `yaml:"respider"`            // targeted re-spider of rich/SPA routes found after discovery dedup
 	DeparosDedup             DeparosDedupConfig       `yaml:"deparos_dedup"`       // post-discovery status-retention + reflected-URL-robust record dedup
+}
+
+type DiscoveryJSScanConfig struct {
+	Enabled            *bool  `yaml:"enabled"`
+	ReplayMode         string `yaml:"replay_mode"`
+	SourceMaps         *bool  `yaml:"source_maps"`
+	AssetGraph         *bool  `yaml:"asset_graph"`
+	ProtocolHandshake  bool   `yaml:"protocol_handshake"`
+	WorkerCount        int    `yaml:"worker_count"`
+	MemoryBudgetMB     int    `yaml:"memory_budget_mb"`
+	CacheMB            int    `yaml:"cache_mb"`
+	WorkerMaxJobs      int    `yaml:"worker_max_jobs"`
+	WorkerMaxRSSMB     int    `yaml:"worker_max_rss_mb"`
+	JobTimeout         string `yaml:"job_timeout"`
+	NormalInputMB      int    `yaml:"normal_input_mb"`
+	MaxASTInputMB      int    `yaml:"max_ast_input_mb"`
+	HardInputMB        int    `yaml:"hard_input_mb"`
+	MaxRequestsPerFile int    `yaml:"max_requests_per_file"`
+	MaxASTNodes        int    `yaml:"max_ast_nodes"`
+	MaxAssetDepth      int    `yaml:"max_asset_depth"`
+	MaxAssetsPerParent int    `yaml:"max_assets_per_parent"`
+	MaxAssetsPerHost   int    `yaml:"max_assets_per_host"`
+	MaxAssetsTotal     int    `yaml:"max_assets_total"`
 }
 
 // DeparosDedupConfig controls the post-discovery cleanup of stored deparos
@@ -242,6 +266,13 @@ func DefaultDiscoveryConfig() *DiscoveryConfig {
 			Timeout:          "10s",
 			ObservedMaxItems: 4000,
 		},
+		JSScan: DiscoveryJSScanConfig{
+			ReplayMode: "exact", WorkerCount: 0, MemoryBudgetMB: 768, CacheMB: 128,
+			WorkerMaxJobs: 100, WorkerMaxRSSMB: 1024, JobTimeout: "60s",
+			NormalInputMB: 1, MaxASTInputMB: 4, HardInputMB: 10, MaxRequestsPerFile: 500,
+			MaxASTNodes:   500_000,
+			MaxAssetDepth: 4, MaxAssetsPerParent: 64, MaxAssetsPerHost: 512, MaxAssetsTotal: 2048,
+		},
 		SaveResponseBody: true,
 	}
 }
@@ -293,6 +324,22 @@ func (c *DiscoveryConfig) Validate() error {
 		// valid
 	default:
 		return fmt.Errorf("discovery.engine.case_sensitivity: must be auto_detect, sensitive, or insensitive, got %q", c.Engine.CaseSensitivity)
+	}
+	switch c.JSScan.ReplayMode {
+	case "", "exact", "conservative", "off":
+	default:
+		return fmt.Errorf("discovery.jsscan.replay_mode must be exact, conservative, or off")
+	}
+	if c.JSScan.JobTimeout != "" {
+		if duration, err := time.ParseDuration(c.JSScan.JobTimeout); err != nil || duration < time.Second || duration > 5*time.Minute {
+			return fmt.Errorf("discovery.jsscan.job_timeout must be a duration between 1s and 5m")
+		}
+	}
+	if c.JSScan.WorkerCount < 0 || c.JSScan.WorkerCount > 16 || c.JSScan.MemoryBudgetMB < 0 || c.JSScan.CacheMB < 0 {
+		return fmt.Errorf("discovery.jsscan worker/cache budgets are invalid")
+	}
+	if c.JSScan.MaxASTNodes != 0 && (c.JSScan.MaxASTNodes < 1_000 || c.JSScan.MaxASTNodes > 5_000_000) {
+		return fmt.Errorf("discovery.jsscan.max_ast_nodes must be 1000-5000000")
 	}
 
 	if c.ReSpider.PerSeedMaxDuration != "" {

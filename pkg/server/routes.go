@@ -99,7 +99,8 @@ func registerRoutes(app *fiber.App, handlers *Handlers, cfg ServerConfig) {
 	app.Use(ProjectUUIDMiddleware(handlers.repo))
 
 	// Routes (public — no role guard needed, auth already skips these)
-	app.Get("/health", handlers.HandleHealth)
+	app.Get("/health", handlers.HandleHealth) // liveness (no DB dependency)
+	app.Get("/ready", handlers.HandleReady)   // readiness (DB ping)
 	app.Get("/server-info", handlers.HandleServerInfo)
 
 	// API group

@@ -34,7 +34,7 @@ func registerNativeScanFlags(flags *pflag.FlagSet, includeAuth bool) {
 	flags.BoolVar(&scanOpts.Stream, "stream", false, "Process targets as a stream without buffering or deduplication")
 
 	// Request group
-	flags.StringSliceVarP(&scanOpts.Headers, "header", "H", nil, "Add custom HTTP header (repeatable, e.g. -H 'Auth: Bearer token')")
+	flags.StringArrayVarP(&scanOpts.Headers, "header", "H", nil, "Add custom HTTP header (repeatable, e.g. -H 'Auth: Bearer token'). Commas are literal — repeat -H for multiple headers.")
 	flags.StringToStringVarP(&scanOpts.AdvancedOptions, "advanced-options", "a", nil, "Module-specific options as key=value (e.g. -a xss.dom=true)")
 
 	// Content discovery flags
@@ -85,11 +85,11 @@ func registerNativeScanFlags(flags *pflag.FlagSet, includeAuth bool) {
 	_ = flags.MarkHidden("captured-console")
 
 	if includeAuth {
-		flags.StringSliceVar(&scanOpts.AuthFiles, "auth-file", nil,
+		flags.StringArrayVar(&scanOpts.AuthFiles, "auth-file", nil,
 			"Path to auth file (YAML/JSON, single session or sessions: bundle), "+
-				"or bare name resolved against scanning_strategy.session.session_dir. Repeatable.")
-		flags.StringSliceVar(&scanOpts.AuthInline, "auth", nil,
-			"Inline session in 'name:Header:value' format. Repeatable.")
+				"or bare name resolved against scanning_strategy.session.session_dir. Repeatable; commas are literal.")
+		flags.StringArrayVar(&scanOpts.AuthInline, "auth", nil,
+			"Inline session in 'name:Header:value' format. Repeatable; commas are literal (header values may contain commas).")
 
 		// Accept the former flag names (--session / --session-file) shown in older
 		// guides and copy-pasted commands as aliases for --auth / --auth-file. A

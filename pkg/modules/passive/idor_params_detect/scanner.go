@@ -105,6 +105,9 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 			Request:          string(ctx.Request().Raw()),
 			FuzzingParameter: param.Name(),
 			ExtractedResults: []string{fmt.Sprintf("%s=%s", param.Name(), param.Value())},
+			RecordKind:       output.RecordKindObservation,
+			EvidenceGrade:    output.EvidenceGradeObservation,
+			DedupKey:         fmt.Sprintf("idor-candidate|%s|%s|%s|%s", urlx.Host, normalizedPath, param.Name(), param.Type().String()),
 			Info: output.Info{
 				Name:        "Potential IDOR Parameter",
 				Description: desc,
@@ -164,6 +167,10 @@ func (m *Module) detectExcessiveData(body, host, urlStr string, ctx *httpmsg.Htt
 	if len(sensitiveFields) == 0 {
 		return nil
 	}
+	identity := "anonymous"
+	if ctx != nil && ctx.Request() != nil {
+		identity = ctx.Request().IdentityFingerprint()
+	}
 
 	return []*output.ResultEvent{
 		{
@@ -173,6 +180,9 @@ func (m *Module) detectExcessiveData(body, host, urlStr string, ctx *httpmsg.Htt
 			Matched:          urlStr,
 			Request:          string(ctx.Request().Raw()),
 			ExtractedResults: sensitiveFields,
+			RecordKind:       output.RecordKindCandidate,
+			EvidenceGrade:    output.EvidenceGradeCandidate,
+			DedupKey:         "excessive-data-candidate|" + host + "|" + urlStr + "|" + identity,
 			Info: output.Info{
 				Name:        "Excessive Data Exposure",
 				Description: fmt.Sprintf("API response contains %d sensitive field(s): %s", len(sensitiveFields), strings.Join(sensitiveFields, ", ")),

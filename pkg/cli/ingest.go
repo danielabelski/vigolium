@@ -51,6 +51,7 @@ Stdin and -i auto-detect the content shape: a URL list, a raw HTTP request,
 a Burp request/response pair (split by '***'), or a curl command. Inputs that
 already carry a response (Burp pair, HAR, …) are stored as-is — no live
 refetch — so the response you pasted is what lands in the database.`,
+	Args: cobra.NoArgs,
 	RunE: runIngestCmd,
 }
 

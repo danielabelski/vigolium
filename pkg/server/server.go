@@ -55,11 +55,17 @@ func NewServer(cfg ServerConfig, q queue.Queue, db *database.DB, repo *database.
 	if cfg.ReadTimeout == 0 {
 		cfg.ReadTimeout = 10 * time.Second
 	}
-	if cfg.WriteTimeout == 0 {
-		cfg.WriteTimeout = 60 * time.Second
-	}
+	// WriteTimeout intentionally has NO non-zero default: this server hosts SSE
+	// agent/audit streams that legitimately run for minutes, and fasthttp arms the
+	// write deadline once for the whole (streamed) response, so any finite cap
+	// severs a long stream mid-flight. 0 leaves it unlimited; ReadTimeout +
+	// IdleTimeout + handler/job deadlines bound non-streaming work. Operators who
+	// don't use long streams can still set an explicit WriteTimeout.
 	if cfg.IdleTimeout == 0 {
 		cfg.IdleTimeout = 120 * time.Second
+	}
+	if cfg.MaxUploadBytes <= 0 {
+		cfg.MaxUploadBytes = defaultMaxUploadBytes
 	}
 	if cfg.ShutdownTimeout == 0 {
 		cfg.ShutdownTimeout = 30 * time.Second
@@ -96,6 +102,11 @@ func NewServer(cfg ServerConfig, q queue.Queue, db *database.DB, repo *database.
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
+		// Raise the framework body ceiling above DefaultBodyLimitMiddleware's 4 MB
+		// cap so the exempt large-upload routes actually work. Without this Fiber's
+		// own 4 MB default rejects the upload before the route exemption can run.
+		// Non-upload routes are still held to 4 MB by the middleware.
+		BodyLimit: cfg.MaxUploadBytes,
 	})
 
 	registerRoutes(app, handlers, cfg)

@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/output"
 )
 
 // makeHTTPCtx builds a request/response pair with the given path, content type,
@@ -46,6 +47,26 @@ func TestScanPerRequest_InsecureCookie(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, results)
 	assert.Contains(t, results[0].Info.Description, "sessionid")
+	assert.Equal(t, output.RecordKindCandidate, results[0].RecordKind)
+}
+
+func TestScanPerRequest_PreferenceCookieIsObservation(t *testing.T) {
+	t.Parallel()
+	results, err := New().ScanPerRequest(makeHTTPCtx("/", "theme=dark; Path=/"), &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, output.RecordKindObservation, results[0].RecordKind)
+}
+
+func TestScanPerRequest_AttributeWordsInValueDoNotCountAsFlags(t *testing.T) {
+	t.Parallel()
+	results, err := New().ScanPerRequest(makeHTTPCtx("/login", "sessionid=secure-httponly-samesite; Path=/"), &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	joined := results[0].Info.Description
+	assert.Contains(t, joined, "Missing Secure")
+	assert.Contains(t, joined, "Missing HttpOnly")
+	assert.Contains(t, joined, "Missing SameSite")
 }
 
 // TestScanPerRequest_SecureCookie drives a fully-hardened cookie (Secure,

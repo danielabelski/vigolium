@@ -762,12 +762,30 @@ func checkJSScanBinary() *CheckResult {
 	details = append(details,
 		fmt.Sprintf("path: %s", config.ContractPath(path)),
 		fmt.Sprintf("sha256: %s", checksum),
+	)
+
+	capabilities, err := scanner.Capabilities()
+	if err != nil {
+		return &CheckResult{
+			Status:  StatusError,
+			Message: fmt.Sprintf("capability handshake failed: %v", err),
+			Details: details,
+			Tip:     "The embedded helper and Go wrapper use incompatible protocols. Rebuild with `make ensure-jsscan`, or reinstall a matching Vigolium release.",
+		}
+	}
+	details = append(details,
+		fmt.Sprintf("protocol: v%d", capabilities.ProtocolVersion),
+		fmt.Sprintf("tool version: %s", capabilities.ToolVersion),
+		fmt.Sprintf("source hash: %s", capabilities.SourceHash),
+		fmt.Sprintf("profiles: %s", strings.Join(capabilities.Profiles, ", ")),
+		fmt.Sprintf("capabilities: %s", strings.Join(capabilities.Capabilities, ", ")),
+		fmt.Sprintf("framing: %s", strings.Join(capabilities.Framing, ", ")),
 		"running JavaScript extraction probe",
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result, err := scanner.Scan(ctx, []byte(`fetch("/vigolium-doctor-jsscan", {method: "POST", body: JSON.stringify({ok: true})});`))
+	result, err := scanner.ScanWithOptions(ctx, []byte(`fetch("/vigolium-doctor-jsscan", {method: "POST", body: JSON.stringify({ok: true})});`), jsscan.ScanOptions{Profile: jsscan.ProfileEndpoints})
 	if err != nil {
 		return &CheckResult{
 			Status:  StatusError,
@@ -786,10 +804,18 @@ func checkJSScanBinary() *CheckResult {
 	details = append(details, fmt.Sprintf("probe: ok, requests=%d, bytes=%d", requests, bytesScanned))
 
 	return &CheckResult{
-		Status:  StatusOK,
-		Message: fmt.Sprintf("runtime=%s/%s, probe=ok", runtime.GOOS, runtime.GOARCH),
+		Status: StatusOK,
+		Message: fmt.Sprintf("protocol=v%d, source=%s, capabilities=%d, probe=ok",
+			capabilities.ProtocolVersion, shortDigest(capabilities.SourceHash), len(capabilities.Capabilities)),
 		Details: details,
 	}
+}
+
+func shortDigest(value string) string {
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
 }
 
 func checkAuditBinary() *CheckResult {

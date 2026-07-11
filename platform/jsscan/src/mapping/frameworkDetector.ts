@@ -97,6 +97,13 @@ export function isWebpack(sourceCode: string): boolean {
   return detectFramework(sourceCode) === 'webpack';
 }
 
+/** Cheap gate for the much heavier module-graph traversal. */
+export function hasWebpackStructureSignal(sourceCode: string): boolean {
+  return /(?:__webpack_require__|webpackJsonp|webpackChunk|\.push\s*\(\s*\[\s*\[)/.test(sourceCode) ||
+    /\b(?:var|let|const)\s+[A-Za-z_$][\w$]*\s*=\s*\{\s*["']?\d+["']?\s*:\s*(?:function|\(?[\w$,.\s]+\)?\s*=>)/.test(sourceCode) ||
+    /\[\s*function\s*\([^)]*\)\s*\{/.test(sourceCode);
+}
+
 /**
  * Get all framework scores for debugging
  */

@@ -35,10 +35,6 @@ func runStorageLs(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if sc == nil {
-		return nil
-	}
-
 	prefix, _ := cmd.Flags().GetString("prefix")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	treeOut, _ := cmd.Flags().GetBool("tree")

@@ -2,6 +2,7 @@ import type { ParseResult } from '@babel/parser';
 import * as t from '@babel/types';
 import * as m from '@codemod/matchers';
 import type { Transform } from '../ast-utils';
+import type { AnalysisContext } from '../context';
 import { tracebackVariables } from '../traceback/tracebackVariables';
 import { appendPattern, appendExtractedRequest } from './utils';
 import { getTrackedVariablesMap } from './globalVariableTracking';
@@ -20,7 +21,11 @@ import {
   createResolutionContext,
 } from './extractRequest';
 
-export function createJqueryAjaxTransform(ast: ParseResult<t.File> | null = null, sourceCode: string = ''): Transform {
+export function createJqueryAjaxTransform(
+  analysisContext: AnalysisContext,
+  ast: ParseResult<t.File> | null = null,
+  sourceCode: string = '',
+): Transform {
   return {
     name: 'jqueryAjax',
     tags: ['safe'],
@@ -67,9 +72,11 @@ export function createJqueryAjaxTransform(ast: ParseResult<t.File> | null = null
             }
 
             if (hasUrl && hasValidMethod) {
+              analysisContext.claimRequestNode(path.node);
               // Output existing requestPattern
-              const result = tracebackVariables(path, [], { ast, sourceCode });
-              appendPattern(result, 'jqueryAjax');
+              if (analysisContext.has('requestEvidence')) {
+                appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'jqueryAjax', path.node);
+              }
 
               // Extract structured request data
               const trackedVars = getTrackedVariablesMap();
@@ -79,7 +86,7 @@ export function createJqueryAjaxTransform(ast: ParseResult<t.File> | null = null
               const effectiveIterations = getEffectiveIterationsForFunction(currentFunction);
 
               for (const iteration of effectiveIterations) {
-                const context = createResolutionContext(currentFunction, iteration);
+                const context = createResolutionContext(currentFunction, iteration, path);
 
                 const urlNode = findProperty(ajaxConfig, 'url');
                 const urlResults = extractURL(urlNode, trackedVars, context);
@@ -105,7 +112,10 @@ export function createJqueryAjaxTransform(ast: ParseResult<t.File> | null = null
                     cookies: headersNode ? extractCookies(headersNode, trackedVars, context) : [],
                   });
 
-                  appendExtractedRequest(request);
+                  appendExtractedRequest(analysisContext, request, {
+                    extractor: 'jquery-ajax', client: 'jquery', confidence: 'high',
+                    node: path.node, functionName: currentFunction,
+                  });
                 }
               }
             }

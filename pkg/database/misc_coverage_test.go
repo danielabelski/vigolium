@@ -98,6 +98,39 @@ func TestRecordToHttpRequestResponse(t *testing.T) {
 	}
 }
 
+// TestGetTopHosts_PerHostFindingCounts verifies the constant-query GetTopHosts
+// attributes findings to the right host and counts a finding once even when it
+// links to several records on that host (DISTINCT semantics).
+func TestGetTopHosts_PerHostFindingCounts(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	a1 := insertRecordP(t, repo, DefaultProjectUUID, "GET", "a.example.com", "/1", 200)
+	a2 := insertRecordP(t, repo, DefaultProjectUUID, "GET", "a.example.com", "/2", 200)
+	b1 := insertRecordP(t, repo, DefaultProjectUUID, "GET", "b.example.com", "/1", 200)
+
+	saveFindingFull(t, repo, &Finding{HTTPRecordUUIDs: []string{a1}, Severity: SeverityHigh})
+	// Linked to two records on host A — must still count once for A.
+	saveFindingFull(t, repo, &Finding{HTTPRecordUUIDs: []string{a1, a2}, Severity: SeverityMedium})
+	saveFindingFull(t, repo, &Finding{HTTPRecordUUIDs: []string{b1}, Severity: SeverityLow})
+
+	topHosts, err := db.GetTopHosts(ctx, QueryFilters{ProjectUUID: DefaultProjectUUID}, 10)
+	if err != nil {
+		t.Fatalf("GetTopHosts: %v", err)
+	}
+	fc := make(map[string]int64, len(topHosts))
+	for _, h := range topHosts {
+		fc[h.Hostname] = h.FindingCount
+	}
+	if fc["a.example.com"] != 2 {
+		t.Errorf("host A finding count = %d, want 2 (a finding spanning 2 records counts once)", fc["a.example.com"])
+	}
+	if fc["b.example.com"] != 1 {
+		t.Errorf("host B finding count = %d, want 1", fc["b.example.com"])
+	}
+}
+
 func TestGetStatsAndTopHostsAndFormat(t *testing.T) {
 	db := newTestDB(t)
 	repo := NewRepository(db)

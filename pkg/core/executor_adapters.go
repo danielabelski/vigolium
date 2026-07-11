@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"sync/atomic"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/work"
 	"go.uber.org/zap"
 )
@@ -22,7 +24,18 @@ func (u *repoRiskScoreUpdater) UpdateRiskScores(ctx context.Context, scores map[
 	return u.repo.UpdateRiskScores(ctx, scores)
 }
 
-// executorFeeder implements modkit.RequestFeeder via a non-blocking channel send.
+// feedbackBlockTimeout bounds how long Feed will wait for room in a full feedback
+// channel before dropping. Kept short so a producer (a worker mid-processResults)
+// can never stall the pipeline for long — even in the pathological case where
+// every worker feeds at once, the timeout guarantees forward progress — while
+// still absorbing normal discovery bursts that a purely non-blocking send would
+// drop outright.
+const feedbackBlockTimeout = 100 * time.Millisecond
+
+// executorFeeder implements modkit.RequestFeeder via a bounded-blocking send:
+// discovered work is enqueued immediately when there's room, waited on briefly
+// when the channel is momentarily full, and only dropped (counted + rate-limited
+// warned) under sustained saturation.
 type executorFeeder struct {
 	ch       chan *work.WorkItem
 	dropped  atomic.Int64
@@ -31,16 +44,28 @@ type executorFeeder struct {
 
 func (f *executorFeeder) Feed(rr *httpmsg.HttpRequestResponse) bool {
 	item := work.NewWithModules(rr, nil)
+	// Fast path: enqueue immediately when there's room.
 	select {
 	case f.ch <- item:
 		return true
 	default:
+	}
+
+	// Channel momentarily full: wait briefly for the feeder to drain rather than
+	// dropping discovered URLs outright. Bounded by feedbackBlockTimeout so this
+	// can never wedge the pipeline.
+	timer := time.NewTimer(feedbackBlockTimeout)
+	defer timer.Stop()
+	select {
+	case f.ch <- item:
+		return true
+	case <-timer.C:
 		f.dropped.Add(1)
-		// Rate-limited warning: log at most once every 5 seconds
+		// Rate-limited warning: log at most once every 5 seconds.
 		now := time.Now().Unix()
 		if last := f.lastWarn.Load(); now-last >= 5 {
 			if f.lastWarn.CompareAndSwap(last, now) {
-				zap.L().Warn("Feedback channel full, discovered URLs dropped",
+				zap.L().Warn("Feedback channel saturated, discovered URLs dropped",
 					zap.Int64("total_dropped", f.dropped.Load()))
 			}
 		}
@@ -119,6 +144,31 @@ func (u *repoRemarksAnnotator) AppendRemarks(ctx context.Context, annotations ma
 // overwrite a record's minified JS body with its beautified form).
 type repoRecordResponseRewriter struct {
 	repo *database.Repository
+}
+
+// repoDerivedArtifactWriter stores immutable analysis companions without
+// modifying the raw HTTP record.
+type repoDerivedArtifactWriter struct {
+	repo *database.Repository
+}
+
+func (w *repoDerivedArtifactWriter) StoreDerivedArtifact(ctx context.Context, artifact *modkit.DerivedArtifact) error {
+	if artifact == nil {
+		return nil
+	}
+	metadata, err := json.Marshal(artifact.Metadata)
+	if err != nil {
+		return err
+	}
+	return w.repo.SaveAnalysisArtifactForRecord(ctx, &database.AnalysisArtifact{
+		HTTPRecordUUID: artifact.RecordUUID,
+		Kind:           artifact.Kind,
+		Filename:       artifact.Filename,
+		MediaType:      artifact.MediaType,
+		SHA256:         artifact.SHA256,
+		Content:        append([]byte(nil), artifact.Content...),
+		Metadata:       string(metadata),
+	})
 }
 
 func (u *repoRecordResponseRewriter) RewriteRecordResponse(ctx context.Context, uuid string, rawResponse []byte) error {

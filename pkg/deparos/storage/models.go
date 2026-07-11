@@ -158,5 +158,33 @@ type ExtractionModel struct {
 	Headers     sql.NullString `bun:"headers,type:text"`    // JSON array
 	Cookies     sql.NullString `bun:"cookies,type:text"`    // JSON array
 
+	// Typed JSSCAN v2 metadata. Legacy rows leave these columns NULL/zero.
+	SourceURL     sql.NullString `bun:"source_url,type:text"`
+	RecordKind    sql.NullString `bun:"record_kind"`
+	Confidence    sql.NullString `bun:"confidence"`
+	Extractor     sql.NullString `bun:"extractor"`
+	ModulePath    sql.NullString `bun:"module_path,type:text"`
+	SourceLine    sql.NullInt64  `bun:"source_line"`
+	TemplateJSON  sql.NullString `bun:"template_json,type:text"`
+	SchemaVersion int            `bun:"schema_version,notnull,default:1"`
+
 	CreatedAt int64 `bun:"created_at,notnull"`
+}
+
+// JSScanSourceArtifactModel stores an immutable original source recovered from
+// a source map. Source paths are display metadata only; content is kept in the
+// database so an untrusted ../../ path can never select a filesystem target.
+type JSScanSourceArtifactModel struct {
+	bun.BaseModel `bun:"table:jsscan_source_artifacts"`
+	ID            int64  `bun:"id,pk,autoincrement" json:"id"`
+	SourceNodeID  int64  `bun:"source_node_id,notnull" json:"source_node_id"`
+	SessionID     int64  `bun:"session_id,notnull" json:"session_id"`
+	Hash          string `bun:"hash,notnull" json:"hash"`
+	GeneratedURL  string `bun:"generated_url,notnull,type:text" json:"generated_url"`
+	VirtualURL    string `bun:"virtual_url,notnull,type:text" json:"virtual_url"`
+	SourcePath    string `bun:"source_path,notnull,type:text" json:"source_path"`
+	Language      string `bun:"language,notnull" json:"language"`
+	ContentSHA256 string `bun:"content_sha256,notnull" json:"content_sha256"`
+	Content       string `bun:"content,notnull,type:text" json:"content"`
+	CreatedAt     int64  `bun:"created_at,notnull" json:"created_at"`
 }

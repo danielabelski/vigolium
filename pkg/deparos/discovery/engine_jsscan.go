@@ -1,8 +1,8 @@
 package discovery
 
 import (
-	"bytes"
 	"context"
+	"fmt"
 	"hash/fnv"
 	"net/url"
 	"strconv"
@@ -15,32 +15,21 @@ import (
 	"golang.org/x/net/html"
 )
 
-// inlineRequestSignals are the request-making API tokens jsscan's AST extractor
-// keys off (fetch / XHR / axios / jQuery / $http / WebSocket / method calls).
-// jsscan can only emit an HTTP request when one of these is present in the
-// source, so an inline script carrying none of them yields nothing from jsscan.
-var inlineRequestSignals = [][]byte{
-	[]byte("fetch"), []byte("axios"), []byte("ajax"),
-	[]byte("XMLHttpRequest"), []byte("XHR"), []byte(".open("),
-	[]byte("$http"), []byte("sendBeacon"), []byte("WebSocket"),
-	[]byte("EventSource"), []byte("Request("),
-	[]byte(".get("), []byte(".post("), []byte(".put("),
-	[]byte(".patch("), []byte(".delete("),
-}
-
-// inlineScriptHasRequestSignal reports whether an inline script contains any
-// token jsscan could extract a request from. Scripts with none — JSON-LD and
-// other data islands, analytics/config blobs, feature flags — skip the per-script
-// jsscan subprocess (a fork/exec + temp-file write) and rely on linkfinder, which
-// still runs over them. Because jsscan needs such a call to extract anything, this
-// never drops a request jsscan would have found.
-func inlineScriptHasRequestSignal(content []byte) bool {
-	for _, sig := range inlineRequestSignals {
-		if bytes.Contains(content, sig) {
-			return true
-		}
+func (e *Engine) jsScanOptions(profile jsscan.AnalysisProfile, sourceURL string) jsscan.ScanOptions {
+	options := jsscan.ScanOptions{Profile: profile, SourceURL: sourceURL}
+	if e.config.JSScan.MaxRequestsPerFile > 0 {
+		options.MaxRequests = e.config.JSScan.MaxRequestsPerFile
 	}
-	return false
+	if e.config.JSScan.MaxASTNodes > 0 {
+		options.MaxASTNodes = e.config.JSScan.MaxASTNodes
+	}
+	if e.config.JSScan.JobTimeout > 0 {
+		options.Deadline = e.config.JSScan.JobTimeout
+	}
+	if e.config.JSScan.HardInputMB > 0 {
+		options.MaxInputBytes = e.config.JSScan.HardInputMB * 1024 * 1024
+	}
+	return options
 }
 
 // hashBodyContent computes FNV-1a 64-bit hash of response body for deduplication.
@@ -57,10 +46,10 @@ func hashBodyContent(body []byte) string {
 // 1. Run jsscan to extract HTTP requests (endpoints with method, params, body)
 // 2. Run linkfinder to extract paths and add to observed collections
 //
-// Thread-safe: uses semaphore for jsscan rate limiting, DiskSet for dedup.
+// Thread-safe: the shared service owns admission; DiskSet handles body dedup.
 func (e *Engine) processScriptTagsWithJSScan(ctx context.Context, sourceURL *url.URL, rc *responsechain.ResponseChain) {
 	// Skip if jsscan not initialized
-	if e.jsscanScanner == nil || e.jsscanSem == nil {
+	if e.jsscanService == nil {
 		return
 	}
 
@@ -127,30 +116,11 @@ func (e *Engine) processScriptTagsWithJSScan(ctx context.Context, sourceURL *url
 			continue
 		}
 
-		// Skip the jsscan subprocess for scripts with no request-making API token
-		// (JSON-LD / data islands / config blobs): jsscan would extract nothing,
-		// so the fork/exec + temp-file write is pure overhead. linkfinder still
-		// runs below to harvest any paths.
-		if !inlineScriptHasRequestSignal(scriptContent) {
-			namesAdded, pathsAdded := e.extractPathsFromScript(scriptContent)
-			totalNamesAdded += namesAdded
-			totalPathsAdded += pathsAdded
-			continue
-		}
-
-		// Acquire semaphore
-		select {
-		case e.jsscanSem <- struct{}{}:
-			// Got semaphore
-		case <-ctx.Done():
-			return
-		}
-
-		// Run jsscan on script content
-		scanResult, err := e.jsscanScanner.Scan(ctx, scriptContent)
-
-		// Release semaphore
-		<-e.jsscanSem
+		// Run jsscan on script content. A fragment keeps inline provenance unique
+		// without changing browser URL resolution semantics in the replay layer.
+		inlineURL := *sourceURL
+		inlineURL.Fragment = fmt.Sprintf("inline-script-%d", i)
+		scanResult, err := e.jsscanService.ScanWithOptions(ctx, scriptContent, e.jsScanOptions(jsscan.ProfileDiscovery, inlineURL.String()))
 
 		if err != nil {
 			logger.Debug("jsscan failed for inline script",
@@ -164,10 +134,20 @@ func (e *Engine) processScriptTagsWithJSScan(ctx context.Context, sourceURL *url
 			continue
 		}
 
-		// Collect extracted requests
-		if len(scanResult.Requests) > 0 {
+		// Protocol v2 facts retain the inline asset identity and extractor. Only
+		// fall back to the flat v1 collection for compatibility output.
+		if len(scanResult.RequestFacts) > 0 {
+			for factIndex := range scanResult.RequestFacts {
+				if e.AddRequestFact(inlineURL.String(), scanResult.RequestFacts[factIndex]) {
+					// Counted in the aggregate log below via the compatibility view.
+				}
+			}
+			e.storeJSScanFacts(sourceURL, scanResult.RequestFacts)
+		} else if len(scanResult.Requests) > 0 {
 			allRequests = append(allRequests, scanResult.Requests...)
 		}
+		e.processAssetFacts(ctx, inlineURL.String(), scriptContent, scanResult.AssetFacts)
+		e.processJSScanCapabilityFacts(inlineURL.String(), scanResult)
 
 		// Always run linkfinder in addition to jsscan and merge results — they
 		// are complementary (AST request extraction vs regex path discovery),
@@ -183,7 +163,8 @@ func (e *Engine) processScriptTagsWithJSScan(ctx context.Context, sourceURL *url
 		totalPathsAdded += pathsAdded
 	}
 
-	// Process all collected requests
+	// Process only protocol-v1 fallback requests. Typed facts were registered
+	// with their per-inline-script source above.
 	if len(allRequests) > 0 {
 		newRequests := 0
 		for i := range allRequests {
@@ -247,12 +228,22 @@ func extractScriptTags(doc *html.Node) [][]byte {
 	var traverse func(*html.Node)
 	traverse = func(n *html.Node) {
 		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "script") {
-			// Check for external script (has src attribute)
+			isJavaScript := true
+			// External scripts are fetched separately. Explicit data/template script
+			// types are not JavaScript and should not consume an AST job.
 			for _, attr := range n.Attr {
 				if strings.EqualFold(attr.Key, "src") && attr.Val != "" {
-					// External script - skip, handled by JSFetchTask
 					goto traverseChildren
 				}
+				if strings.EqualFold(attr.Key, "type") {
+					typeValue := strings.ToLower(strings.TrimSpace(attr.Val))
+					isJavaScript = typeValue == "" || typeValue == "module" ||
+						typeValue == "text/javascript" || typeValue == "application/javascript" ||
+						typeValue == "text/ecmascript" || typeValue == "application/ecmascript"
+				}
+			}
+			if !isJavaScript {
+				goto traverseChildren
 			}
 
 			// Extract inline script content

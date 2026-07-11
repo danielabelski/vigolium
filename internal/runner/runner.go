@@ -30,6 +30,7 @@ import (
 	"github.com/projectdiscovery/useragent"
 	"github.com/vigolium/vigolium/pkg/types"
 	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 )
 
 // maxFeedbackRounds limits re-scanning of newly discovered URLs in the dynamic-assessment phase.
@@ -129,13 +130,25 @@ func (s *SharedInfra) Close() {
 	}
 }
 
+// buildScanRateLimiter returns a global requests-per-second token bucket for the
+// scan, or nil when no explicit --rate-limit was set (perSec <= 0) so default
+// scans keep their current throughput. Burst equals the rate so a fresh scan can
+// send up to one second's worth immediately, then settles to the steady cap.
+func buildScanRateLimiter(perSec int) *rate.Limiter {
+	if perSec <= 0 {
+		return nil
+	}
+	return rate.NewLimiter(rate.Limit(perSec), perSec)
+}
+
 // BuildSharedInfra creates a SharedInfra from the given options and settings.
 // It extracts the reusable portions of buildInfrastructure.
 func BuildSharedInfra(opts *types.Options, settings *config.Settings, repo *database.Repository) (*SharedInfra, error) {
 	infra := &SharedInfra{}
 
 	svc := &services.Services{
-		Options: opts,
+		Options:     opts,
+		RateLimiter: buildScanRateLimiter(opts.RateLimit),
 	}
 
 	if opts.ShouldUseHostError() {

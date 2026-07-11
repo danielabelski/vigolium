@@ -67,6 +67,54 @@ export function applyTransforms(
   return state;
 }
 
+export interface FixpointState extends TransformState {
+  /** Change count for each pass, in order. Length is the number of passes run. */
+  passes: number[];
+}
+
+/**
+ * Run an ordered list of transforms repeatedly until a full pass produces no
+ * changes (a fixpoint), the pass budget is exhausted, or the deadline passes.
+ *
+ * Unlike {@link applyTransforms} — which merges every visitor into a single
+ * traversal — this re-runs the whole list each pass, so a change made by one
+ * transform can be picked up by an earlier transform on the next pass (e.g.
+ * `concat-to-plus` exposes a `+` chain that `merge-strings` can then fold).
+ */
+export function applyTransformsToFixpoint(
+  ast: Node,
+  transforms: Transform[],
+  options: {
+    maxPasses?: number;
+    /** Absolute `performance.now()` timestamp after which no new pass starts. */
+    deadline?: number;
+    noScope?: boolean;
+    name?: string;
+  } = {},
+): FixpointState {
+  const maxPasses = Math.max(1, options.maxPasses ?? 5);
+  const name = options.name ?? transforms.map((t) => t.name).join(', ');
+  const passes: number[] = [];
+  let total = 0;
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    if (options.deadline !== undefined && performance.now() > options.deadline) {
+      break;
+    }
+    const { changes } = applyTransforms(ast, transforms, {
+      noScope: options.noScope,
+      name,
+      log: false,
+    });
+    passes.push(changes);
+    total += changes;
+    if (changes === 0) break;
+  }
+
+  logger(`${name}: fixpoint reached after ${passes.length} pass(es), ${total} changes [${passes.join(', ')}]`);
+  return { changes: total, passes };
+}
+
 export function mergeTransforms(options: {
   name: string;
   tags: Tag[];

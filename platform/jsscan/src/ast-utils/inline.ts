@@ -118,6 +118,156 @@ export function inlineObjectProperties(
 }
 
 /**
+ * Conservative purity check for an expression that would be substituted into a
+ * caller during function inlining. Returns true only when re-ordering,
+ * duplicating, or dropping the expression is guaranteed to be observationally
+ * equivalent to evaluating it once — i.e. it has no side effects and its value
+ * cannot change between evaluations at the same program point.
+ *
+ * Deliberately strict: calls, `new`, assignments/updates, `await`/`yield`,
+ * `delete`, and member reads (potential getters/proxies) are all treated as
+ * impure.
+ */
+export function isPureForInline(node: t.Node): boolean {
+  switch (node.type) {
+    case 'StringLiteral':
+    case 'NumericLiteral':
+    case 'BooleanLiteral':
+    case 'NullLiteral':
+    case 'BigIntLiteral':
+    case 'DecimalLiteral':
+    case 'RegExpLiteral':
+    case 'Identifier':
+    case 'ThisExpression':
+      return true;
+    case 'TemplateLiteral':
+      return node.expressions.every((e) => isPureForInline(e as t.Node));
+    case 'UnaryExpression':
+      return node.operator !== 'delete' && isPureForInline(node.argument);
+    case 'BinaryExpression':
+      return (
+        node.operator !== 'in' &&
+        node.operator !== 'instanceof' &&
+        t.isExpression(node.left) &&
+        isPureForInline(node.left) &&
+        isPureForInline(node.right)
+      );
+    case 'LogicalExpression':
+      return isPureForInline(node.left) && isPureForInline(node.right);
+    case 'ConditionalExpression':
+      return (
+        isPureForInline(node.test) &&
+        isPureForInline(node.consequent) &&
+        isPureForInline(node.alternate)
+      );
+    default:
+      return false;
+  }
+}
+
+/**
+ * A control-flow wrapper is "order-preserving" when its body references every
+ * parameter exactly once, in declaration order, and never inside a branch that
+ * may be short-circuited (right side of `&&`/`||`/`??`, either arm of `?:`).
+ *
+ * When that holds, inlining `f(x, y, z)` produces an expression whose sub-terms
+ * evaluate `x` then `y` then `z`, exactly once each — identical to how the call
+ * itself would have evaluated its arguments. Inlining is then sound even for
+ * impure arguments.
+ */
+function isOrderPreservingWrapper(
+  fn: t.FunctionExpression | t.FunctionDeclaration,
+): boolean {
+  if (!fn.params.every((p) => t.isIdentifier(p))) return false;
+  const names = fn.params.map((p) => (p as t.Identifier).name);
+  const nameSet = new Set(names);
+  const body = fn.body.body;
+  if (body.length !== 1 || !t.isReturnStatement(body[0]) || !body[0].argument) {
+    return false;
+  }
+
+  const seq: string[] = [];
+  let bad = false;
+  const walk = (node: t.Node | null | undefined, conditional: boolean): void => {
+    if (!node || bad) return;
+    if (t.isIdentifier(node)) {
+      if (nameSet.has(node.name)) {
+        if (conditional) bad = true;
+        else seq.push(node.name);
+      }
+      return;
+    }
+    if (t.isLogicalExpression(node)) {
+      walk(node.left, conditional);
+      walk(node.right, true);
+      return;
+    }
+    if (t.isConditionalExpression(node)) {
+      walk(node.test, conditional);
+      walk(node.consequent, true);
+      walk(node.alternate, true);
+      return;
+    }
+    // Member/optional-member reads or nested functions can hide or reorder
+    // parameter evaluation; refuse to treat them as order-preserving.
+    if (t.isFunction(node)) {
+      bad = true;
+      return;
+    }
+    for (const key of t.VISITOR_KEYS[node.type] ?? []) {
+      const child = (node as unknown as Record<string, unknown>)[key];
+      if (Array.isArray(child)) {
+        for (const c of child) if (t.isNode(c)) walk(c, conditional);
+      } else if (t.isNode(child)) {
+        walk(child, conditional);
+      }
+    }
+  };
+  walk(body[0].argument, false);
+  if (bad) return false;
+  if (seq.length !== names.length) return false;
+  for (let i = 0; i < names.length; i++) if (seq[i] !== names[i]) return false;
+  return true;
+}
+
+/**
+ * Decide whether `inlineFunction(fn, caller)` is semantics-preserving.
+ *
+ * Safe when:
+ * - the wrapper is the `function (a, ...b) { return a(...b) }` spread form, or
+ * - every caller argument is pure (`isPureForInline`), or
+ * - the wrapper is order-preserving (`isOrderPreservingWrapper`), or
+ * - `allowImpureArgs` is set (aggressive rewrite level opts into changing
+ *   obscure evaluation-order/short-circuit semantics).
+ *
+ * Callers must treat a `false` result as "leave this call site alone".
+ */
+export function canInlineFunction(
+  fn: t.FunctionExpression | t.FunctionDeclaration,
+  caller: NodePath<t.CallExpression>,
+  allowImpureArgs = false,
+): boolean {
+  // `function (a, ...b) { return a(...b) }` — arguments are forwarded in order,
+  // each evaluated once, so it is always order-preserving.
+  if (t.isRestElement(fn.params[1])) return true;
+
+  const body = fn.body.body;
+  if (body.length !== 1 || !t.isReturnStatement(body[0]) || !body[0].argument) {
+    return false;
+  }
+
+  const args = caller.node.arguments;
+  // Any non-expression argument (spread, etc.) cannot be positionally
+  // substituted; a mismatched arity would substitute `undefined`.
+  if (args.length !== fn.params.length) return false;
+  if (args.some((a) => !t.isExpression(a))) return false;
+
+  if (args.every((a) => isPureForInline(a as t.Node))) return true;
+  if (allowImpureArgs) return true;
+  return isOrderPreservingWrapper(fn);
+}
+
+/**
  * Inline function used in control flow flattening (that only returns an expression)
  * Example:
  * fn: `function (a, b) { return a(b) }`
@@ -211,6 +361,13 @@ export function inlineFunctionAliases(binding: Binding): { changes: number } {
             t.isIdentifier(ref.parent.callee, { name: fnName.current! }),
         )
         .map((ref) => ref.parentPath!) as NodePath<t.CallExpression>[];
+
+      // All-or-nothing: only inline (and remove the wrapper) when every call
+      // site can be inlined without altering evaluation order/short-circuiting.
+      // Otherwise a leftover call would reference the removed declaration.
+      if (!callRefs.every((callRef) => canInlineFunction(fn.node, callRef))) {
+        continue;
+      }
 
       for (const callRef of callRefs) {
         inlineFunction(fn.node, callRef);

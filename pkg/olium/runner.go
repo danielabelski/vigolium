@@ -321,6 +321,6 @@ func resolveProvider(opts Options) (provider.Provider, string, string, error) {
 		}
 		return newAnthropicCompatibleProvider(opts, model)
 	default:
-		return nil, "", "", fmt.Errorf("unknown provider %q (valid: openai-codex-oauth, openai-api-key, openai-responses, anthropic-api-key, anthropic-oauth, anthropic-cli, anthropic-claude-sdk-bridge, anthropic-vertex, google-vertex, openai-compatible, anthropic-compatible)", name)
+		return nil, "", "", fmt.Errorf("unknown provider %q (valid: %s)", name, ProviderNamesString(", "))
 	}
 }

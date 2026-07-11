@@ -2,6 +2,7 @@ import type { ParseResult } from '@babel/parser';
 import type { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import type { Transform } from '../ast-utils';
+import type { AnalysisContext } from '../context';
 import { tracebackVariables } from '../traceback/tracebackVariables';
 import { appendPattern, isURLLike, appendExtractedRequest } from './utils';
 import { getTrackedVariablesMap } from './globalVariableTracking';
@@ -29,6 +30,12 @@ function hasHttpMethodPattern(code: string): boolean {
     ];
 
     return patterns.some(pattern => pattern.test(code));
+}
+
+function hasNearbyHttpMethod(path: NodePath, sourceCode: string): boolean {
+    const start = Math.max(0, (path.node.start ?? 0) - 1024);
+    const end = Math.min(sourceCode.length, (path.node.end ?? start) + 3072);
+    return hasHttpMethodPattern(sourceCode.slice(start, end));
 }
 
 function isValid(node: t.Node): boolean {
@@ -143,7 +150,11 @@ function extractFromCallArgs(
     return { method, params, body };
 }
 
-export function createVariableContainsURLTransform(ast: ParseResult<t.File> | null = null, sourceCode: string = ''): Transform {
+export function createVariableContainsURLTransform(
+    analysisContext: AnalysisContext,
+    ast: ParseResult<t.File> | null = null,
+    sourceCode: string = '',
+): Transform {
     return {
         name: 'variableContainsURL',
         tags: ['safe'],
@@ -151,11 +162,9 @@ export function createVariableContainsURLTransform(ast: ParseResult<t.File> | nu
             return {
                 VariableDeclarator(path) {
                     const init = path.node.init;
-                    if (init && isValid(init)) {
-                        const result = tracebackVariables(path, [], { ast, sourceCode });
-                        if (hasHttpMethodPattern(result.code)) {
+                    if (init && isValid(init) && hasNearbyHttpMethod(path, sourceCode)) {
                             // Output existing requestPattern
-                            appendPattern(result, 'variableContainsURL');
+                            appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'variableContainsURL');
 
                             const trackedVars = getTrackedVariablesMap();
                             const varName = t.isIdentifier(path.node.id) ? path.node.id.name : null;
@@ -165,14 +174,13 @@ export function createVariableContainsURLTransform(ast: ParseResult<t.File> | nu
                             const effectiveIterations = getEffectiveIterationsForFunction(currentFunction);
 
                             for (const iteration of effectiveIterations) {
-                                const context = createResolutionContext(currentFunction, iteration);
+                                const context = createResolutionContext(currentFunction, iteration, path);
 
                                 const { url, queryParams } = extractURLSingle(init, trackedVars, context);
 
                                 // Find usages of this variable and extract context
                                 if (varName) {
                                     const usages = findCallExpressionUsages(path, varName);
-
                                     if (usages.length > 0) {
                                         for (const { callPath, argIndex } of usages) {
                                             const { method, params, body } = extractFromCallArgs(callPath, argIndex, trackedVars, context);
@@ -185,7 +193,10 @@ export function createVariableContainsURLTransform(ast: ParseResult<t.File> | nu
                                                 headers: [],
                                                 cookies: [],
                                             });
-                                            appendExtractedRequest(request);
+                                            appendExtractedRequest(analysisContext, request, {
+                                                extractor: 'url-variable-usage', client: 'generic', confidence: 'medium',
+                                                node: callPath.node, functionName: currentFunction,
+                                            });
                                         }
                                     } else {
                                         // Fallback: no usages found, use default GET
@@ -197,7 +208,10 @@ export function createVariableContainsURLTransform(ast: ParseResult<t.File> | nu
                                             headers: [],
                                             cookies: [],
                                         });
-                                        appendExtractedRequest(request);
+                                        appendExtractedRequest(analysisContext, request, {
+                                            extractor: 'url-variable-fallback', client: 'generic', confidence: 'low',
+                                            node: path.node, functionName: currentFunction,
+                                        });
                                     }
                                 } else {
                                     // No variable name (destructuring, etc.), use default
@@ -209,10 +223,12 @@ export function createVariableContainsURLTransform(ast: ParseResult<t.File> | nu
                                         headers: [],
                                         cookies: [],
                                     });
-                                    appendExtractedRequest(request);
+                                    appendExtractedRequest(analysisContext, request, {
+                                        extractor: 'url-variable-fallback', client: 'generic', confidence: 'low',
+                                        node: path.node, functionName: currentFunction,
+                                    });
                                 }
                             }
-                        }
                     }
                 },
 
@@ -220,11 +236,9 @@ export function createVariableContainsURLTransform(ast: ParseResult<t.File> | nu
                     if (path.node.operator !== '=') return;
 
                     const right = path.node.right;
-                    if (isValid(right)) {
-                        const result = tracebackVariables(path, [], { ast, sourceCode });
-                        if (hasHttpMethodPattern(result.code)) {
+                    if (isValid(right) && hasNearbyHttpMethod(path, sourceCode)) {
                             // Output existing requestPattern
-                            appendPattern(result, 'variableContainsURL');
+                            appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'variableContainsURL');
 
                             const trackedVars = getTrackedVariablesMap();
                             const varName = t.isIdentifier(path.node.left) ? path.node.left.name : null;
@@ -234,14 +248,13 @@ export function createVariableContainsURLTransform(ast: ParseResult<t.File> | nu
                             const effectiveIterations = getEffectiveIterationsForFunction(currentFunction);
 
                             for (const iteration of effectiveIterations) {
-                                const context = createResolutionContext(currentFunction, iteration);
+                                const context = createResolutionContext(currentFunction, iteration, path);
 
                                 const { url, queryParams } = extractURLSingle(right, trackedVars, context);
 
                                 // Find usages of this variable and extract context
                                 if (varName) {
                                     const usages = findCallExpressionUsages(path, varName);
-
                                     if (usages.length > 0) {
                                         for (const { callPath, argIndex } of usages) {
                                             const { method, params, body } = extractFromCallArgs(callPath, argIndex, trackedVars, context);
@@ -254,7 +267,10 @@ export function createVariableContainsURLTransform(ast: ParseResult<t.File> | nu
                                                 headers: [],
                                                 cookies: [],
                                             });
-                                            appendExtractedRequest(request);
+                                            appendExtractedRequest(analysisContext, request, {
+                                                extractor: 'url-assignment-usage', client: 'generic', confidence: 'medium',
+                                                node: callPath.node, functionName: currentFunction,
+                                            });
                                         }
                                     } else {
                                         // Fallback: no usages found, use default GET
@@ -266,7 +282,10 @@ export function createVariableContainsURLTransform(ast: ParseResult<t.File> | nu
                                             headers: [],
                                             cookies: [],
                                         });
-                                        appendExtractedRequest(request);
+                                        appendExtractedRequest(analysisContext, request, {
+                                            extractor: 'url-assignment-fallback', client: 'generic', confidence: 'low',
+                                            node: path.node, functionName: currentFunction,
+                                        });
                                     }
                                 } else {
                                     // No variable name, use default
@@ -278,10 +297,12 @@ export function createVariableContainsURLTransform(ast: ParseResult<t.File> | nu
                                         headers: [],
                                         cookies: [],
                                     });
-                                    appendExtractedRequest(request);
+                                    appendExtractedRequest(analysisContext, request, {
+                                        extractor: 'url-assignment-fallback', client: 'generic', confidence: 'low',
+                                        node: path.node, functionName: currentFunction,
+                                    });
                                 }
                             }
-                        }
                     }
                 },
 

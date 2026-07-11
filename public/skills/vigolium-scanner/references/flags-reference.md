@@ -70,11 +70,11 @@ Persistent flags available on every command.
 | `--modules` | `-m` | []string | `all` | Scanner modules to enable |
 | `--no-clustering` | — | bool | `false` | Disable deduplication of identical concurrent HTTP requests |
 | `--only` | — | string | — | Run only this phase |
-| `--project-id` | — | string | — | Project UUID to scope all operations |
+| `--project-uuid` | — | string | — | Project UUID to scope all operations |
 | `--project-name` | — | string | — | Project name to scope all operations (must match exactly one) |
 | `--proxy` | — | string | — | Route all requests through this proxy (HTTP/SOCKS5 URL) |
 | `--rate-limit` | `-r` | int | `100` | Maximum HTTP requests per second |
-| `--scan-id` | — | string | — | Scan session label |
+| `--scan-uuid` | — | string | — | Scan session label |
 | `--scan-on-receive` | `-S` | bool | `false` | Continuously scan new HTTP records as they arrive in the database |
 | `--scanning-max-duration` | — | duration | `0` | Maximum total scan duration (overrides config, e.g. 1h, 30m) |
 | `--scanning-profile` | — | string | — | Scanning profile name or YAML file path |
@@ -82,8 +82,7 @@ Persistent flags available on every command.
 | `--silent` | — | bool | `false` | Suppress output except findings |
 | `--skip` | — | []string | — | Skip phases |
 | `--skip-heuristics` | — | bool | `false` | Disable pre-scan heuristics (equivalent to --heuristics-check=none) |
-| `--source` | — | string | — | Source code path |
-| `--source-url` | — | string | — | Git URL to clone for source-aware scanning |
+| `--source` | — | string | — | Agent source (local path, git URL, .zip/.tar.gz, or gs:// archive) for `agent autopilot`/`swarm`/`query`/`audit` |
 | `--spec-default` | — | string | `1` | Fallback value for required OpenAPI parameters that lack examples |
 | `--spec-header` | — | []string | — | Add HTTP header to OpenAPI-generated requests (repeatable) |
 | `--spec-url` | — | bool | `false` | Use base URLs from the OpenAPI spec's servers field |
@@ -127,8 +126,6 @@ Flags specific to `vigolium scan` and `vigolium run`.
 | `--output` | `-o` | string | — | Output file path |
 | `--required-only` | — | bool | `false` | Parse only required fields from input format (ignore optional) |
 | `--retries` | — | int | `1` | Number of retry attempts for failed requests |
-| `--rule` | — | string | — | Filter SAST rules by fuzzy name match (e.g. 'gin', 'route') |
-| `--sast-adhoc` | — | string | — | Local path or git URL for ad-hoc SAST scan (auto-detected, results not saved to database) |
 | `--skip-format-validation` | — | bool | `false` | Skip validation of input file format |
 | `--spider` | — | bool | `false` | Enable browser-based spidering phase before scanning |
 | `--spider-max-time` | — | duration | `30m` | Spidering timeout |
@@ -155,7 +152,6 @@ Flags specific to `vigolium scan-url`.
 | `--header` | `-H` | []string | — | Custom header (repeatable) |
 | `--known-issue-scan` | — | bool | `false` | Run known issue scan (Nuclei/Kingfisher) |
 | `--method` | — | string | `GET` | HTTP method |
-| `--no-insertion-points` | — | bool | `false` | Skip insertion point testing |
 | `--no-passive` | — | bool | `false` | Skip passive modules |
 | `--spider` | — | bool | `false` | Run browser-based spidering before scanning |
 
@@ -172,7 +168,6 @@ Flags specific to `vigolium scan-request`.
 | `--fail-on` | — | string | — | Exit non-zero when a finding at/above this severity is present (`info`,`suspect`,`low`,`medium`,`high`,`critical`); `--soft-fail` overrides |
 | `--input` | `-i` | string | `-` | Input file or - for stdin |
 | `--known-issue-scan` | — | bool | `false` | Run known issue scan |
-| `--no-insertion-points` | — | bool | `false` | Skip insertion point testing |
 | `--no-passive` | — | bool | `false` | Skip passive modules |
 | `--spider` | — | bool | `false` | Run browser-based spidering before scanning |
 | `--target` | — | string | — | Override target URL (scheme://host) |
@@ -495,7 +490,7 @@ Flags specific to `vigolium finding` (aliases: `findings`).
 | `--limit` | `-n` | int | `100` | Maximum findings to display |
 | `--offset` | `-o` | int | `0` | Number of findings to skip |
 | `--severity` | — | string | — | Filter by severity (comma-separated: critical,high,medium,low,info) |
-| `--scan-id` | — | string | — | Filter by scan session ID |
+| `--scan-uuid` | — | string | — | Filter by scan session ID |
 | `--module-type` | — | string | — | Filter by module type (active, passive, nuclei, secret-scan, agent, source-tools, oast, extension) |
 | `--finding-source` | — | string | — | Filter by finding source (audit, spa, agent, oast, source-tools, extension) |
 | `--id` | — | int | `0` | Filter by finding ID |
@@ -670,7 +665,7 @@ DB list flags.
 | `--path` | — | string | — | Filter records by URL path pattern |
 | `--raw` | — | bool | `false` | Show full raw HTTP request and response |
 | `--remark` | — | string | — | Filter records containing this text in remarks |
-| `--scan-id` | — | string | — | Filter records by scan session ID |
+| `--scan-uuid` | — | string | — | Filter records by scan session ID |
 | `--severity` | — | string | — | Filter findings by severity |
 | `--sort` | — | string | `created_at` | Sort results by field |
 | `--status` | — | []int | — | Filter records by HTTP status code |
@@ -692,7 +687,7 @@ DB export flags.
 | `--output` | `-o` | string | — | Output file path |
 | `--path` | — | string | — | Filter records by URL path pattern |
 | `--request-only` | — | bool | `false` | Export only HTTP requests (raw format only) |
-| `--scan-id` | — | string | — | Filter records by scan session ID |
+| `--scan-uuid` | — | string | — | Filter records by scan session ID |
 | `--severity` | — | string | — | Filter findings by severity level |
 | `--status` | — | []int | — | Filter records by HTTP status code |
 | `--to` | — | string | — | Export records created before this date |
@@ -708,10 +703,12 @@ DB clean flags.
 | `--findings-only` | bool | `false` | Delete findings only, keep HTTP records |
 | `--host` | string | — | Delete records matching the specified hostname |
 | `--orphans` | bool | `false` | Delete findings with no matching HTTP record |
-| `--scan-id` | string | — | Delete records belonging to the specified scan session |
+| `--scan-uuid` | string | — | Delete records belonging to the specified scan session |
 | `--severity` | string | — | Delete findings matching the specified severity level |
 | `--status` | []int | — | Delete records with matching HTTP status codes |
-| `--vacuum` | bool | `false` | Reclaim disk space after deletion (SQLite) |
+| `--table` | string | — | Delete all rows from a specific table |
+
+VACUUM runs automatically after every delete (SQLite). A bare `db clean` with no selector is rejected; use `--all --force` or `db reset --force`.
 
 DB stats flags.
 
@@ -719,7 +716,7 @@ DB stats flags.
 |------|------|---------|-------------|
 | `--detailed` | bool | `false` | Show per-host and per-module breakdown |
 | `--host` | string | — | Filter hostname |
-| `--scan-id` | string | — | Filter scan ID |
+| `--scan-uuid` | string | — | Filter scan ID |
 
 ---
 

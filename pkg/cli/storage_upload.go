@@ -37,10 +37,6 @@ func runStorageUpload(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if sc == nil {
-		return nil
-	}
-
 	srcPath := args[0]
 	f, err := os.Open(srcPath)
 	if err != nil {

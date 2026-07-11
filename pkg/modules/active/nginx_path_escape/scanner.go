@@ -665,6 +665,46 @@ func (m *Module) validateAttacks(
 		}
 	}
 
+	// Layer 6.5: ACL-bypass access-gain gate (N7/N16, traversalLevels == 0). These
+	// probes conclude a bypass from the break reaching 2xx while merely DIFFERING from
+	// the canonical response. But a case-/slash-sensitivity ACL bypass is only
+	// meaningful when the canonical path is access-RESTRICTED: if the canonical
+	// (softBase) is itself a 2xx success, the server just routes case-/slash-
+	// insensitively to the SAME public resource, and a break returning that resource
+	// with a few bytes of CSRF/cookie/token jitter is not a bypass. The reported
+	// /login/ false positive had softBase=/login/=200 and break=/Login/=200 — the
+	// identical public login page differing by ~9 bytes. Require EITHER the canonical
+	// to be access-restricted (non-2xx, so reaching 2xx is a genuine access gain) OR —
+	// when the canonical is a 2xx soft-auth wall — a SUBSTANTIVE body-size delta beyond
+	// per-request jitter, which a real bypass to protected content produces but
+	// case-insensitive routing of one page does not.
+	// breakAttack.FirstSnapshot is guaranteed non-nil here: Layer 5 already returned for
+	// traversalLevels == 0 unless the break (its reached resource) was a non-nil 2xx.
+	if traversalLevels == 0 && softBase.FirstSnapshot != nil && softBase.FirstSnapshot.IsSuccess() {
+		softLen := softBase.FirstSnapshot.ContentLength
+		delta := breakAttack.FirstSnapshot.ContentLength - softLen
+		if delta < 0 {
+			delta = -delta
+		}
+		// Jitter tolerance: 5% of the canonical body, floored at 64 bytes, so token/
+		// cookie rotation on a large page cannot masquerade as a reached resource.
+		jitter := softLen / 20
+		if jitter < 64 {
+			jitter = 64
+		}
+		sameStatusAsCanonical := breakAttack.FirstSnapshot.StatusCode == softBase.FirstSnapshot.StatusCode
+		if sameStatusAsCanonical && delta <= jitter {
+			zap.L().Debug("NginxPathEscape: Layer6.5 REJECT - ACL bypass over a 2xx canonical with no substantive access gain (jitter-only diff)",
+				zap.String("id", id), zap.String("probe", name),
+				zap.Int("canonical_status", softBase.FirstSnapshot.StatusCode),
+				zap.Int("canonical_length", softLen),
+				zap.Int("break_length", breakAttack.FirstSnapshot.ContentLength),
+				zap.Int("delta", delta), zap.Int("jitter_tolerance", jitter),
+			)
+			return nil
+		}
+	}
+
 	zap.L().Debug("NginxPathEscape: probe PASSED all layers",
 		zap.String("id", id),
 		zap.String("probe", name),

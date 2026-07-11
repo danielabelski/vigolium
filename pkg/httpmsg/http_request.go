@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
+	"strings"
 	"sync"
 
 	urlutil "github.com/projectdiscovery/utils/url"
@@ -231,6 +233,66 @@ func (r *HttpRequest) ID() string {
 	r.cachedID = id
 	r.mu.Unlock()
 	return id
+}
+
+// IdentityFingerprint returns a stable, non-secret label for the credentials
+// carried by this request. It is suitable for cache/dedup keys; raw cookies and
+// authorization values are never returned. Anonymous requests share one label.
+func (r *HttpRequest) IdentityFingerprint() string {
+	if r == nil {
+		return "anonymous"
+	}
+	auth := strings.TrimSpace(r.Header("Authorization"))
+	cookie := identityCookieMaterial(r.Header("Cookie"))
+	if auth == "" && cookie == "" {
+		return "anonymous"
+	}
+	sum := sha256.Sum256([]byte(auth + "\x00" + cookie))
+	return hex.EncodeToString(sum[:8])
+}
+
+// identityCookieMaterial retains every cookie that could carry login/session
+// state. Unknown names are included: treating an application-specific session
+// cookie as anonymous could mix two users' baselines and create authorization
+// false positives. Only clearly non-identity analytics, consent, preference,
+// and CSRF cookies are ignored. Sorting makes equivalent header ordering stable.
+func identityCookieMaterial(header string) string {
+	var identityCookies []string
+	for _, pair := range strings.Split(header, ";") {
+		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(kv[0]))
+		if nonIdentityCookieName(name) {
+			continue
+		}
+		identityCookies = append(identityCookies, name+"="+strings.TrimSpace(kv[1]))
+	}
+	sort.Strings(identityCookies)
+	return strings.Join(identityCookies, "\x00")
+}
+
+func nonIdentityCookieName(name string) bool {
+	if name == "" || strings.Contains(name, "csrf") || strings.Contains(name, "xsrf") {
+		return true
+	}
+	switch name {
+	case "theme", "locale", "language", "lang", "timezone", "tz",
+		"consent", "cookieconsent", "cookie_consent", "cookies_accepted",
+		"preference", "preferences", "prefs":
+		return true
+	}
+	for _, marker := range []string{
+		"_ga", "_gid", "_gat", "ga_", "utm_", "_hj", "hotjar",
+		"amplitude", "mixpanel", "analytics", "segment", "_clck", "_clsk",
+		"_fbp", "_fbc", "_gcl_", "intercom-device-id",
+	} {
+		if strings.Contains(name, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureParsed lazily parses the raw request into cached fields.

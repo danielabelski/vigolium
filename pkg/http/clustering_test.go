@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -347,6 +348,109 @@ func TestRequestClusterer_CacheHit(t *testing.T) {
 	stats := rc.Stats()
 	if stats.CacheHits != 1 {
 		t.Errorf("expected 1 cache hit, got %d", stats.CacheHits)
+	}
+}
+
+// TestRequestClusterer_LargeBodyNotCached verifies the byte-budget guard: a
+// response larger than the per-entry cap is served (and still singleflight-deduped
+// in flight) but never retained in the post-request cache, so a stream of unique
+// large responses can't pin gigabytes. A repeated request therefore re-hits the
+// origin instead of returning a cached copy.
+func TestRequestClusterer_LargeBodyNotCached(t *testing.T) {
+	big := strings.Repeat("A", clusterCacheMaxEntryBytes+1024) // just over the per-entry cap
+	var serverHits atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverHits.Add(1)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, big)
+	}))
+	defer ts.Close()
+
+	rc := NewRequestClusterer()
+	mockExecute := func(input *httpmsg.HttpRequestResponse, opts Options) (*httpUtils.ResponseChain, int, error) {
+		resp, err := http.Get(ts.URL)
+		if err != nil {
+			return nil, 0, err
+		}
+		chain := httpUtils.NewResponseChain(resp, MaxBodyRead)
+		for chain.Has() {
+			if err := chain.Fill(); err != nil {
+				return nil, 0, err
+			}
+			if !chain.Previous() {
+				break
+			}
+		}
+		return chain, 5, nil
+	}
+
+	rr := makeTestRR(t, ts.URL)
+
+	c1, _, err := rc.Execute(rr, Options{}, mockExecute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1.Close()
+
+	// Second call within TTL: because the big body was not cached, this must
+	// re-execute against the origin rather than return a cache hit.
+	c2, dur2, err := rc.Execute(rr, Options{}, mockExecute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2.Close()
+
+	if serverHits.Load() != 2 {
+		t.Errorf("server hits = %d, want 2 (large body must not be cached)", serverHits.Load())
+	}
+	stats := rc.Stats()
+	if dur2 == 0 {
+		t.Error("second call reported a cache hit (duration 0) for an uncacheable large body")
+	}
+	if stats.SizeRejects < 1 {
+		t.Errorf("SizeRejects = %d, want >= 1", stats.SizeRejects)
+	}
+	if stats.RetainedBytes != 0 {
+		t.Errorf("RetainedBytes = %d, want 0 (nothing cacheable was retained)", stats.RetainedBytes)
+	}
+}
+
+// TestRequestClusterer_RetainedBytesTracked confirms a normal (sub-cap) response
+// is counted against the byte budget when cached.
+func TestRequestClusterer_RetainedBytesTracked(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "small-cacheable-body")
+	}))
+	defer ts.Close()
+
+	rc := NewRequestClusterer()
+	mockExecute := func(input *httpmsg.HttpRequestResponse, opts Options) (*httpUtils.ResponseChain, int, error) {
+		resp, err := http.Get(ts.URL)
+		if err != nil {
+			return nil, 0, err
+		}
+		chain := httpUtils.NewResponseChain(resp, MaxBodyRead)
+		for chain.Has() {
+			if err := chain.Fill(); err != nil {
+				return nil, 0, err
+			}
+			if !chain.Previous() {
+				break
+			}
+		}
+		return chain, 1, nil
+	}
+
+	rr := makeTestRR(t, ts.URL)
+	c, _, err := rc.Execute(rr, Options{}, mockExecute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+
+	if got := rc.Stats().RetainedBytes; got <= 0 {
+		t.Errorf("RetainedBytes = %d, want > 0 after caching a small body", got)
 	}
 }
 

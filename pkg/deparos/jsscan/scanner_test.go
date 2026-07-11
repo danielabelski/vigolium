@@ -3,6 +3,7 @@ package jsscan
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,37 @@ func TestParseJsscanOutput_EmptyOutput(t *testing.T) {
 	}
 	if code != nil {
 		t.Error("expected nil code")
+	}
+}
+
+func TestCleanupStaleTempFilesRemovesFilesAndArtifactDirectories(t *testing.T) {
+	oldFile, err := os.CreateTemp("", "jsscan-stale-test-*.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFilePath := oldFile.Name()
+	_ = oldFile.Close()
+	oldDir, err := os.MkdirTemp("", "jsscan-job-stale-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDir, "artifact.js"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(oldFilePath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(oldDir, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	staleCleanupOnce = sync.Once{}
+	cleanupStaleTempFiles()
+	for _, path := range []string{oldFilePath, oldDir} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("stale jsscan path still exists: %s", path)
+			_ = os.RemoveAll(path)
+		}
 	}
 }
 
@@ -117,6 +149,68 @@ func TestParseJsscanOutput_MixedRecords(t *testing.T) {
 	}
 	if code.Filename != "app.js" {
 		t.Errorf("code.Filename = %q, want app.js", code.Filename)
+	}
+}
+
+func TestParseJsscanOutput_AnalysisResultV2(t *testing.T) {
+	output := `{"type":"analysisResult","schemaVersion":2,"jobId":"job-1","profile":"endpoints","tool":{"version":"1.0.0","sourceHash":"abc"},"source":{"url":"https://app.test/app.js","contentSha256":"def","byteLength":42},"stats":{"status":"complete","inputBytes":42,"durationMs":1,"recordCounts":{"httpRequest":1},"stageMetrics":[]},"diagnostics":[],"records":[{"kind":"httpRequest","id":"http-1","url":{"rendered":"/api/${id}","static":false,"variables":[{"name":"id","placeholder":"${id}"}]},"method":{"rendered":"POST","static":true,"variables":[]},"query":[{"name":{"rendered":"page","static":true,"variables":[]},"value":{"rendered":"${page}","static":false,"variables":[{"name":"page","placeholder":"${page}"}]}}],"headers":[{"name":{"rendered":"Content-Type","static":true,"variables":[]},"value":{"rendered":"application/json","static":true,"variables":[]}}],"cookies":[],"body":{"kind":"json","value":{"rendered":"{\"id\":\"${id}\"}","static":false,"variables":[]}},"client":"fetch","provenance":{"extractor":"fetch","confidence":"high","start":{"line":3,"column":2}}},{"kind":"futureFact","id":"future-1"}],"artifacts":[]}`
+
+	res := parseJsscanOutput([]byte(output))
+	if res.Analysis == nil || res.Analysis.Source.URL != "https://app.test/app.js" {
+		t.Fatalf("missing typed envelope: %#v", res.Analysis)
+	}
+	if len(res.RequestFacts) != 1 || res.RequestFacts[0].Provenance.Extractor != "fetch" {
+		t.Fatalf("unexpected typed request facts: %#v", res.RequestFacts)
+	}
+	if len(res.Requests) != 1 || res.Requests[0].Params != "page=${page}" || res.Requests[0].Body == "" {
+		t.Fatalf("legacy projection lost typed fields: %#v", res.Requests)
+	}
+	if res.UnknownRecords != 1 || len(res.UnknownRecordData) != 1 {
+		t.Fatalf("future record was not preserved: count=%d data=%d", res.UnknownRecords, len(res.UnknownRecordData))
+	}
+}
+
+func TestAppendAnalysisRecordCapabilityFamilies(t *testing.T) {
+	result := &ScanResult{}
+	records := []any{
+		GraphQLOperationFact{Kind: "graphqlOperation", ID: "g1", OperationType: "mutation", Transport: "http", Variables: []GraphQLVariableTemplate{}},
+		WebSocketFact{Kind: "websocket", ID: "w1", URL: ValueTemplate{Rendered: "wss://example.test/ws"}, Subprotocols: []string{"graphql-transport-ws"}},
+		EventSourceFact{Kind: "eventSource", ID: "e1", URL: ValueTemplate{Rendered: "/events"}, WithCredentials: true},
+		ClientRouteFact{Kind: "clientRoute", ID: "r1", Path: ValueTemplate{Rendered: "/users/:id"}, RouteType: "page"},
+		BrowserSecurityFlowFact{Kind: "browserSecurityFlow", ID: "b1", FlowType: "openRedirect", Source: "location.hash", Sink: "location.href"},
+		DomFlowFact{Kind: "domFlow", ID: "d1", FlowType: "openRedirect", Source: "location.hash", Sink: "location.href"},
+	}
+	for _, record := range records {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		appendAnalysisRecord(result, encoded)
+	}
+	if len(result.GraphQLOperations) != 1 || len(result.WebSockets) != 1 || len(result.EventSources) != 1 ||
+		len(result.ClientRoutes) != 1 || len(result.BrowserFlows) != 1 || len(result.DomFlows) != 1 {
+		t.Fatalf("capability records were not decoded: %#v", result)
+	}
+	if result.DomFlows[0].FlowType != "openRedirect" {
+		t.Fatalf("DOM flow classification was lost: %#v", result.DomFlows[0])
+	}
+	if result.UnknownRecords != 0 || result.MalformedRecords != 0 {
+		t.Fatalf("known records counted as unknown/malformed: %#v", result)
+	}
+}
+
+func TestLoadArtifactsRejectsPathEscape(t *testing.T) {
+	jobDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.js")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := &ScanResult{Artifacts: []ArtifactDescriptor{{
+		ArtifactType: "beautifiedSource", Path: outside,
+		SHA256: "00", ByteLength: 6,
+	}}}
+	if err := loadArtifacts(result, jobDir, 1024); err == nil {
+		t.Fatal("expected an artifact path escape error")
 	}
 }
 

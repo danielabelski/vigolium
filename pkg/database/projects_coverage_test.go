@@ -196,6 +196,41 @@ func TestReassignAndPurgeProjectData(t *testing.T) {
 	}
 }
 
+// TestReassignProjectData_MovesAllOwnedTables guards the fix that reassignment
+// covers the full project-owned table set (it previously omitted agentic_scans and
+// authentication_hostnames, which then stayed pinned to the deleted source project).
+func TestReassignProjectData_MovesAllOwnedTables(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	src := uuid.NewString()
+	dst := uuid.NewString()
+
+	agentUUID := uuid.NewString()
+	if err := repo.CreateAgenticScan(ctx, &AgenticScan{UUID: agentUUID, ProjectUUID: src, Status: "completed"}); err != nil {
+		t.Fatalf("CreateAgenticScan: %v", err)
+	}
+	if err := repo.SaveAuthenticationHostname(ctx, &AuthenticationHostname{ProjectUUID: src, Hostname: "auth.example.com"}); err != nil {
+		t.Fatalf("SaveAuthenticationHostname: %v", err)
+	}
+
+	if err := repo.ReassignProjectData(ctx, src, dst); err != nil {
+		t.Fatalf("ReassignProjectData: %v", err)
+	}
+
+	agentSrc, _ := db.NewSelect().Model((*AgenticScan)(nil)).Where("project_uuid = ?", src).Count(ctx)
+	agentDst, _ := db.NewSelect().Model((*AgenticScan)(nil)).Where("project_uuid = ?", dst).Count(ctx)
+	if agentSrc != 0 || agentDst != 1 {
+		t.Errorf("agentic_scans reassign: src=%d dst=%d, want 0/1 (was previously omitted)", agentSrc, agentDst)
+	}
+	authSrc, _ := db.NewSelect().Model((*AuthenticationHostname)(nil)).Where("project_uuid = ?", src).Count(ctx)
+	authDst, _ := db.NewSelect().Model((*AuthenticationHostname)(nil)).Where("project_uuid = ?", dst).Count(ctx)
+	if authSrc != 0 || authDst != 1 {
+		t.Errorf("authentication_hostnames reassign: src=%d dst=%d, want 0/1 (was previously omitted)", authSrc, authDst)
+	}
+}
+
 func TestGetProjectStatsAndAll(t *testing.T) {
 	db := newTestDB(t)
 	repo := NewRepository(db)

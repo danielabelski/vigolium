@@ -88,6 +88,26 @@ func TestResultEventIDIgnoresUnhashedFields(t *testing.T) {
 	assert.Equal(t, baseID, ev.ID(), "URL/Host/Request/Name/Confidence are not part of the ID hash")
 }
 
+func TestResultEventRecordKindCompatibilityAndIdentity(t *testing.T) {
+	legacy := sampleEvent()
+	explicitFinding := sampleEvent()
+	explicitFinding.RecordKind = RecordKindFinding
+	candidate := sampleEvent()
+	candidate.RecordKind = RecordKindCandidate
+	observation := sampleEvent()
+	observation.RecordKind = RecordKindObservation
+
+	assert.True(t, legacy.IsFinding())
+	assert.Equal(t, RecordKindFinding, legacy.EffectiveRecordKind())
+	assert.Equal(t, legacy.ID(), explicitFinding.ID(), "explicit finding preserves historical IDs")
+	assert.NotEqual(t, legacy.ID(), candidate.ID(), "candidate IDs cannot collide with findings")
+	assert.NotEqual(t, candidate.ID(), observation.ID(), "retained signal kinds have separate identities")
+
+	unknown := sampleEvent()
+	unknown.RecordKind = RecordKind("future-value")
+	assert.Equal(t, RecordKindFinding, unknown.EffectiveRecordKind(), "unknown legacy values fail closed as findings")
+}
+
 func TestResultEventIDConcurrent(t *testing.T) {
 	// Exercises the sha1Pool under concurrency for a stable result.
 	ev := sampleEvent()

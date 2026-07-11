@@ -80,6 +80,25 @@ type RemarksAnnotator interface {
 	AppendRemarks(ctx context.Context, annotations map[string][]string) error
 }
 
+// DerivedArtifact is immutable analysis output associated with a stored HTTP
+// record. The original request/response remains the source of truth; consumers
+// can inspect this companion artifact without changing captured traffic.
+type DerivedArtifact struct {
+	RecordUUID string
+	Kind       string
+	Filename   string
+	MediaType  string
+	SHA256     string
+	Content    []byte
+	Metadata   map[string]any
+}
+
+// DerivedArtifactWriter persists immutable companion artifacts produced by
+// passive analysis (for example, a beautified JavaScript bundle).
+type DerivedArtifactWriter interface {
+	StoreDerivedArtifact(ctx context.Context, artifact *DerivedArtifact) error
+}
+
 // RequestUUIDResolver resolves a request hash to a database record UUID.
 type RequestUUIDResolver interface {
 	ResolveRequestUUID(requestHash string) string
@@ -147,6 +166,7 @@ type ScanContext struct {
 	RiskScoreUpdater    RiskScoreUpdater
 	RemarksAnnotator    RemarksAnnotator
 	RecordRewriter      RecordResponseRewriter
+	ArtifactWriter      DerivedArtifactWriter
 	RequestUUIDResolver RequestUUIDResolver
 	Scope               ScopeChecker
 	OASTProvider        OASTProvider
@@ -158,6 +178,9 @@ type ScanContext struct {
 	TechStack           *TechRegistry             // Per-host tech-stack detections (populated by *_fingerprint passive modules)
 	WAFStack            *WAFRegistry              // Per-host WAF/CDN detections (populated by XSS modules on block responses)
 	ContentClass        *ContentClassRegistry     // Per-host content-class hint (seeded from the heuristics root probe; fallback for content-class module gating)
+
+	cookiePolicyOnce sync.Once
+	cookiePolicy     *CookiePolicyRegistry
 
 	// FollowSubdomains gates the subdomain_harvest feed-back behavior: when true
 	// the module adds discovered in-scope subdomains to scope (via ScopeExpander)
@@ -184,6 +207,22 @@ type ScanContext struct {
 	decoyOnce   sync.Once
 	decoyCache  *lru.Cache[string, *decoyResult]
 	decoyFlight singleflight.Group
+}
+
+func (sc *ScanContext) cookiePolicies() *CookiePolicyRegistry {
+	if sc == nil {
+		return nil
+	}
+	sc.cookiePolicyOnce.Do(func() { sc.cookiePolicy = &CookiePolicyRegistry{} })
+	return sc.cookiePolicy
+}
+
+// DerivedArtifactWriterOrNil returns the configured immutable artifact writer.
+func (sc *ScanContext) DerivedArtifactWriterOrNil() DerivedArtifactWriter {
+	if sc == nil {
+		return nil
+	}
+	return sc.ArtifactWriter
 }
 
 // getBaselineCache returns the LRU baseline cache, lazily initializing on first use.

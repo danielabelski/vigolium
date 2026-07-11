@@ -80,6 +80,28 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
+// TestHandleReady_NoDB confirms readiness returns 200 when there is no database
+// dependency to check (the liveness/readiness split doesn't hard-fail on a nil DB).
+func TestHandleReady_NoDB(t *testing.T) {
+	h := newBasicHandlers(t, ServerConfig{}, &fakeQueue{}, nil, nil, nil)
+	app := fiber.New()
+	app.Get("/ready", h.HandleReady)
+
+	status, body := doGet(t, app, "/ready", nil)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", status, body)
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	if resp.Status != "ready" {
+		t.Errorf("status field = %q, want ready", resp.Status)
+	}
+}
+
 func TestHandleAppInfo(t *testing.T) {
 	cfg := ServerConfig{
 		Version:   "9.9.9",
@@ -306,7 +328,8 @@ func TestCountCache_ExpiredTTLRefreshes(t *testing.T) {
 	db, _ := newProjectModelTestDB(t)
 	insertRecord(t, db, database.DefaultProjectUUID)
 
-	// Zero TTL → every Get is considered expired and refreshes from the DB.
+	// Zero TTL → every Get is considered expired. The very first Get has no cached
+	// value, so it refreshes synchronously and returns the real count.
 	cc := newCountCache(0)
 	if rec, _ := cc.Get(db); rec != 1 {
 		t.Fatalf("first Get records = %d, want 1", rec)
@@ -314,8 +337,24 @@ func TestCountCache_ExpiredTTLRefreshes(t *testing.T) {
 
 	insertRecord(t, db, database.DefaultProjectUUID)
 	insertRecord(t, db, database.DefaultProjectUUID)
-	if rec, _ := cc.Get(db); rec != 3 {
-		t.Errorf("expired-TTL Get records = %d, want 3 (refreshed)", rec)
+
+	// Stale-while-revalidate: the next Get serves the stale value (1) immediately
+	// and refreshes in the background rather than blocking on the COUNT queries.
+	if rec, _ := cc.Get(db); rec != 1 {
+		t.Errorf("stale Get records = %d, want stale 1 served immediately", rec)
+	}
+
+	// Poll until the background refresh publishes the new count (3).
+	deadline := time.Now().Add(3 * time.Second)
+	var rec int64
+	for time.Now().Before(deadline) {
+		if rec, _ = cc.Get(db); rec == 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rec != 3 {
+		t.Errorf("expired-TTL Get records = %d, want 3 after background refresh", rec)
 	}
 }
 
@@ -386,8 +425,10 @@ func TestNewServer_AppliesConfigDefaults(t *testing.T) {
 	if got.ReadTimeout != 10*time.Second {
 		t.Errorf("ReadTimeout = %v, want 10s", got.ReadTimeout)
 	}
-	if got.WriteTimeout != 60*time.Second {
-		t.Errorf("WriteTimeout = %v, want 60s", got.WriteTimeout)
+	// WriteTimeout defaults to 0 (unlimited): the server hosts long SSE streams,
+	// so a finite global write cap would sever them mid-flight.
+	if got.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %v, want 0 (unlimited)", got.WriteTimeout)
 	}
 	if got.IdleTimeout != 120*time.Second {
 		t.Errorf("IdleTimeout = %v, want 120s", got.IdleTimeout)
@@ -438,8 +479,11 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.ReadTimeout != 10*time.Second {
 		t.Errorf("ReadTimeout = %v", cfg.ReadTimeout)
 	}
-	if cfg.WriteTimeout != 60*time.Second {
-		t.Errorf("WriteTimeout = %v", cfg.WriteTimeout)
+	if cfg.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %v, want 0 (unlimited for SSE streams)", cfg.WriteTimeout)
+	}
+	if cfg.MaxUploadBytes != defaultMaxUploadBytes {
+		t.Errorf("MaxUploadBytes = %d, want %d", cfg.MaxUploadBytes, defaultMaxUploadBytes)
 	}
 }
 

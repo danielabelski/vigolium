@@ -64,6 +64,14 @@ const (
 	FindingSourceImport            = "import"
 )
 
+// Record-kind constants distinguish reportable vulnerabilities from retained
+// reconnaissance and unconfirmed hypotheses stored in the same table.
+const (
+	RecordKindFinding     = "finding"
+	RecordKindCandidate   = "candidate"
+	RecordKindObservation = "observation"
+)
+
 // Status constants represent the lifecycle state of a Finding.
 //
 // Lifecycle:
@@ -237,6 +245,26 @@ type HTTPRecord struct {
 	RiskScore int      `bun:"risk_score,default:0" json:"risk_score"`
 }
 
+// AnalysisArtifact stores immutable derived content linked to an HTTP record.
+// It deliberately lives beside, rather than inside, HTTPRecord so analysis can
+// never replace the raw evidence captured from the target.
+type AnalysisArtifact struct {
+	bun.BaseModel `bun:"table:analysis_artifacts,alias:aa" json:"-"`
+
+	ID             int64     `bun:"id,pk,autoincrement" json:"id"`
+	ProjectUUID    string    `bun:"project_uuid,notnull" json:"project_uuid"`
+	ScanUUID       string    `bun:"scan_uuid,nullzero" json:"scan_uuid,omitempty"`
+	HTTPRecordUUID string    `bun:"http_record_uuid,notnull" json:"http_record_uuid"`
+	Kind           string    `bun:"kind,notnull" json:"kind"`
+	Filename       string    `bun:"filename,nullzero" json:"filename,omitempty"`
+	MediaType      string    `bun:"media_type,nullzero" json:"media_type,omitempty"`
+	SHA256         string    `bun:"sha256,notnull" json:"sha256"`
+	ByteLength     int64     `bun:"byte_length,notnull" json:"byte_length"`
+	Content        []byte    `bun:"content,type:bytea,notnull" json:"content,omitempty"`
+	Metadata       string    `bun:"metadata,type:jsonb,nullzero" json:"metadata,omitempty"`
+	CreatedAt      time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+}
+
 // EmbeddedParam represents a parameter stored as JSON within HTTPRecord
 type EmbeddedParam struct {
 	Name       string `json:"name"`
@@ -272,6 +300,8 @@ type Finding struct {
 	ModuleName    string   `bun:"module_name,notnull" json:"module_name"`
 	ModuleType    string   `bun:"module_type,nullzero" json:"module_type,omitempty"`
 	FindingSource string   `bun:"finding_source,nullzero" json:"finding_source,omitempty"`
+	RecordKind    string   `bun:"record_kind,notnull,default:'finding'" json:"record_kind,omitempty"`
+	EvidenceGrade string   `bun:"evidence_grade,nullzero" json:"evidence_grade,omitempty"`
 	ModuleShort   string   `bun:"module_short,nullzero" json:"module_short,omitempty"`
 	Description   string   `bun:"description,nullzero" json:"description,omitempty"`
 	Severity      string   `bun:"severity,notnull" json:"severity"`

@@ -365,13 +365,14 @@ func (e *Engine) generateInitialTasks() {
 	}
 
 	// Create JS extracted request task for root URL
-	if e.jsscanScanner != nil {
+	if e.jsscanService != nil {
 		targetURL, err := url.Parse(e.config.Target.StartURL)
 		if err == nil {
 			jsExtTask := e.factory.CreateJSExtractedRequestTask(
 				targetURL,
 				e.GetExtractedRequests,
 				depth,
+				e.PendingRequestTemplates,
 			)
 			if jsExtTask != nil {
 				e.AddTask(jsExtTask)

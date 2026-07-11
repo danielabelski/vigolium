@@ -193,12 +193,10 @@ func TestResolveHostnameIP_CachesResult(t *testing.T) {
 
 	// Wait for the background resolve (a failed lookup) to land in the cache.
 	deadline := time.Now().Add(5 * time.Second)
-	var cached string
+	var cached dnsEntry
 	var found bool
 	for time.Now().Before(deadline) {
-		dnsCache.RLock()
-		cached, found = dnsCache.m[host]
-		dnsCache.RUnlock()
+		cached, found = dnsCache.Get(host)
 		if found {
 			break
 		}
@@ -207,10 +205,14 @@ func TestResolveHostnameIP_CachesResult(t *testing.T) {
 	if !found {
 		t.Fatalf("expected %q to be cached after background lookup", host)
 	}
+	// A failed lookup gets the short negative TTL, not a permanent entry.
+	if cached.ip != "" {
+		t.Errorf("expected empty (negative) cache entry for %q, got %q", host, cached.ip)
+	}
 
 	// Once cached, the value is returned consistently.
-	if got := resolveHostnameIP(host); got != cached {
-		t.Errorf("resolveHostnameIP not stable: cached %q vs returned %q", cached, got)
+	if got := resolveHostnameIP(host); got != cached.ip {
+		t.Errorf("resolveHostnameIP not stable: cached %q vs returned %q", cached.ip, got)
 	}
 }
 

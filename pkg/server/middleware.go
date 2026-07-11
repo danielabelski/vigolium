@@ -42,7 +42,7 @@ func ProjectUUIDMiddleware(repo *database.Repository) fiber.Handler {
 // isPublicProjectPath returns true for endpoints that should never trigger
 // project auto-creation (health checks, swagger, static UI, etc.).
 func isPublicProjectPath(path string) bool {
-	if path == "/" || path == "/health" || path == "/server-info" || path == "/metrics" {
+	if path == "/" || path == "/health" || path == "/ready" || path == "/server-info" || path == "/metrics" {
 		return true
 	}
 	return strings.HasPrefix(path, "/swagger")
@@ -114,12 +114,12 @@ const authUserLocalsKey = "auth_user"
 
 // BearerAuth returns fiber middleware that validates Bearer tokens and resolves user identity.
 // Checks the UserStore first (file-based users), then falls back to legacy API keys (admin role).
-// Skips authentication for public endpoints: /, /health, /swagger/*, /metrics.
+// Skips authentication for public endpoints: /, /health, /ready, /swagger/*, /metrics.
 func BearerAuth(validKeys []string, store *UserStore) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		path := c.Path()
 		// Skip auth for public endpoints
-		if path == "/" || path == "/health" || path == "/metrics" || strings.HasPrefix(path, "/swagger") {
+		if path == "/" || path == "/health" || path == "/ready" || path == "/metrics" || strings.HasPrefix(path, "/swagger") {
 			return c.Next()
 		}
 

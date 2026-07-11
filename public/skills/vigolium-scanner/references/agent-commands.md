@@ -464,10 +464,7 @@ vigolium agent swarm -t http://localhost:3000 --source ~/projects/express-app --
 # Source analysis only (extract routes, no scan)
 vigolium agent swarm -t http://localhost:3000 --source ./src --source-analysis-only
 
-# Skip SAST tools during source analysis
-vigolium agent swarm -t http://localhost:3000 --source ./src --skip-sast
-
-# Disable code audit (still runs source analysis + SAST)
+# Disable the AI code-audit phase (still runs source analysis)
 vigolium agent swarm -t http://localhost:3000 --source ./src --code-audit=false
 
 # Enable triage and rescan loop

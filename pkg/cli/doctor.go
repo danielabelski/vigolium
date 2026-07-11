@@ -26,6 +26,7 @@ var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Check system readiness and diagnose configuration issues",
 	Long:  "Run diagnostic checks on database, agent backends, third-party tools, and other dependencies to verify the scanner is ready to operate.",
+	Args:  cobra.NoArgs,
 	RunE:  runDoctorCmd,
 }
 
@@ -271,10 +272,8 @@ func printDoctorReport(r *diagnostics.Report) {
 	}
 	if c := embeddedBinaryCheck(r, "jsscan"); c != nil {
 		printCheck("Embedded jsscan", c.Status, c.Message)
-		if c.Status != diagnostics.StatusOK {
-			printDetails(true, c.Details)
-			printTip(c.Tip)
-		}
+		printDetails(true, c.Details)
+		printTip(c.Tip)
 	}
 
 	// ── Agentic scan ──

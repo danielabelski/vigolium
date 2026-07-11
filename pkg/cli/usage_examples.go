@@ -382,8 +382,10 @@ var dbCleanExamples = FormatExamples(
 	"vigolium db clean --before 2025-01-01",
 	"# Delete records for a specific scan",
 	"vigolium db clean --scan-uuid old-scan -F",
-	"# Delete all records and reclaim space",
-	"vigolium db clean --all -F --vacuum",
+	"# Delete all records (VACUUM runs automatically to reclaim space)",
+	"vigolium db clean --all -F",
+	"# Delete and recreate the database from scratch",
+	"vigolium db reset -F",
 	"# Clean orphaned findings",
 	"vigolium db clean --orphans -F",
 )
@@ -789,8 +791,6 @@ var logLsExamples = FormatExamples(
 var projectCreateExamples = FormatExamples(
 	"# Create a project",
 	`vigolium project create my-app --description "Main web app"`,
-	"# Create with access control in one line",
-	"vigolium project create my-app --allow @acme.com --allow alice@partner.io",
 )
 
 var projectListExamples = FormatExamples(
@@ -1218,16 +1218,11 @@ var sessionLoadExamples = FormatExamples(
 var projectExamples = FormatExamples(
 	"# Create a project",
 	`vigolium project create my-app --description "Main web app"`,
-	"# Create with access control in one line",
-	"vigolium project create my-app --allow @acme.com --allow alice@partner.io",
 	"# List projects",
 	"vigolium project ls",
 	"vigolium project ls --json",
 	"# Set active project",
 	"eval $(vigolium project use <uuid>)",
-	"# Add/remove access later",
-	"vigolium project allow <uuid> @newdomain.com user@example.com",
-	"vigolium project remove-access <uuid> @olddomain.com",
 )
 
 var projectDeleteExamples = FormatExamples(

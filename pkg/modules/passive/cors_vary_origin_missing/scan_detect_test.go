@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/output"
 )
 
 // makeHTTPCtx builds a request/response pair. reqOrigin, when non-empty, is sent
@@ -52,6 +53,20 @@ func TestScanPerRequest_ReflectedOriginNoVary(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, results)
 	assert.Equal(t, "CORS Missing Vary: Origin", results[0].Info.Name)
+	assert.Equal(t, output.RecordKindObservation, results[0].RecordKind, "missing Vary without cache evidence is posture")
+}
+
+func TestScanPerRequest_SharedCacheEvidenceCreatesCandidate(t *testing.T) {
+	t.Parallel()
+	ctx := makeHTTPCtx("/api/data", "https://evil.example.com",
+		"Access-Control-Allow-Origin: https://evil.example.com",
+		"Access-Control-Allow-Credentials: true",
+		"Cache-Control: public, s-maxage=60",
+	)
+	results, err := New().ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, output.RecordKindCandidate, results[0].RecordKind)
 }
 
 // TestScanPerRequest_StaticConfigOrigin_NoFinding is the key FP fix: the ACAO is

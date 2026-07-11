@@ -29,8 +29,8 @@ var (
 	// Cheap presence gates: only spawn the (subprocess) taint analyzer when the
 	// JS plausibly contains both a source and a sink. The analyzer then decides
 	// whether they are actually connected.
-	gateSourceRe = regexp.MustCompile(`(?i)(location\.(hash|search|href|pathname)|document\.(URL|documentURI|baseURI|cookie|referrer)|window\.name|(local|session)Storage)`)
-	gateSinkRe   = regexp.MustCompile(`(?i)(innerHTML|outerHTML|\beval\b|\bsetTimeout\b|\bsetInterval\b|document\.write|insertAdjacentHTML|\.src\s*=|location\.(href|assign|replace)|\bFunction\b)`)
+	gateSourceRe = regexp.MustCompile(`(?i)(location\.(hash|search|href|pathname)|document\.(URL|documentURI|baseURI|cookie|referrer)|window\.name|(local|session)Storage|MessageEvent|addEventListener\s*\(\s*['"]message|\bpostMessage\b|\b[a-z_$][\w$]*\.data\b)`)
+	gateSinkRe   = regexp.MustCompile(`(?i)(innerHTML|outerHTML|srcdoc|createContextualFragment|DOMParser|dangerouslySetInnerHTML|\.(append|prepend|before|after|replaceWith)\s*\(|\beval\b|\bsetTimeout\b|\bsetInterval\b|document\.write|insertAdjacentHTML|setAttribute\s*\(\s*['"]src|\.src\s*=|location\.(href|assign|replace)|\bFunction\b)`)
 )
 
 type Module struct {
@@ -38,7 +38,7 @@ type Module struct {
 	ds dedup.Lazy[dedup.DiskSet]
 
 	scannerOnce sync.Once
-	scanner     *jsscan.Scanner
+	service     *jsscan.Service
 }
 
 func New() *Module {
@@ -60,18 +60,32 @@ func New() *Module {
 	return m
 }
 
-// getScanner lazily constructs the shared jsscan scanner. A construction
+// getScanner lazily resolves the process-wide jsscan service. A construction
 // failure is non-fatal — the module simply produces no findings.
-func (m *Module) getScanner() *jsscan.Scanner {
+func (m *Module) getScanner() *jsscan.Service {
 	m.scannerOnce.Do(func() {
-		if s, err := jsscan.NewScanner(jsscan.DefaultConfig()); err == nil {
-			m.scanner = s
+		if service, err := jsscan.DefaultService(); err == nil {
+			m.service = service
 		}
 	})
-	return m.scanner
+	return m.service
 }
 
 func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {
+	return m.ScanPerRequestContext(context.Background(), ctx, scanCtx)
+}
+
+func (m *Module) ScanPerHost(_ *httpmsg.HttpRequestResponse, _ *modkit.ScanContext) ([]*output.ResultEvent, error) {
+	return nil, nil
+}
+
+func (m *Module) ScanPerHostContext(_ context.Context, _ *httpmsg.HttpRequestResponse, _ *modkit.ScanContext) ([]*output.ResultEvent, error) {
+	return nil, nil
+}
+
+// ScanPerRequestContext preserves executor cancellation while the shared
+// service queues or analyzes a response.
+func (m *Module) ScanPerRequestContext(runCtx context.Context, ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {
 	urlx, err := ctx.URL()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get URL")
@@ -96,10 +110,12 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		return nil, nil
 	}
 
-	cctx, cancel := context.WithTimeout(context.Background(), scanTimeout)
+	cctx, cancel := context.WithTimeout(runCtx, scanTimeout)
 	defer cancel()
 
-	res, err := scanner.Scan(cctx, []byte(js))
+	res, err := scanner.ScanWithOptions(cctx, []byte(js), jsscan.ScanOptions{
+		Profile: jsscan.ProfileDOMSecurity, SourceURL: urlx.String(),
+	})
 	if err != nil || res == nil || !res.HasDomFlows() {
 		return nil, nil
 	}
@@ -107,6 +123,14 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	var results []*output.ResultEvent
 	seen := make(map[string]struct{}, len(res.DomFlows))
 	for _, f := range res.DomFlows {
+		// Protocol v1 and early v2 helpers omitted flow_type for DOM-XSS. Dynamic
+		// execution and attacker-controlled script URLs are also executable DOM
+		// injection. Redirect/network/exfiltration/prototype flows belong to their
+		// own consumers and must not be mislabeled here.
+		if f.FlowType != "" && f.FlowType != "domXss" &&
+			f.FlowType != "dynamicExecution" && f.FlowType != "scriptUrlInjection" {
+			continue
+		}
 		key := f.Source + "|" + f.Sink + "|" + f.Snippet
 		if _, dup := seen[key]; dup {
 			continue

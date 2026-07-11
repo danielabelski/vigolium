@@ -500,6 +500,16 @@ func (r *Requester) executeDirectly(ctx context.Context, input *httpmsg.HttpRequ
 		return nil, 0, hosterrors.ErrUnresponsiveHost
 	}
 
+	// Global requests-per-second cap (only when --rate-limit was set). Acquire a
+	// rate token BEFORE holding a scarce per-host concurrency slot so a throttled
+	// request doesn't occupy a slot while it waits. Wait honors ctx, so scan
+	// shutdown / phase deadline unblocks it promptly.
+	if r.services.RateLimiter != nil {
+		if err := r.services.RateLimiter.Wait(ctx); err != nil {
+			return nil, 0, err
+		}
+	}
+
 	// Per-host rate limiting (concurrency control)
 	if r.services.HostLimiter != nil && host != "" {
 		// Context-aware acquire: a scan shutdown or phase deadline unblocks a

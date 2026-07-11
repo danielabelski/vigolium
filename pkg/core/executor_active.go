@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"sync"
 
 	"github.com/sourcegraph/conc"
 	"github.com/vigolium/vigolium/pkg/http"
@@ -39,7 +40,7 @@ func (e *Executor) runActivePerHost(ctx context.Context, reqClient *http.Request
 		}
 
 		mod := module // capture loop variable
-		e.goActiveTask(ctx, g, func() {
+		e.goActiveTask(ctx, g, func(releaseSlot func()) {
 			results, completed := e.runActiveWithTimeout(ctx,
 				func(runCtx context.Context) ([]*output.ResultEvent, error) {
 					if contextual, ok := mod.(modules.ContextualActiveModule); ok {
@@ -47,7 +48,7 @@ func (e *Executor) runActivePerHost(ctx context.Context, reqClient *http.Request
 					}
 					return mod.ScanPerHost(item, reqClient, e.scanCtx)
 				},
-				mod, item)
+				mod, item, releaseSlot)
 			if completed && len(results) > 0 {
 				e.processResults(ctx, results, mod, item)
 			}
@@ -73,7 +74,7 @@ func (e *Executor) runActivePerRequest(ctx context.Context, reqClient *http.Requ
 		}
 
 		mod := module // capture loop variable
-		e.goActiveTask(ctx, g, func() {
+		e.goActiveTask(ctx, g, func(releaseSlot func()) {
 			results, completed := e.runActiveWithTimeout(ctx,
 				func(runCtx context.Context) ([]*output.ResultEvent, error) {
 					if contextual, ok := mod.(modules.ContextualActiveModule); ok {
@@ -81,7 +82,7 @@ func (e *Executor) runActivePerRequest(ctx context.Context, reqClient *http.Requ
 					}
 					return mod.ScanPerRequest(item, reqClient, e.scanCtx)
 				},
-				mod, item)
+				mod, item, releaseSlot)
 			if completed && len(results) > 0 {
 				e.processResults(ctx, results, mod, item)
 			}
@@ -150,7 +151,7 @@ func (e *Executor) runActivePerInsertionPoint(ctx context.Context, reqClient *ht
 			}
 
 			mod, pt := module, ip // capture loop variables
-			e.goActiveTask(ctx, g, func() {
+			e.goActiveTask(ctx, g, func(releaseSlot func()) {
 				results, completed := e.runActiveWithTimeout(ctx,
 					func(runCtx context.Context) ([]*output.ResultEvent, error) {
 						if contextual, ok := mod.(modules.ContextualActiveModule); ok {
@@ -158,7 +159,7 @@ func (e *Executor) runActivePerInsertionPoint(ctx context.Context, reqClient *ht
 						}
 						return mod.ScanPerInsertionPoint(item, pt, reqClient, e.scanCtx)
 					},
-					mod, item)
+					mod, item, releaseSlot)
 				if completed && len(results) > 0 {
 					e.processResults(ctx, results, mod, item)
 				}
@@ -171,14 +172,23 @@ func (e *Executor) runActivePerInsertionPoint(ctx context.Context, reqClient *ht
 // semaphore. Semaphore acquisition is context-aware: if ctx is cancelled (scan
 // shutdown or max-duration timeout) while every slot is occupied, the task is
 // abandoned instead of blocking the dispatcher until a slot frees up.
-func (e *Executor) goActiveTask(ctx context.Context, g *conc.WaitGroup, fn func()) {
+//
+// Slot release is NOT tied to fn returning. fn hands releaseSlot to
+// runActiveWithTimeout, which frees the slot only when the module's real work
+// finishes — even if that work outlives a per-module timeout the wrapper gave up
+// waiting for. Releasing on fn return instead would let the pool admit
+// replacement tasks while abandoned scans still hold connections, so the
+// concurrency cap would understate true in-flight work. sync.Once keeps the
+// release idempotent so a stray double-call can never over-drain the semaphore.
+func (e *Executor) goActiveTask(ctx context.Context, g *conc.WaitGroup, fn func(releaseSlot func())) {
 	select {
 	case e.pool.activeTaskSem <- struct{}{}:
 	case <-ctx.Done():
 		return
 	}
+	var once sync.Once
+	releaseSlot := func() { once.Do(func() { <-e.pool.activeTaskSem }) }
 	g.Go(func() {
-		defer func() { <-e.pool.activeTaskSem }()
-		fn()
+		fn(releaseSlot)
 	})
 }

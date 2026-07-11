@@ -211,7 +211,36 @@ discovery:
     max_consecutive_waf_blocks: 0
     observed_max_items: 4000
     disable_kingfisher: false
+
+  jsscan:
+    enabled: true
+    replay_mode: exact           # exact | conservative | off
+    source_maps: true
+    asset_graph: true
+    protocol_handshake: false    # bounded WebSocket/SSE GET handshake
+    worker_count: 0              # 0 = derive a conservative count from memory
+    memory_budget_mb: 768
+    cache_mb: 128
+    worker_max_jobs: 100
+    worker_max_rss_mb: 1024
+    job_timeout: 60s
+    normal_input_mb: 1           # above this, discovery drops costly stages
+    max_ast_input_mb: 4          # above this, use bounded lexical fallback
+    hard_input_mb: 10
+    max_requests_per_file: 500
+    max_ast_nodes: 500000
+    max_asset_depth: 4
+    max_assets_per_parent: 64
+    max_assets_per_host: 512
+    max_assets_total: 2048
 ```
+
+`exact` is the safe default: only high-confidence templates produce traffic.
+`conservative` additionally permits bounded medium-confidence completion. `off`
+stores JavaScript intelligence without replaying extracted requests. Source-map
+and asset fetching still obey the ordinary discovery scope, rate, and HTTP
+session policy. Full generated/beautified code is stored as a verified artifact,
+not in the typed JSON result.
 
 ### `spidering`
 

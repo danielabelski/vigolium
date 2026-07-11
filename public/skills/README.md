@@ -356,12 +356,12 @@ vigolium scan -t https://example.com --only dynamic-assessment
 vigolium run spa -t https://example.com --spa-severities critical,high
 ```
 
-**Run only SAST (static analysis on source code):**
+**Static analysis / security code audit on source code:**
 ```
-> Run static analysis on my Go app, filter for gin-related rules
+> Run a security code audit on my Go app
 ```
 ```bash
-vigolium run sast --source /path/to/app --rule gin
+vigolium agent audit --source /path/to/app
 ```
 
 **Run only external harvest (Wayback, Common Crawl, OTX):**
@@ -1244,12 +1244,13 @@ vigolium db clean --orphans
 vigolium db clean --force
 ```
 
-**Reclaim disk space after deletion:**
+**Reclaim disk space:** VACUUM runs automatically after every `db clean` delete. To
+clear everything and reclaim space in one step:
 ```
-> Vacuum the database to reclaim space
+> Delete all records and reclaim space
 ```
 ```bash
-vigolium db clean --vacuum
+vigolium db clean --all -F
 ```
 
 **Seed database with sample data (for development/testing):**
@@ -1394,79 +1395,41 @@ vigolium export --only modules
 
 ### 10. Whitebox / Source-Aware Scanning
 
-**Scan with local source code:**
+Source-aware scanning is an **agent** feature — the native `scan` command has no
+`--source`. Pass `--source` to `agent autopilot`, `agent swarm`, `agent query`, or
+`agent audit`. It accepts a local directory, a git URL (cloned automatically), a
+local `.zip`/`.tar.gz`, or a `gs://<project>/<key>` archive.
+
+**Source-aware agentic scan with local source:**
 ```
-> Whitebox scan with source code in ./src
+> Whitebox scan of example.com with source code in ./src
 ```
 ```bash
-vigolium scan -t https://example.com --source ./src --strategy whitebox
+vigolium agent autopilot -t https://example.com --source ./src
 ```
 
 **Scan with source cloned from Git:**
 ```
-> Clone the repo and run a whitebox scan
+> Clone the repo and run a source-aware scan
 ```
 ```bash
-vigolium scan -t https://example.com \
-  --source-url https://github.com/org/repo --strategy whitebox
+vigolium agent swarm -t https://example.com --source https://github.com/org/repo
 ```
 
-**Link source code to a hostname first, then scan:**
+**Source-only audit (SAST/code review harness, no target required):**
 ```
-> Link the source repo to example.com, then whitebox scan
+> Run a security code audit on the source in ./src
 ```
 ```bash
-vigolium source add --hostname example.com --path ./src
-vigolium scan -t https://example.com --strategy whitebox
+vigolium agent audit --source ./src
 ```
 
-**Link source with metadata:**
+**Code review / endpoint discovery on source only:**
 ```
-> Link source with language and framework info
-```
-```bash
-vigolium source add --hostname api.example.com --path ./src -l go -f gin
-```
-
-**Link source from Git URL:**
-```
-> Clone and link a GitHub repo
+> Review the source code for vulnerabilities
 ```
 ```bash
-vigolium source add --hostname example.com --git https://github.com/org/repo
-```
-
-**List linked source repos:**
-```
-> Show all linked source repositories
-```
-```bash
-vigolium source ls
-```
-
-**Run SAST only:**
-```
-> Run static analysis on the source code
-```
-```bash
-vigolium run sast --source /path/to/app
-```
-
-**SAST with rule filtering:**
-```
-> Run SAST, only gin-related rules
-```
-```bash
-vigolium run sast --source /path/to/app --rule gin
-```
-
-**Ad-hoc SAST on a local path or Git URL:**
-```
-> Run static analysis on an ad-hoc path without linking source
-```
-```bash
-vigolium scan -t https://example.com --sast-adhoc /path/to/app
-vigolium scan -t https://example.com --sast-adhoc https://github.com/org/repo
+vigolium agent query --source ./src -t code-review
 ```
 
 ---
@@ -1830,8 +1793,8 @@ These are examples of natural language prompts you can give to Claude Code or Co
 | "Write me an extension that checks for exposed .env files" | Generates a JS extension file |
 | "Lint my extension for errors" | `vigolium ext lint custom-check.js` |
 | "Start the server with auto-scan" | `vigolium server -t <url> --scan-on-receive` |
-| "Whitebox scan with my source code" | `vigolium scan -t <url> --source ./src --strategy whitebox` |
-| "Ad-hoc SAST on a local path" | `vigolium scan -t <url> --sast-adhoc /path/to/app` |
+| "Whitebox scan with my source code" | `vigolium agent autopilot -t <url> --source ./src` |
+| "Security code audit on a local path" | `vigolium agent audit --source /path/to/app` |
 | "Clean up old scan data" | `vigolium db clean --before <date> --force` |
 | "Seed the database with sample data" | `vigolium db seed` |
 | "List agent sessions" | `vigolium agent session` |

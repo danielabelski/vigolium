@@ -87,6 +87,12 @@ var (
 	swarmVerbose             bool
 	swarmHeaded              bool
 
+	// swarmOliumFlags carries the shared olium provider-override flags
+	// (--provider/--model/--oauth-*/--gcp-*/--base-url), same as agent query and
+	// triage. Registered/applied via the shared registerOliumOverrideFlags /
+	// applyOliumOverrides helpers so swarm can't drift from the other commands.
+	swarmOliumFlags oliumOverrides
+
 	// swarmInstructionPrefix holds the verbatim natural-language prompt when
 	// swarm was invoked with a positional `<prompt>` argument. See the
 	// matching autopilotInstructionPrefix comment for the rationale.
@@ -179,8 +185,8 @@ func init() {
 	f.StringVar(&swarmCredentials, "credentials", "", "Credentials for browser auth phase (e.g. 'username=admin,password=secret')")
 
 	// Direct auth injection — bypass the browser when you already have a session.
-	f.StringSliceVar(&swarmAuthCookies, "cookie", nil, "Session cookie name=value pair (repeatable; e.g. --cookie 'session=abc123'). Injected into recon, discovery, and scan as Cookie: header.")
-	f.StringSliceVarP(&swarmAuthHeaders, "header", "H", nil, "Inject HTTP header into recon, discovery, and scan (repeatable; e.g. -H 'Authorization: Bearer xxx').")
+	f.StringArrayVar(&swarmAuthCookies, "cookie", nil, "Session cookie name=value pair (repeatable; e.g. --cookie 'session=abc123'). Injected into recon, discovery, and scan as Cookie: header. Commas are literal.")
+	f.StringArrayVarP(&swarmAuthHeaders, "header", "H", nil, "Inject HTTP header into recon, discovery, and scan (repeatable; e.g. -H 'Authorization: Bearer xxx'). Commas are literal.")
 	f.StringVar(&swarmLoginCurl, "login-curl", "", "Curl command for login flow; replayed by the auth runtime to capture a fresh session. Cookies/headers from a successful response are reused for the scan.")
 	f.StringVar(&swarmAuthConfigPath, "auth-config", "", "Path to an existing auth-config.yaml. Skips both browser auth and --cookie/--header/--login-curl synthesis.")
 
@@ -197,6 +203,9 @@ func init() {
 	// Intensity
 	f.StringVar(&swarmIntensity, "intensity", "balanced", "Scan intensity preset: quick, balanced, or deep")
 
+	// Olium provider overrides (shared with agent query/triage)
+	registerOliumOverrideFlags(agentSwarmCmd, &swarmOliumFlags)
+
 	f.BoolVar(&swarmUploadResults, "upload-results", false, "Upload scan results to cloud storage after completion (requires storage config)")
 	f.BoolVar(&swarmDisableGuardrail, "disable-guardrail", false, "Skip the prompt-safety classifier on the natural-language prompt (use only when refusing a known-good prompt)")
 	f.BoolVarP(&swarmVerbose, "verbose", "v", false, "Show a per-tool head/tail preview of each tool result alongside the standard one-liner")
@@ -206,10 +215,21 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 	defer syncLogger()
 	defer closeDatabaseOnExit()
 
-	// Natural language prompt: positional arg takes precedence when no explicit flags are set
+	// Natural-language prompt handling. With no explicit structured flags, the
+	// positional prompt drives the run through the LLM intent parser. With
+	// structured flags present, the positional prompt is preserved verbatim as
+	// instruction context (prepended ahead of --instruction) rather than silently
+	// discarded; explicit flags still win for structured fields.
+	positionalPrompt, err := resolvePositionalPrompt(args, swarmPlanFile)
+	if err != nil {
+		return err
+	}
 	hasExplicitFlags := swarmTarget != "" || swarmInput != "" || len(swarmRecordUUIDs) > 0 || swarmAllRecords || swarmRecordsFrom != "" || swarmSource != "" || swarmPlanFile != ""
-	if len(args) > 0 && !hasExplicitFlags {
-		return runSwarmFromPrompt(cmd, args[0])
+	if positionalPrompt != "" && !hasExplicitFlags {
+		return runSwarmFromPrompt(cmd, positionalPrompt)
+	}
+	if positionalPrompt != "" {
+		swarmInstructionPrefix = positionalPrompt
 	}
 
 	// Resolve --plan-file into --instruction + seed inputs before the input
@@ -333,6 +353,10 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 	// Layer the global --ext / --ext-dir flags onto settings so user-supplied
 	// extensions ride alongside any agent-generated ones in the swarm pipeline.
 	applyGlobalExtFlagsToSettings(settings)
+
+	// Apply the shared olium provider overrides onto settings (the swarm pipeline
+	// reads settings.Agent.Olium directly), same as agent query/triage.
+	applyOliumOverrides(settings, &swarmOliumFlags)
 
 	// --browser CLI flag overrides config
 	if cmd.Flags().Changed("browser") {

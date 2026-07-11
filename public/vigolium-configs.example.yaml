@@ -964,6 +964,42 @@ discovery:
     # Default: true
     disable_kingfisher: true
 
+  # Embedded JavaScript intelligence and source-aware replay.
+  jsscan:
+    # Store typed facts and analyze scripts. Default: true.
+    enabled: true
+
+    # exact: high-confidence facts only; conservative: also medium; off: metadata only.
+    replay_mode: exact
+
+    # Follow bounded source maps and chunk/worker/manifest references.
+    source_maps: true
+    asset_graph: true
+
+    # Attempt controlled WebSocket/SSE GET handshakes. Off by default.
+    protocol_handshake: false
+
+    # 0 derives a conservative process count from the memory budget (capped small).
+    worker_count: 0
+    memory_budget_mb: 768
+    cache_mb: 128
+    worker_max_jobs: 100
+    worker_max_rss_mb: 1024
+    job_timeout: 60s
+
+    # Tiered input policy: normal -> discovery-lite -> lexical fallback -> reject.
+    normal_input_mb: 1
+    max_ast_input_mb: 4
+    hard_input_mb: 10
+    max_requests_per_file: 500
+    max_ast_nodes: 500000
+
+    # Recursive JavaScript asset graph budgets.
+    max_asset_depth: 4
+    max_assets_per_parent: 64
+    max_assets_per_host: 512
+    max_assets_total: 2048
+
 # ============================================================================
 # Browser-Based Spidering (Spitolas)
 # ============================================================================

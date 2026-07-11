@@ -413,7 +413,7 @@ func (r *Repository) DeduplicateFindings(ctx context.Context, projectUUID string
 	// SQLite does not common-subexpression-eliminate across a query.
 	groupQuery := `
 		WITH base AS (
-			SELECT id, additional_evidence, module_id, severity, created_at,
+				SELECT id, additional_evidence, module_id, severity, COALESCE(NULLIF(record_kind, ''), 'finding') AS record_kind, created_at,
 			       json_extract(matched_at, '$[0]') AS matched_url
 			FROM findings
 			WHERE project_uuid = ?` + hostFilter + `
@@ -423,11 +423,11 @@ func (r *Repository) DeduplicateFindings(ctx context.Context, projectUUID string
 			  AND module_id != '` + secretDetectModuleID + `'
 		)
 		SELECT id, additional_evidence, ROW_NUMBER() OVER (
-			PARTITION BY module_id, severity, matched_url
-			ORDER BY created_at ASC
+				PARTITION BY record_kind, module_id, severity, matched_url
+				ORDER BY created_at ASC, id ASC
 		) AS rn,
 		-- Stable group key for matching survivors to duplicates
-		module_id || '|' || severity || '|' || COALESCE(matched_url, '') AS group_key
+			record_kind || '|' || module_id || '|' || severity || '|' || COALESCE(matched_url, '') AS group_key
 		FROM base`
 
 	type findingRow struct {
@@ -618,6 +618,7 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 		ModuleID           string   `bun:"module_id"`
 		ModuleName         string   `bun:"module_name"`
 		Severity           string   `bun:"severity"`
+		RecordKind         string   `bun:"record_kind"`
 		Description        string   `bun:"description"`
 		MatchedAt          []string `bun:"matched_at,type:jsonb"`
 		ExtractedResults   []string `bun:"extracted_results,type:jsonb"`
@@ -653,7 +654,7 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 		queryArgs = append(queryArgs, bun.List(moduleList))
 	}
 	loadQuery := `
-		SELECT id, hostname, module_id, module_name, severity, description, matched_at, extracted_results, tags,
+			SELECT id, hostname, module_id, module_name, severity, COALESCE(NULLIF(record_kind, ''), 'finding') AS record_kind, description, matched_at, extracted_results, tags,
 		       additional_evidence
 		FROM findings
 		WHERE project_uuid = ?` + hostFilter + ` AND ` + where + `
@@ -702,7 +703,7 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 		// An emptied value key marks a by-module/by-rule group — every value folds
 		// into one finding, so the distinct values are unioned onto the survivor.
 		mergeValues := valueKey == ""
-		key := output.GroupingKey(moduleKey, row.Severity, valueKey, row.Hostname, opts.PerHost)
+		key := row.RecordKind + "|" + output.GroupingKey(moduleKey, row.Severity, valueKey, row.Hostname, opts.PerHost)
 		g, ok := groups[key]
 		if !ok {
 			groups[key] = &groupData{

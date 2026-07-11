@@ -3,6 +3,7 @@ import type { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import * as m from '@codemod/matchers';
 import type { Transform } from '../ast-utils';
+import type { AnalysisContext } from '../context';
 import { getFunctionMap, getEffectiveIterations } from '../mapping';
 import { tracebackVariables } from '../traceback/tracebackVariables';
 import { appendPattern, appendExtractedRequest } from './utils';
@@ -58,7 +59,11 @@ function detectCurrentFunction(path: NodePath): string | undefined {
   return undefined;
 }
 
-export function createGenericRequestPattern3Transform(ast: ParseResult<t.File> | null = null, sourceCode: string = ''): Transform {
+export function createGenericRequestPattern3Transform(
+  analysisContext: AnalysisContext,
+  ast: ParseResult<t.File> | null = null,
+  sourceCode: string = '',
+): Transform {
   return {
     name: 'genericRequestPattern3',
     tags: ['safe'],
@@ -88,6 +93,8 @@ export function createGenericRequestPattern3Transform(ast: ParseResult<t.File> |
           exit(path: NodePath<t.ObjectExpression>) {
             if (!matcher.match(path.node)) return;
 
+            const containingCall = path.findParent((parent) => parent.isCallExpression());
+
             const urlValue = path.node.properties.find(prop =>
               t.isObjectProperty(prop) &&
               t.isIdentifier(prop.key) &&
@@ -115,9 +122,14 @@ export function createGenericRequestPattern3Transform(ast: ParseResult<t.File> |
                 depth++;
               }
 
+              if (containingCall?.isCallExpression() && !analysisContext.isRequestNodeClaimed(containingCall.node)) {
+                analysisContext.claimRequestNode(containingCall.node);
+              }
+
               // Output existing requestPattern
-              const result = tracebackVariables(path, [], { ast, sourceCode });
-              appendPattern(result, 'genericRequestPattern3');
+              if (analysisContext.has('requestEvidence')) {
+                appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'genericRequestPattern3', path.node);
+              }
 
               // Extract structured request data
               // Pattern: { url: '...', method: '...', headers: {...}, data: {...} }
@@ -136,13 +148,17 @@ export function createGenericRequestPattern3Transform(ast: ParseResult<t.File> |
                 : [{ callSiteIndex: 0 }];
 
               for (const iteration of effectiveIterations) {
-                const context: ResolutionContext | undefined = currentFunction
-                  ? {
-                      currentFunction,
-                      callSiteIndex: iteration.callSiteIndex,
-                      parentCallSiteIndex: iteration.parentCallSiteIndex,
-                    }
-                  : undefined;
+                const scopeIds: number[] = [];
+                for (let scope = path.scope; scope; scope = scope.parent) scopeIds.push(scope.uid);
+                const context: ResolutionContext = {
+                  scopeId: path.scope.uid,
+                  scopeIds,
+                  ...(currentFunction ? {
+                    currentFunction,
+                    callSiteIndex: iteration.callSiteIndex,
+                    parentCallSiteIndex: iteration.parentCallSiteIndex,
+                  } : {}),
+                };
 
                 const urlNode = findProperty(config, 'url');
                 const urlResults = extractURL(urlNode, trackedVars, context);
@@ -176,7 +192,10 @@ export function createGenericRequestPattern3Transform(ast: ParseResult<t.File> |
                       : extractCookies(headersNode, trackedVars, context),
                   });
 
-                  appendExtractedRequest(request);
+                  appendExtractedRequest(analysisContext, request, {
+                    extractor: 'request-config-object', client: 'generic', confidence: 'medium',
+                    node: path.node, functionName: currentFunction,
+                  });
                 }
               }
             }

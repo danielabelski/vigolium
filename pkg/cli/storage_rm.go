@@ -31,10 +31,6 @@ func runStorageRm(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if sc == nil {
-		return nil
-	}
-
 	fmt.Printf("%s Will delete %d object(s) from project %s:\n",
 		terminal.WarningSymbol(), len(args), terminal.Cyan(projectUUID))
 	for _, key := range args {

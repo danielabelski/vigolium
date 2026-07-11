@@ -43,7 +43,9 @@ Valid phases: ingestion, discovery (deparos), external-harvest, spidering (spito
 	Aliases: []string{"r"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		globalOnly = args[0]
-		return runScanCmd(cmd, args)
+		// The positional arg is the phase name, not a target — pass nil so
+		// runScanCmd does not merge it into the scan target list.
+		return runScanCmd(cmd, nil)
 	},
 }
 

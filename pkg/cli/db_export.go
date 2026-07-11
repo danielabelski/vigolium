@@ -342,7 +342,9 @@ func convertFindingToEvent(finding *database.Finding, rec *database.HTTPRecord) 
 	}
 
 	event := &output.ResultEvent{
-		ModuleID: finding.ModuleID,
+		ModuleID:      finding.ModuleID,
+		RecordKind:    output.RecordKind(finding.RecordKind),
+		EvidenceGrade: output.EvidenceGrade(finding.EvidenceGrade),
 		Info: output.Info{
 			Name:        finding.ModuleName,
 			Description: finding.Description,

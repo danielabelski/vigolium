@@ -3,6 +3,7 @@ import * as t from '@babel/types';
 import * as m from '@codemod/matchers';
 import type { Transform } from '../ast-utils';
 import type { NodePath } from '../ast-utils/babel';
+import type { AnalysisContext } from '../context';
 import { tracebackVariables } from '../traceback/tracebackVariables';
 import { appendPattern, appendExtractedRequest } from './utils';
 import { getTrackedVariablesMap } from './globalVariableTracking';
@@ -55,50 +56,70 @@ function correlateXhrCalls(
   recvKey: string,
   trackedVars: TrackedVariableMap,
   context?: ResolutionContext,
+  analysisContext?: AnalysisContext,
 ): CorrelatedXhr {
   const result: CorrelatedXhr = { headers: [], cookies: [], body: '' };
+
+  const consume = (p: NodePath<t.CallExpression>): 'continue' | 'stop' => {
+    const callee = p.node.callee;
+    if (!t.isMemberExpression(callee) || !t.isIdentifier(callee.property)) return 'continue';
+    const method = callee.property.name;
+    if (method === 'open' && p.node !== openPath.node) return 'stop';
+    const args = p.node.arguments;
+    if (method === 'setRequestHeader' && args.length >= 2) {
+      const name = resolveValueSingle(args[0], trackedVars, context);
+      const value = resolveValueSingle(args[1], trackedVars, context);
+      if (!name || name.startsWith('${')) return 'continue';
+      if (name.toLowerCase() === 'cookie') {
+        result.cookies.push(...value.split(';').map((cookie) => cookie.trim()).filter(Boolean));
+      } else {
+        result.headers.push(`${name}: ${value}`);
+      }
+    } else if (method === 'send' && args.length >= 1) {
+      const body = extractBody(args[0], trackedVars, p, context);
+      if (body && body !== '${unknown}') result.body = body;
+    }
+    return 'continue';
+  };
+
+  const index = analysisContext?.structuralIndex;
+  if (index && openPath.isCallExpression() && t.isMemberExpression(openPath.node.callee)) {
+    const openCallee = openPath.node.callee;
+    index.stats.xhrLifecycleQueries++;
+    const openOffset = openPath.node.start ?? 0;
+    const functionScope = openPath.scope.getFunctionParent();
+    for (const operation of index.operationsForReceiver(openPath, openCallee.object)) {
+      if ((operation.node.start ?? 0) <= openOffset) continue;
+      if (operation.scope.getFunctionParent() !== functionScope) continue;
+      if (consume(operation) === 'stop') break;
+    }
+    return result;
+  }
 
   const container = openPath.findParent(
     (p) => p.isFunction() || p.isProgram(),
   );
   if (!container) return result;
 
+  if (index) index.stats.xhrFallbackTraversals++;
+
   container.traverse({
     CallExpression(p: NodePath<t.CallExpression>) {
       const callee = p.node.callee;
       if (!t.isMemberExpression(callee) || !t.isIdentifier(callee.property)) return;
       if (receiverKey(callee.object) !== recvKey) return;
-
-      const method = callee.property.name;
-      const args = p.node.arguments;
-
-      if (method === 'setRequestHeader' && args.length >= 2) {
-        const name = resolveValueSingle(args[0], trackedVars, context);
-        const value = resolveValueSingle(args[1], trackedVars, context);
-        if (!name || name.startsWith('${')) return;
-        if (name.toLowerCase() === 'cookie') {
-          result.cookies.push(
-            ...value
-              .split(';')
-              .map((c) => c.trim())
-              .filter((c) => c.length > 0),
-          );
-        } else {
-          result.headers.push(`${name}: ${value}`);
-        }
-      } else if (method === 'send' && args.length >= 1) {
-        const body = extractBody(args[0], trackedVars, p, context);
-        if (body && body !== '${unknown}') {
-          result.body = body;
-        }
-      }
+      consume(p);
     },
   });
 
   return result;
 }
 
-export function createXhrRequestTransform(ast: ParseResult<t.File> | null = null, sourceCode: string = ''): Transform {
+export function createXhrRequestTransform(
+  analysisContext: AnalysisContext,
+  ast: ParseResult<t.File> | null = null,
+  sourceCode: string = '',
+): Transform {
   return {
     name: 'xhrRequest',
     tags: ['safe'],
@@ -129,9 +150,11 @@ export function createXhrRequestTransform(ast: ParseResult<t.File> | null = null
         CallExpression: {
           exit(path) {
             if (matcher.match(path.node)) {
+              analysisContext.claimRequestNode(path.node);
               // Output existing requestPattern
-              const result = tracebackVariables(path, [], { ast, sourceCode });
-              appendPattern(result, 'xhrRequest');
+              if (analysisContext.has('requestEvidence')) {
+                appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'xhrRequest', path.node);
+              }
 
               // Extract structured request data
               // xhr.open(method, url, async?, user?, password?)
@@ -154,11 +177,11 @@ export function createXhrRequestTransform(ast: ParseResult<t.File> | null = null
                 // iteration. Resolve values with the first iteration's context.
                 const baseContext = createResolutionContext(currentFunction, effectiveIterations[0]);
                 const correlated = recvKey
-                  ? correlateXhrCalls(path, recvKey, trackedVars, baseContext)
+                  ? correlateXhrCalls(path, recvKey, trackedVars, baseContext, analysisContext)
                   : { headers: [], cookies: [], body: '' };
 
                 for (const iteration of effectiveIterations) {
-                  const context = createResolutionContext(currentFunction, iteration);
+                  const context = createResolutionContext(currentFunction, iteration, path);
 
                   const method = t.isStringLiteral(args[0])
                     ? args[0].value.toUpperCase()
@@ -175,7 +198,10 @@ export function createXhrRequestTransform(ast: ParseResult<t.File> | null = null
                       cookies: correlated.cookies,
                     });
 
-                    appendExtractedRequest(request);
+                    appendExtractedRequest(analysisContext, request, {
+                      extractor: 'xhr', client: 'xhr', confidence: 'high',
+                      node: path.node, functionName: currentFunction,
+                    });
                   }
                 }
               }

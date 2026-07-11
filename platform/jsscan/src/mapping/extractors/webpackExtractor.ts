@@ -17,6 +17,7 @@ import * as t from '@babel/types';
 import { traverse } from '../../ast-utils/babel';
 import type { NodePath } from '../../ast-utils/babel';
 import type { FunctionMap, FunctionDefinition } from '../types';
+import { getEngineState } from '../../context/engine-state';
 
 // =============================================================================
 // Types
@@ -131,7 +132,16 @@ export interface WebpackBundleState {
 // Global State
 // =============================================================================
 
-let bundleState: WebpackBundleState = createEmptyBundleState();
+// Immutable proxy routing legacy helper code to the current analysis-owned
+// bundle state. No request data is retained in module scope.
+const bundleState: WebpackBundleState = new Proxy(createEmptyBundleState(), {
+  get(_target, property) {
+    return Reflect.get(getEngineState().webpackBundle, property);
+  },
+  set(_target, property, value) {
+    return Reflect.set(getEngineState().webpackBundle, property, value);
+  },
+});
 
 function createEmptyBundleState(): WebpackBundleState {
   return {
@@ -144,29 +154,30 @@ function createEmptyBundleState(): WebpackBundleState {
  * Clear webpack state
  */
 export function clearWebpackState(): void {
-  bundleState = createEmptyBundleState();
-  endpointDictionary = new Map();
+  const state = getEngineState();
+  state.webpackBundle = createEmptyBundleState();
+  state.endpointDictionary = new Map();
 }
 
 /**
  * Get webpack module map (for compatibility)
  */
 export function getWebpackModuleMap(): Map<string | number, WebpackModule> {
-  return bundleState.modules;
+  return getEngineState().webpackBundle.modules;
 }
 
 /**
  * Get full webpack bundle state
  */
 export function getWebpackBundleState(): WebpackBundleState {
-  return bundleState;
+  return getEngineState().webpackBundle;
 }
 
 /**
  * Get endpoint dictionary (for debugging)
  */
 export function getEndpointDictionary(): Map<string, string> {
-  return endpointDictionary;
+  return getEngineState().endpointDictionary;
 }
 
 // =============================================================================
@@ -722,7 +733,16 @@ function extractModulesFromBlockStatement(body: t.BlockStatement): void {
  * This is used for resolving endpoints when direct variable lookup fails
  * (e.g., when minifier reassigns the same variable name)
  */
-let endpointDictionary: Map<string, string> = new Map();
+const endpointDictionary: Map<string, string> = new Proxy(new Map<string, string>(), {
+  get(_target, property) {
+    const current = getEngineState().endpointDictionary;
+    const value = Reflect.get(current, property, current);
+    return typeof value === 'function' ? value.bind(current) : value;
+  },
+  set(_target, property, value) {
+    return Reflect.set(getEngineState().endpointDictionary, property, value);
+  },
+});
 
 /**
  * Extract local variables from a block statement

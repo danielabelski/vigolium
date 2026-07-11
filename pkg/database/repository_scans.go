@@ -100,6 +100,7 @@ func (r *Repository) aggregateScanFindings(ctx context.Context, scanUUID string)
 		ColumnExpr("severity").
 		ColumnExpr("COUNT(*) AS count").
 		Where("scan_uuid = ?", scanUUID).
+		Where("(record_kind IS NULL OR record_kind = '' OR record_kind = ?)", RecordKindFinding).
 		GroupExpr("severity").
 		Scan(ctx, &rows)
 

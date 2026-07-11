@@ -77,12 +77,29 @@ Every newly discovered directory is probed with ALL observed values as high-prio
 
 ### 3. JavaScript Intelligence
 
-Two layers of JS analysis feed endpoints back into the discovery queue:
+Two layers of JS analysis feed the discovery graph:
 
-- **JSScan** (embedded binary): Deobfuscates bundled JS, resolves string concatenation, traces variable assignments, and extracts `fetch()` / `XMLHttpRequest` / `$.ajax` call sites into full HTTP request specs.
-- **Spider extractors**: Parse inline `<script>` tags and JS string literals for URL patterns.
+- **JSScan** uses a shared, memory-bounded worker pool. It emits typed HTTP
+  templates plus JavaScript chunks/workers/source maps, GraphQL operations,
+  WebSocket/SSE metadata, client routes, and browser-side flow evidence.
+- **Spider/LinkFinder extractors** retain a cheap URL-string fallback for code
+  that cannot or should not enter full AST analysis.
 
-Extracted endpoints become priority-0 tasks — tested before any wordlist fuzzing.
+Request facts keep their source script, method, body, confidence, and source
+span. High-confidence facts use exact replay. Medium-confidence facts are only
+replayed when `replay_mode: conservative`; low-confidence strings remain hints.
+Sensitive or browser-controlled headers are never copied into replay traffic.
+
+Asset references form a bounded recursive graph, so lazy chunks, workers, and
+service workers are fetched and analyzed once. Source maps are fetched under the
+normal scope/auth/rate policy; recovered sources are retained as immutable scan
+artifacts. WebSocket/SSE handshakes are opt-in and never pass through ordinary
+HTTP variant generation.
+
+Large input degrades visibly: transformed output is dropped first, then a
+bounded lexical endpoint/asset pass is used. Hard-limit input is rejected with a
+diagnostic. A summary reports worker jobs, cache hits, extracted fact confidence,
+fallbacks, and worker restarts when discovery stops.
 
 ### 4. Dynamic Wordlist Growth
 

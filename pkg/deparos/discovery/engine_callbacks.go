@@ -464,11 +464,12 @@ func (e *Engine) createDirectoryTasks(parsedURL *url.URL, cleanedPath string, de
 
 	// Create JS extracted request task for this directory.
 	// Use pathOnlyURL (no query params) - JSExtractedRequestTask only needs directory path.
-	if e.jsscanScanner != nil {
+	if e.jsscanService != nil {
 		jsExtTask := e.factory.CreateJSExtractedRequestTask(
 			pathOnlyURL,
 			e.GetExtractedRequests,
 			nextDepth,
+			e.PendingRequestTemplates,
 		)
 		if jsExtTask != nil {
 			e.AddTask(jsExtTask)

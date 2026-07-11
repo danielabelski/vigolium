@@ -117,20 +117,26 @@ type Callbacks struct {
 
 	// JSScan integration for endpoint extraction from JavaScript files.
 
-	// JSScanScanner is the jsscan scanner for JS endpoint extraction.
+	// JSScanService is the shared broker for JS endpoint extraction.
 	// If nil, jsscan is disabled.
-	JSScanScanner *jsscan.Scanner
-
-	// JSScanSem is a semaphore to limit concurrent jsscan executions.
-	JSScanSem chan struct{}
+	JSScanService *jsscan.Service
+	JSScanOptions func(profile jsscan.AnalysisProfile, sourceURL string) jsscan.ScanOptions
 
 	// AddExtractedRequest adds an extracted request to the engine's collection.
 	// Returns true if the request was new (not a duplicate).
 	AddExtractedRequest func(req *jsscan.ExtractedRequest) bool
 
+	// AddRequestFact retains typed provenance and source-scoped replay policy.
+	AddRequestFact func(sourceURL string, fact jsscan.HTTPRequestFact) bool
+
 	// StoreJSScanRequests persists extracted jsscan requests to database.
 	// Called after jsscan completes. jsURL is the source JavaScript file.
-	StoreJSScanRequests func(jsURL *url.URL, reqs []jsscan.ExtractedRequest)
+	StoreJSScanRequests       func(jsURL *url.URL, reqs []jsscan.ExtractedRequest)
+	StoreJSScanFacts          func(jsURL *url.URL, facts []jsscan.HTTPRequestFact)
+	ProcessJSScanCapabilities func(sourceURL string, result *jsscan.ScanResult)
+
+	ProcessAssetFacts func(ctx context.Context, parentURL string, source []byte, facts []jsscan.AssetReferenceFact)
+	ProcessSourceMap  func(ctx context.Context, mapURL *url.URL, content []byte)
 
 	// ScopeChecker validates if URLs are within scan scope.
 	// Used by redirect handler to filter out-of-scope redirect targets.

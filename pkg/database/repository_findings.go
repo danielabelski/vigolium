@@ -314,6 +314,7 @@ func (r *Repository) GetFindingsByRecordUUID(ctx context.Context, uuid string) (
 	err := r.db.NewSelect().
 		Model(&findings).
 		Where("f.id IN (SELECT finding_id FROM finding_records WHERE record_uuid = ?)", uuid).
+		Where("(f.record_kind IS NULL OR f.record_kind = '' OR f.record_kind = ?)", RecordKindFinding).
 		Order("found_at DESC").
 		Scan(ctx)
 	if err != nil {
@@ -337,6 +338,7 @@ func (r *Repository) GetFindingsBySeverity(ctx context.Context, projectUUID, sev
 	q := r.db.NewSelect().
 		Model(&findings).
 		Where("severity = ?", sev).
+		Where("(record_kind IS NULL OR record_kind = '' OR record_kind = ?)", RecordKindFinding).
 		Order("found_at DESC").
 		Limit(limit)
 	if projectUUID != "" {

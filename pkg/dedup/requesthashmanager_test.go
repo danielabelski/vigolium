@@ -131,6 +131,31 @@ func TestRHM_ShouldCheckInsertionPoint(t *testing.T) {
 	assert.True(t, rhm.ShouldCheckInsertionPoint(u, req, "id", "1", cookieType), "different param type is a distinct hash")
 }
 
+func TestRHM_ShouldCheckInsertionPointSeparatesIdentities(t *testing.T) {
+	rhm := newTestRHM(t, DefaultOption)
+	u := mustURL(t, "https://example.com/account?id=1")
+	userA := mustHTTPRequest(t, "GET /account?id=1 HTTP/1.1\r\nHost: example.com\r\nCookie: session=user-a\r\n\r\n")
+	userB := mustHTTPRequest(t, "GET /account?id=1 HTTP/1.1\r\nHost: example.com\r\nCookie: session=user-b\r\n\r\n")
+	paramType := strconv.Itoa(int(httpmsg.ParamURL.ToInsertionPointType()))
+
+	assert.True(t, rhm.ShouldCheckInsertionPoint(u, userA, "id", "1", paramType))
+	assert.False(t, rhm.ShouldCheckInsertionPoint(u, userA, "id", "1", paramType), "same identity is deduplicated")
+	assert.True(t, rhm.ShouldCheckInsertionPoint(u, userB, "id", "1", paramType), "a second identity receives independent coverage")
+}
+
+func TestRHM_IdentityDimensionCanBeDisabled(t *testing.T) {
+	option := DefaultOption
+	option.Identity = false
+	rhm := newTestRHM(t, option)
+	u := mustURL(t, "https://example.com/account?id=1")
+	userA := mustHTTPRequest(t, "GET /account?id=1 HTTP/1.1\r\nHost: example.com\r\nCookie: session=user-a\r\n\r\n")
+	userB := mustHTTPRequest(t, "GET /account?id=1 HTTP/1.1\r\nHost: example.com\r\nCookie: session=user-b\r\n\r\n")
+	paramType := strconv.Itoa(int(httpmsg.ParamURL.ToInsertionPointType()))
+
+	assert.True(t, rhm.ShouldCheckInsertionPoint(u, userA, "id", "1", paramType))
+	assert.False(t, rhm.ShouldCheckInsertionPoint(u, userB, "id", "1", paramType), "identity-disabled profiles retain legacy deduplication")
+}
+
 // TestRHM_GetNotCheckedParams verifies the bulk filter: it returns only the
 // params not yet seen, records them as it goes, and returns nil for empty input.
 func TestRHM_GetNotCheckedParams(t *testing.T) {

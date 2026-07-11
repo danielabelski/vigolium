@@ -43,7 +43,13 @@ var scanCmd = &cobra.Command{
 	Long: `Run the native scan pipeline against one or more targets. Phases run in order:
 ingestion → discovery → external-harvest → spidering → known-issue-scan → dynamic-assessment → extension.
 
-Use --only / --skip to limit phases, --strategy or --scanning-profile for tuned presets, and --ext / --ext-dir to load custom JavaScript extensions.`,
+Use --only / --skip to limit phases, --strategy or --scanning-profile for tuned presets, and --ext / --ext-dir to load custom JavaScript extensions.
+
+Targets may be passed as positional URLs (vigolium scan https://a https://b), via
+repeated -t/--target, or from -T/--target-file; the three combine and duplicates
+are removed. A positional value is always treated as a target URL, never a file —
+use -T or -i for files.`,
+	Args: cobra.ArbitraryArgs,
 	RunE: runScanCmd,
 }
 
@@ -91,6 +97,22 @@ func shouldWidenKnownIssueScanSeverities(onlyPhase string, severitiesExplicit bo
 	return false // already covers every level
 }
 
+// mergePositionalTargets combines positional target URLs with repeated --target
+// values, preserving order (positional first) and removing duplicates and blanks.
+func mergePositionalTargets(positional, flagged []string) []string {
+	seen := make(map[string]bool, len(positional)+len(flagged))
+	out := make([]string, 0, len(positional)+len(flagged))
+	for _, src := range [][]string{positional, flagged} {
+		for _, t := range src {
+			if t = strings.TrimSpace(t); t != "" && !seen[t] {
+				seen[t] = true
+				out = append(out, t)
+			}
+		}
+	}
+	return out
+}
+
 func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 	defer syncLogger()
 
@@ -110,7 +132,9 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 		return err
 	}
 	scanOpts.Modules, scanOpts.PassiveModules = resolveModuleSelection(false)
-	scanOpts.Targets = globalTargets
+	// Positional URLs combine with repeated -t/--target (positional first),
+	// de-duplicated. `run` passes nil here since its positional arg is a phase.
+	scanOpts.Targets = mergePositionalTargets(args, globalTargets)
 	scanOpts.TargetsFilePaths = globalTargetFiles
 	scanOpts.InputFileMode = globalInputMode
 	scanOpts.InputReadTimeout = globalInputReadTimeout
@@ -119,6 +143,13 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 	scanOpts.MaxPerHost = globalMaxPerHost
 	scanOpts.ConcurrencyExplicitlySet = cmd.Flags().Changed("concurrency")
 	scanOpts.MaxPerHostExplicitlySet = cmd.Flags().Changed("max-per-host")
+	// --rate-limit is enforced only when the operator sets it explicitly, so
+	// default scans keep their current throughput. When set it drives the native
+	// token-bucket cap here; the known-issue-scan / nuclei limiter is wired from
+	// the same value once settings load below.
+	if cmd.Flags().Changed("rate-limit") {
+		scanOpts.RateLimit = globalRateLimit
+	}
 	scanOpts.MaxHostError = globalMaxHostError
 	scanOpts.MaxFindingsPerModule = globalMaxFindingsPerModule
 	scanOpts.Verbose = globalVerbose
@@ -205,6 +236,13 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 
 	if scanOpts.ScopeOriginMode != "" {
 		settings.Scope.CLIOriginMode = scanOpts.ScopeOriginMode
+	}
+
+	// Propagate an explicit --rate-limit into the scanning pace so the
+	// known-issue-scan / nuclei limiter honors it (previously it read only its
+	// config default and the flag was dropped for native scans entirely).
+	if cmd.Flags().Changed("rate-limit") {
+		settings.ScanningPace.RateLimit = globalRateLimit
 	}
 
 	// Override OAST URL if --oast-url flag is set

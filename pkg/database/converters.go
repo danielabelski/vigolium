@@ -12,18 +12,40 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/vigolium/vigolium/pkg/anomaly/htmlutils"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 )
 
-// dnsCache caches hostname → IP resolution results to avoid repeated lookups.
-// A zero-value (empty string) means the lookup was attempted but failed.
-var dnsCache = struct {
-	sync.RWMutex
-	m map[string]string
-}{m: make(map[string]string)}
+const (
+	// dnsPositiveTTL / dnsNegativeTTL bound how long a resolved / failed lookup is
+	// trusted. A short negative TTL means a host that was briefly unreachable (or
+	// resolved after the first miss) is retried soon, rather than being pinned to
+	// "" for the process lifetime.
+	dnsPositiveTTL = 10 * time.Minute
+	dnsNegativeTTL = 30 * time.Second
+	// dnsCacheMaxEntries bounds retained entries so a long-lived ingest server
+	// scanning huge host sets can't grow the cache without limit.
+	dnsCacheMaxEntries = 8192
+)
+
+// dnsEntry is a cached resolution with its expiry. A zero-value ip means the
+// lookup failed (negative cache).
+type dnsEntry struct {
+	ip     string
+	expiry time.Time
+}
+
+// dnsCache is a bounded, TTL'd hostname → resolution cache (LRU is internally
+// synchronized, so no extra lock is needed).
+var dnsCache = mustNewDNSCache()
+
+func mustNewDNSCache() *lru.Cache[string, dnsEntry] {
+	c, _ := lru.New[string, dnsEntry](dnsCacheMaxEntries)
+	return c
+}
 
 // dnsInflight dedupes concurrent background resolves so each unresolved
 // hostname spawns at most one in-flight lookup at a time.
@@ -36,8 +58,9 @@ var dnsInflight = struct {
 // broad subdomain scan can't fan out into thousands of simultaneous resolvers.
 var dnsResolveSem = make(chan struct{}, 16)
 
-// resolveHostnameIP returns the cached IP for a hostname if known, and otherwise
-// returns "" immediately while scheduling the DNS lookup in the background.
+// resolveHostnameIP returns the cached IP for a hostname if known and fresh, and
+// otherwise returns "" (or a stale value while refreshing) while scheduling the
+// DNS lookup in the background.
 //
 // This deliberately does NOT block on net.LookupHost: it runs on the
 // record-write/convert path (RecordWriter.Write -> FromHttpRequestResponse),
@@ -47,19 +70,19 @@ var dnsResolveSem = make(chan struct{}, 16)
 // record for that host picks up the cached value. Literal IPs are still
 // resolved synchronously (no DNS involved).
 func resolveHostnameIP(hostname string) string {
-	// Check cache first (fast path)
-	dnsCache.RLock()
-	ip, found := dnsCache.m[hostname]
-	dnsCache.RUnlock()
-	if found {
-		return ip
+	if e, ok := dnsCache.Get(hostname); ok {
+		if time.Now().Before(e.expiry) {
+			return e.ip // fresh hit (may be "" for a still-negative host)
+		}
+		// Expired: refresh off the write path, but serve the stale value meanwhile
+		// so records aren't briefly stripped of a known IP on every TTL boundary.
+		scheduleHostnameResolve(hostname)
+		return e.ip
 	}
 
-	// If the hostname is already an IP address, cache and return it directly
+	// If the hostname is already an IP address, cache and return it directly.
 	if parsed := net.ParseIP(hostname); parsed != nil {
-		dnsCache.Lock()
-		dnsCache.m[hostname] = hostname
-		dnsCache.Unlock()
+		dnsCache.Add(hostname, dnsEntry{ip: hostname, expiry: time.Now().Add(dnsPositiveTTL)})
 		return hostname
 	}
 
@@ -70,7 +93,8 @@ func resolveHostnameIP(hostname string) string {
 
 // scheduleHostnameResolve kicks off a single background DNS resolve for hostname
 // (deduped via dnsInflight, concurrency-bounded via dnsResolveSem) and caches
-// the result — including "" for failures, to avoid re-resolving dead hosts.
+// the result with a TTL — a short negative TTL for failures so dead hosts are
+// retried rather than pinned forever.
 func scheduleHostnameResolve(hostname string) {
 	dnsInflight.Lock()
 	if _, busy := dnsInflight.m[hostname]; busy {
@@ -89,10 +113,11 @@ func scheduleHostnameResolve(hostname string) {
 		if err == nil && len(addrs) > 0 {
 			resolved = addrs[0]
 		}
-
-		dnsCache.Lock()
-		dnsCache.m[hostname] = resolved
-		dnsCache.Unlock()
+		ttl := dnsPositiveTTL
+		if resolved == "" {
+			ttl = dnsNegativeTTL
+		}
+		dnsCache.Add(hostname, dnsEntry{ip: resolved, expiry: time.Now().Add(ttl)})
 
 		dnsInflight.Lock()
 		delete(dnsInflight.m, hostname)
@@ -248,6 +273,8 @@ func (f *Finding) FromResultEvent(event *output.ResultEvent) error {
 	}
 	f.ModuleType = event.ModuleType
 	f.FindingSource = event.FindingSource
+	f.RecordKind = string(event.EffectiveRecordKind())
+	f.EvidenceGrade = string(event.EvidenceGrade)
 	f.ModuleShort = event.ModuleShort
 
 	// Classification: native modules already publish a CWE in the result event's

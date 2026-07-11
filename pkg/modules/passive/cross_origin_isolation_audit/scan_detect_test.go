@@ -8,6 +8,7 @@ import (
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/output"
 )
 
 // ctxWith builds an HTML request/response pair with the given extra response
@@ -38,6 +39,7 @@ func TestFlagsAuthedResponseMissingCOOP(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, res, 1)
 	assert.Contains(t, res[0].Info.Name, "Cross-Origin Isolation")
+	assert.Equal(t, output.RecordKindObservation, res[0].RecordKind)
 }
 
 func TestNoFindingWhenIsolated(t *testing.T) {

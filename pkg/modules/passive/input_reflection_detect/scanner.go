@@ -137,6 +137,9 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 			URL:              urlx.String(),
 			Request:          string(ctx.Request().Raw()),
 			ExtractedResults: reflected,
+			RecordKind:       output.RecordKindObservation,
+			EvidenceGrade:    output.EvidenceGradeObservation,
+			DedupKey:         "input-reflection|" + urlx.Host + "|" + urlx.Path,
 			Info: output.Info{
 				Description: fmt.Sprintf("Found %d reflected parameter(s) in response", len(reflected)),
 			},

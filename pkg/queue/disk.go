@@ -34,6 +34,12 @@ type DiskQueue struct {
 	cleanupWg conc.WaitGroup
 	notify    chan struct{} // Signals Dequeue when new tasks arrive
 
+	// taskSeg maps a dequeued task's ID → the segment it lives in, so Ack goes
+	// straight to that segment instead of scanning every segment (the previous
+	// O(segments) linear search). A stale mapping (segment reaped) falls back to
+	// the linear scan.
+	taskSeg sync.Map
+
 	// Metrics
 	totalEnqueued  atomic.Int64
 	totalDequeued  atomic.Int64
@@ -421,6 +427,8 @@ func (q *DiskQueue) tryDequeue() (*ScanTask, error) {
 			continue
 		}
 		if task != nil {
+			// Remember which segment owns this task so Ack can reach it directly.
+			q.taskSeg.Store(task.ID, seg)
 			return task, nil
 		}
 	}
@@ -428,16 +436,31 @@ func (q *DiskQueue) tryDequeue() (*ScanTask, error) {
 	return nil, nil
 }
 
-// Ack marks a task as completed.
+// Ack marks a task as completed. It first tries the segment recorded for this
+// task at dequeue (O(1)); if that mapping is missing or stale, it falls back to
+// scanning every segment.
 func (q *DiskQueue) Ack(taskID string) error {
-	// Copy under the lock (see tryDequeue) to avoid racing concurrent mutations
-	// of q.segments.
+	if v, ok := q.taskSeg.Load(taskID); ok {
+		seg := v.(*Segment)
+		err := seg.AckTask(taskID)
+		q.taskSeg.Delete(taskID)
+		if err == nil {
+			q.totalCompleted.Add(1)
+			return nil
+		}
+		if !errors.Is(err, ErrTaskNotFound) {
+			return err
+		}
+		// Stale mapping (segment reaped, or task moved) — fall through to the scan.
+	}
+
+	// Fallback linear scan. Copy under the lock (see tryDequeue) to avoid racing
+	// concurrent mutations of q.segments.
 	q.mu.RLock()
 	segments := make([]*Segment, len(q.segments))
 	copy(segments, q.segments)
 	q.mu.RUnlock()
 
-	// Try to find and ack the task in any segment
 	for _, seg := range segments {
 		err := seg.AckTask(taskID)
 		if err == nil {

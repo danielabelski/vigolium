@@ -96,6 +96,58 @@ func paramShapeRepresentative(d recordURLDesc) (shapeKey, valueSig string, coale
 	return shapeKey, valueSig, true
 }
 
+// paramShapeCoalescer is the streaming form of coalesceUUIDsByParamShape: it
+// decides record-by-record, in priority order, whether a record survives
+// coalescing or is dropped as a redundant same-shape sample. State persists
+// across pages so the per-shape cap applies to the whole stream, and its memory
+// is bounded by the number of distinct shapes (not the number of records). Fed
+// the same sequence, it makes identical keep/drop decisions to the batch helper.
+type paramShapeCoalescer struct {
+	maxSamples  int
+	seenByShape map[string]map[string]struct{}
+	dropped     int
+}
+
+// newParamShapeCoalescer returns a coalescer, or nil when coalescing is disabled
+// (maxSamples <= 0); a nil coalescer keeps every record.
+func newParamShapeCoalescer(maxSamples int) *paramShapeCoalescer {
+	if maxSamples <= 0 {
+		return nil
+	}
+	return &paramShapeCoalescer{
+		maxSamples:  maxSamples,
+		seenByShape: make(map[string]map[string]struct{}),
+	}
+}
+
+// keep reports whether the record described by d should be scanned. A nil
+// coalescer, a non-coalescable request, keep every record; a coalescable one is
+// kept only until its shape's value-distinct sample cap is reached.
+func (c *paramShapeCoalescer) keep(d recordURLDesc) bool {
+	if c == nil {
+		return true
+	}
+	shapeKey, valueSig, coalescable := paramShapeRepresentative(d)
+	if !coalescable {
+		return true
+	}
+	seen := c.seenByShape[shapeKey]
+	if seen == nil {
+		seen = make(map[string]struct{})
+		c.seenByShape[shapeKey] = seen
+	}
+	if _, dup := seen[valueSig]; dup {
+		c.dropped++
+		return false
+	}
+	if len(seen) >= c.maxSamples {
+		c.dropped++
+		return false
+	}
+	seen[valueSig] = struct{}{}
+	return true
+}
+
 // coalesceUUIDsByParamShape walks uuids in their given (priority) order and
 // keeps at most maxSamples value-distinct representatives per param shape,
 // dropping identical-value duplicates and the long tail beyond the cap. Records

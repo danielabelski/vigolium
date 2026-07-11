@@ -22,9 +22,19 @@ type ServerConfig struct {
 	DisableFetchResponse bool
 	Concurrency          int // Worker concurrency for API-triggered scans
 	ReadTimeout          time.Duration
-	WriteTimeout         time.Duration
-	IdleTimeout          time.Duration
-	ShutdownTimeout      time.Duration
+	// WriteTimeout bounds how long the whole response may take to write. It must
+	// be 0 (unlimited) for the SSE agent/audit streams this server hosts — a
+	// finite cap severs a stream that outlives it. Non-streaming write protection
+	// is provided by IdleTimeout and handler-level deadlines instead. 0 = default
+	// (unlimited).
+	WriteTimeout    time.Duration
+	IdleTimeout     time.Duration
+	ShutdownTimeout time.Duration
+	// MaxUploadBytes is the framework-level request body ceiling (Fiber BodyLimit).
+	// It must exceed the ordinary DefaultBodyLimitMiddleware cap so the large-upload
+	// routes (/api/import, /api/storage/upload-source) aren't rejected by the
+	// framework before the route exemption runs. 0 = default (512 MiB).
+	MaxUploadBytes int
 	CORSAllowedOrigins   string
 	UserStore            *UserStore    // File-based user store (nil = legacy auth only)
 	ScanQueueCapacity    int           // 0 = reject with 409 when busy (default), >0 = per-project queue depth
@@ -59,13 +69,22 @@ type ServerConfig struct {
 }
 
 // DefaultServerConfig returns sensible defaults.
+// defaultMaxUploadBytes is the framework-level request body ceiling applied when
+// ServerConfig.MaxUploadBytes is unset. It must stay well above the 4 MB
+// DefaultBodyLimitMiddleware cap so large-upload routes work; non-upload routes
+// remain capped at 4 MB by that middleware.
+const defaultMaxUploadBytes = 512 << 20 // 512 MiB
+
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
-		ServiceAddr:        ":9002",
-		ReadTimeout:        10 * time.Second,
-		WriteTimeout:       60 * time.Second,
+		ServiceAddr: ":9002",
+		ReadTimeout: 10 * time.Second,
+		// WriteTimeout stays 0 (unlimited) so SSE agent/audit streams aren't
+		// severed mid-flight; see the ServerConfig.WriteTimeout doc.
+		WriteTimeout:       0,
 		IdleTimeout:        120 * time.Second,
 		ShutdownTimeout:    30 * time.Second,
+		MaxUploadBytes:     defaultMaxUploadBytes,
 		CORSAllowedOrigins: "",
 	}
 }

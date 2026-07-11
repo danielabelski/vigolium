@@ -57,7 +57,7 @@ func New() *Module {
 			ModuleConfirmation,
 			ModuleSeverity,
 			ModuleConfidence,
-			modkit.ScanScopeHost,
+			modkit.ScanScopeRequest,
 			modkit.PassiveScanScopeResponse,
 		),
 		ds: dedup.LazyDiskSet("passive_clickjacking_detect"),
@@ -66,9 +66,9 @@ func New() *Module {
 	return m
 }
 
-// ScanPerHost evaluates a response once per host for an exploitable clickjacking
-// exposure: framable headers plus sensitive/interactive content.
-func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {
+// ScanPerRequest evaluates each sensitive route because framing policy and page
+// impact commonly differ within one host.
+func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {
 	service := ctx.Service()
 	if service == nil {
 		return nil, nil
@@ -127,16 +127,19 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 			" so the cross-site frame loads unauthenticated (downgraded)"
 	}
 
-	// Dedup per host (test-and-set).
-	if diskSet := m.ds.Get(scanCtx.DedupMgr()); diskSet != nil && diskSet.IsSeen(service.Host()) {
-		return nil, nil
-	}
-
 	urlx, err := ctx.URL()
 	if err != nil {
 		return nil, nil
 	}
 	target := urlx.String()
+
+	// Dedup by route and identity, not host, after the page has passed all
+	// impact gates. An authenticated view may be materially different from the
+	// public page at the same route.
+	semanticKey := service.Host() + "|" + urlx.Path + "|" + ctx.Request().IdentityFingerprint()
+	if diskSet := m.ds.Get(scanCtx.DedupMgr()); diskSet != nil && diskSet.IsSeen(semanticKey) {
+		return nil, nil
+	}
 
 	desc := fmt.Sprintf(
 		"The page is framable in a cross-origin iframe (%s) and carries %s%s. "+
@@ -160,6 +163,9 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 				"Framing: " + headerReason,
 				"Content: " + contentReason,
 			},
+			RecordKind:    output.RecordKindFinding,
+			EvidenceGrade: output.EvidenceGradeDifferential,
+			DedupKey:      "clickjacking|" + semanticKey,
 			Info: output.Info{
 				Name:        "Clickjacking: framable page with " + contentSummary(content),
 				Description: desc,
@@ -178,6 +184,10 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 			},
 		},
 	}, nil
+}
+
+func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {
+	return m.ScanPerRequest(ctx, scanCtx)
 }
 
 // framingVerdict reports whether resp can be framed cross-origin, applying

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/vigolium/vigolium/pkg/database"
 	"go.uber.org/zap"
 )
@@ -43,11 +44,23 @@ type Mirror struct {
 
 	// The fields below are touched only by the single run goroutine (after
 	// resume(), which runs before it starts) — no lock needed.
-	trafficSeq   map[string]int
-	findingSeq   map[string]int
-	uuidToPath   map[string]string // record uuid → "host/id", for finding links
+	trafficSeq map[string]int
+	findingSeq map[string]int
+	// uuidToPath maps a record uuid → "host/id" so a later finding can cross-link
+	// its traffic. Bounded (LRU) so a long-lived --mirror-fs server can't grow it
+	// for every record ever mirrored; a finding referencing an evicted record just
+	// renders without that link (graceful fallback in writeFinding).
+	uuidToPath   *lru.Cache[string, string]
 	trafficIndex *os.File
 	findingIndex *os.File
+}
+
+// mirrorLinkCacheSize bounds the record-uuid → path link cache.
+const mirrorLinkCacheSize = 100000
+
+func newMirrorLinkCache() *lru.Cache[string, string] {
+	c, _ := lru.New[string, string](mirrorLinkCacheSize)
+	return c
 }
 
 type mirrorJob struct {
@@ -67,7 +80,7 @@ func NewMirror(dir string, omitResponse bool) (*Mirror, error) {
 		jobs:         make(chan mirrorJob, mirrorBufferSize),
 		trafficSeq:   map[string]int{},
 		findingSeq:   map[string]int{},
-		uuidToPath:   map[string]string{},
+		uuidToPath:   newMirrorLinkCache(),
 	}
 	if err := os.MkdirAll(m.trafficRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("create mirror dir %s: %w", m.trafficRoot, err)
@@ -167,7 +180,7 @@ func (m *Mirror) writeRecord(rec *database.HTTPRecord) {
 	}
 
 	relPath := host + "/" + id
-	m.uuidToPath[rec.UUID] = relPath
+	m.uuidToPath.Add(rec.UUID, relPath)
 	m.appendIndex(&m.trafficIndex, filepath.Join(m.trafficRoot, "index.jsonl"), TrafficEntry{
 		ID:          id,
 		Host:        rec.Hostname,
@@ -193,7 +206,7 @@ func (m *Mirror) writeFinding(f *database.Finding) {
 	var linked []LinkedRecord
 	var linkedPaths []string
 	for _, u := range f.HTTPRecordUUIDs {
-		if p, ok := m.uuidToPath[u]; ok {
+		if p, ok := m.uuidToPath.Get(u); ok {
 			linked = append(linked, ReadLinkedRecord(m.trafficRoot, p, m.omitResponse))
 			linkedPaths = append(linkedPaths, p)
 		}

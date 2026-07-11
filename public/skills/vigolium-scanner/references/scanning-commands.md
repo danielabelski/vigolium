@@ -98,12 +98,9 @@ Stateless mode is great for ephemeral CI/CD runs — it creates a temp SQLite fi
 | `--known-issue-scan-severities` | []string | — | Filter Nuclei templates by severity (critical,high,medium,low,info) |
 | `--known-issue-scan-templates-dir` | string | — | Custom Nuclei templates directory |
 
-### SAST flags (scan & run)
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--rule` | string | — | Filter SAST rules by fuzzy name match |
-| `--sast-adhoc` | string | — | Ad-hoc SAST scan: local path or git URL (auto-detected, results not saved to database) |
+> **Source-aware / SAST scanning is an agent feature**, not a native `scan`/`run` phase.
+> Use `vigolium agent audit --source <path-or-git-url>` (security code audit) or
+> `vigolium agent query --source <path> -t code-review`. See `references/agent-commands.md`.
 
 ### Examples
 
@@ -152,11 +149,11 @@ vigolium scan -t https://example.com --proxy http://127.0.0.1:8080
 # Speed tuning
 vigolium scan -t https://example.com -c 100 --rate-limit 200
 
-# Whitebox scanning
-vigolium scan -t https://example.com --source ./src --strategy whitebox
+# Source-aware / whitebox scanning is an agent feature (see agent-commands.md)
+vigolium agent autopilot -t https://example.com --source ./src
 
-# Whitebox via git clone
-vigolium scan -t https://example.com --source https://github.com/org/repo --strategy whitebox
+# Source-aware via git clone (--source accepts a git URL)
+vigolium agent swarm -t https://example.com --source https://github.com/org/repo
 
 # OpenAPI scan
 vigolium scan -I openapi -i openapi.yaml -t https://api.example.com
@@ -219,7 +216,6 @@ Scan a single URL for vulnerabilities. Designed for quick, targeted scans and AI
 | `--body` | string | — | Request body |
 | `--known-issue-scan` | bool | `false` | Run known issue scan (Nuclei/Kingfisher) |
 | `--no-passive` | bool | `false` | Skip passive modules |
-| `--no-insertion-points` | bool | `false` | Skip insertion point testing |
 
 ### Examples
 
@@ -275,7 +271,6 @@ Read a raw HTTP request from file or stdin and run scanner modules against it. D
 | `--target` | — | string | — | Override target URL (scheme://host) |
 | `--known-issue-scan` | — | bool | `false` | Run known issue scan |
 | `--no-passive` | — | bool | `false` | Skip passive modules |
-| `--no-insertion-points` | — | bool | `false` | Skip insertion point testing |
 
 ### Examples
 
@@ -312,11 +307,10 @@ Run a single scan phase directly. Equivalent to `vigolium scan --only <phase>`.
 | `external-harvest` | — |
 | `known-issue-scan` | — |
 | `spidering` | `spitolas` |
-| `sast` | — |
 | `dynamic-assessment` | `audit`, `dast`, `assessment` |
 | `extension` | `ext` |
 
-The `run` command accepts the same flag groups as `scan`: Spidering, Discovery, Harvest, KnownIssueScan, SAST, Input Format, Request, Output, and Other (--oast-url, --pilot).
+The `run` command accepts the same flag groups as `scan`: Spidering, Discovery, Harvest, KnownIssueScan, Input Format, Request, Output, and Other (--oast-url, --pilot).
 
 ### Examples
 
@@ -328,8 +322,6 @@ vigolium run audit -t https://example.com --module-tag spring
 vigolium run external-harvest -t https://example.com
 vigolium run known-issue-scan -t https://example.com
 vigolium run known-issue-scan -t https://example.com --known-issue-scan-tags cve --known-issue-scan-severities critical,high
-vigolium run sast --sast-adhoc /path/to/app
-vigolium run sast --sast-adhoc /path/to/app --rule gin
 vigolium run extension -t https://example.com --ext custom-check.js
 vigolium run ext -t https://example.com --ext ./my-scanner.js
 vigolium run deparos -t https://example.com
@@ -382,7 +374,7 @@ Speed settings have a layered precedence:
 
 The following phases can be used with `--only` and `--skip`:
 
-`ingestion`, `discovery`, `external-harvest`, `known-issue-scan`, `spidering`, `sast`, `audit`, `extension`
+`ingestion`, `discovery`, `external-harvest`, `known-issue-scan`, `spidering`, `dynamic-assessment` (aliases `audit`, `dast`, `assessment`), `extension`
 
 ### HTML Format Constraints
 
@@ -402,7 +394,9 @@ The following phases can be used with `--only` and `--skip`:
 - `--soft-fail` (global) forces exit 0 even when the gate (or any other error) trips
 - Under `-P` / `--split-by-host` the gate is evaluated per child; the parent batch exits non-zero only when every target fails
 
-### SAST Constraints
+### Source-Aware / SAST
 
-- `--sast-adhoc` accepts either a local path or a git URL (auto-detected)
-- Git URLs are cloned to a temp directory automatically
+Static analysis and source-aware scanning are **agent** features, not native `scan`/`run`
+phases. Use `vigolium agent audit --source <path-or-git-url>` (security code audit) or
+`vigolium agent query --source <path> -t code-review`. `--source` accepts a local
+directory, a git URL (cloned automatically), a `.zip`/`.tar.gz`, or a `gs://` archive.

@@ -207,6 +207,12 @@ func (r *Runner) runDiscoveryPhase(ctx context.Context, infra *phaseInfra) error
 		ScopeMatcher:  infra.scopeMatcher,
 		PauseCtrl:     r.pauseCtrl,
 		OnTraffic:     r.makeOnTraffic("discovery"),
+		// Deparos already captured a response for each crawled URL and emits it on
+		// the work item (deparos_discovery.go saveAndEmit); reuse it instead of
+		// issuing a second identical request per URL. Request-only items (spec-
+		// endpoint stubs, which carry no response) still fall through to a single
+		// baseline fetch in fetchBaselineResponse, so routes aren't left empty.
+		SkipBaseline: true,
 		OnResult: func(result *output.ResultEvent) {
 			if err := r.output.Write(result); err != nil {
 				zap.L().Error("Failed to write result", zap.Error(err))

@@ -44,9 +44,27 @@ func (e *Executor) runPassivePerRequestFiltered(ctx context.Context, item *httpm
 
 	if e.cfg.ParallelPassive {
 		var g conc.WaitGroup
+		// sem bounds live passive goroutines across all record workers. nil (an
+		// executor built without NewExecutor, e.g. in a unit test) falls back to the
+		// old unbounded fan-out.
+		sem := e.pool.passiveTaskSem
 		for _, module := range eligible {
 			mod := module
+			// Acquire a global passive slot BEFORE spawning so the number of live
+			// passive goroutines is bounded (not workers × modules). A cancelled
+			// scan stops submitting.
+			if sem != nil {
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					g.Wait()
+					return
+				}
+			}
 			g.Go(func() {
+				if sem != nil {
+					defer func() { <-sem }()
+				}
 				results := e.runPassiveWithTimeout(
 					ctx,
 					func(runCtx context.Context) ([]*output.ResultEvent, error) {

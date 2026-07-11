@@ -102,6 +102,90 @@ func (h *Handlers) saveRecord(ctx context.Context, rr *httpmsg.HttpRequestRespon
 	return h.repo.SaveRecord(ctx, rr, source, projectUUID)
 }
 
+// ingestBatchChunk bounds how many records a bulk importer accumulates before a
+// batched flush, so memory stays bounded while a single producer still fills real
+// writer batches instead of paying one flush interval per record.
+const ingestBatchChunk = 256
+
+// saveRecordBatch persists a slice of records in one batched operation. Unlike a
+// Write-in-a-loop (each Write blocks until its own record is flushed, so a lone
+// bulk importer never fills a batch), the RecordWriter's SaveRecordBatch enqueues
+// everything before awaiting, so the records coalesce into real transactions.
+// Returns the number persisted (new + deduplicated) and any errors encountered.
+func (h *Handlers) saveRecordBatch(ctx context.Context, records []*httpmsg.HttpRequestResponse, source, projectUUID string) (int, []string) {
+	if len(records) == 0 {
+		return 0, nil
+	}
+	var uuids []string
+	var err error
+	if h.recordWriter != nil {
+		uuids, err = h.recordWriter.SaveRecordBatch(ctx, records, source, projectUUID)
+	} else {
+		uuids, err = h.repo.SaveRecordBatch(ctx, records, source, projectUUID)
+	}
+	saved := 0
+	for _, u := range uuids {
+		if u != "" {
+			saved++
+		}
+	}
+	var errs []string
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	return saved, errs
+}
+
+// ingestAccumulator batches in-scope records from a bulk importer's parser
+// callback, flushing in bounded chunks so memory stays bounded while records
+// still coalesce into real writer batches (instead of one blocking flush per
+// record). Not safe for concurrent use — parser callbacks run sequentially.
+type ingestAccumulator struct {
+	h           *Handlers
+	ctx         context.Context
+	source      string
+	projectUUID string
+	batch       []*httpmsg.HttpRequestResponse
+	imported    int
+	errors      []string
+}
+
+func (h *Handlers) newIngestAccumulator(ctx context.Context, source, projectUUID string) *ingestAccumulator {
+	return &ingestAccumulator{
+		h:           h,
+		ctx:         ctx,
+		source:      source,
+		projectUUID: projectUUID,
+		batch:       make([]*httpmsg.HttpRequestResponse, 0, ingestBatchChunk),
+	}
+}
+
+// add queues a record, flushing automatically when a chunk fills.
+func (a *ingestAccumulator) add(rr *httpmsg.HttpRequestResponse) {
+	a.batch = append(a.batch, rr)
+	if len(a.batch) >= ingestBatchChunk {
+		a.flush()
+	}
+}
+
+// flush persists the currently-queued records.
+func (a *ingestAccumulator) flush() {
+	if len(a.batch) == 0 {
+		return
+	}
+	n, errs := a.h.saveRecordBatch(a.ctx, a.batch, a.source, a.projectUUID)
+	a.imported += n
+	a.errors = append(a.errors, errs...)
+	a.batch = a.batch[:0]
+}
+
+// finish drains the final partial chunk and returns the totals. Callers use this
+// once parsing completes instead of calling flush + reading the fields directly.
+func (a *ingestAccumulator) finish() (imported int, errs []string) {
+	a.flush()
+	return a.imported, a.errors
+}
+
 // HandleIngestHTTP handles POST /api/ingest-http
 func (h *Handlers) HandleIngestHTTP(c fiber.Ctx) error {
 	if h.repo == nil {
@@ -298,8 +382,8 @@ func (h *Handlers) ingestOpenAPI(c fiber.Ctx, ctx context.Context, req *IngestHT
 	data := []byte(content)
 	ext := openapi.DetectFormatFromContent(data)
 
-	var imported, skipped int
-	var errors []string
+	var skipped int
+	acc := h.newIngestAccumulator(ctx, "ingest-server", getProjectUUID(c))
 
 	var urlOverrideSvc *httpmsg.Service
 	if req.URL != "" {
@@ -321,11 +405,7 @@ func (h *Handlers) ingestOpenAPI(c fiber.Ctx, ctx context.Context, req *IngestHT
 			skipped++
 			return true
 		}
-		if _, err := h.saveRecord(ctx, rr, "ingest-server", getProjectUUID(c)); err != nil {
-			errors = append(errors, err.Error())
-			return true // continue despite error
-		}
-		imported++
+		acc.add(rr)
 		return true
 	})
 
@@ -335,6 +415,7 @@ func (h *Handlers) ingestOpenAPI(c fiber.Ctx, ctx context.Context, req *IngestHT
 			Code:  fiber.StatusBadRequest,
 		})
 	}
+	imported, errors := acc.finish()
 
 	msg := fmt.Sprintf("imported %d requests from OpenAPI spec", imported)
 	if skipped > 0 {
@@ -360,8 +441,8 @@ func (h *Handlers) ingestPostman(c fiber.Ctx, ctx context.Context, req *IngestHT
 	}
 
 	parser := postman.New()
-	var imported, skipped int
-	var errors []string
+	var skipped int
+	acc := h.newIngestAccumulator(ctx, "ingest-server", getProjectUUID(c))
 
 	var urlOverrideSvc *httpmsg.Service
 	if req.URL != "" {
@@ -379,11 +460,7 @@ func (h *Handlers) ingestPostman(c fiber.Ctx, ctx context.Context, req *IngestHT
 			skipped++
 			return true
 		}
-		if _, err := h.saveRecord(ctx, rr, "ingest-server", getProjectUUID(c)); err != nil {
-			errors = append(errors, err.Error())
-			return true
-		}
-		imported++
+		acc.add(rr)
 		return true
 	})
 
@@ -393,6 +470,7 @@ func (h *Handlers) ingestPostman(c fiber.Ctx, ctx context.Context, req *IngestHT
 			Code:  fiber.StatusBadRequest,
 		})
 	}
+	imported, errors := acc.finish()
 
 	msg := fmt.Sprintf("imported %d requests from Postman collection", imported)
 	if skipped > 0 {
@@ -466,8 +544,8 @@ func (h *Handlers) ingestHAR(c fiber.Ctx, ctx context.Context, req *IngestHTTPRe
 	}
 
 	parser := har.New()
-	var imported, skipped int
-	var errors []string
+	var skipped int
+	acc := h.newIngestAccumulator(ctx, "ingest-server", getProjectUUID(c))
 
 	var urlOverrideSvc *httpmsg.Service
 	if req.URL != "" {
@@ -476,6 +554,9 @@ func (h *Handlers) ingestHAR(c fiber.Ctx, ctx context.Context, req *IngestHTTPRe
 		}
 	}
 
+	// Accumulate in-scope records and persist them in bounded batches, so a large
+	// HAR imports in a handful of transactions instead of one blocking flush per
+	// record.
 	parseErr := parser.ParseFromData([]byte(content), func(rr *httpmsg.HttpRequestResponse) bool {
 		if urlOverrideSvc != nil {
 			rr = rr.WithService(urlOverrideSvc)
@@ -485,11 +566,7 @@ func (h *Handlers) ingestHAR(c fiber.Ctx, ctx context.Context, req *IngestHTTPRe
 			skipped++
 			return true
 		}
-		if _, err := h.saveRecord(ctx, rr, "ingest-server", getProjectUUID(c)); err != nil {
-			errors = append(errors, err.Error())
-			return true
-		}
-		imported++
+		acc.add(rr)
 		return true
 	})
 
@@ -499,6 +576,7 @@ func (h *Handlers) ingestHAR(c fiber.Ctx, ctx context.Context, req *IngestHTTPRe
 			Code:  fiber.StatusBadRequest,
 		})
 	}
+	imported, errors := acc.finish()
 
 	msg := fmt.Sprintf("imported %d requests from HAR file", imported)
 	if skipped > 0 {
@@ -523,8 +601,9 @@ func (h *Handlers) ingestURLFile(c fiber.Ctx, ctx context.Context, req *IngestHT
 		})
 	}
 
-	var imported, skipped int
-	var errors []string
+	var skipped int
+	var parseErrors []string // per-line parse errors keep their line context
+	acc := h.newIngestAccumulator(ctx, "ingest-server", getProjectUUID(c))
 
 	var urlOverrideSvc *httpmsg.Service
 	if req.URL != "" {
@@ -542,7 +621,7 @@ func (h *Handlers) ingestURLFile(c fiber.Ctx, ctx context.Context, req *IngestHT
 
 		rr, err := httpmsg.GetRawRequestFromURL(line)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %s", line, err.Error()))
+			parseErrors = append(parseErrors, fmt.Sprintf("%s: %s", line, err.Error()))
 			continue
 		}
 
@@ -557,12 +636,10 @@ func (h *Handlers) ingestURLFile(c fiber.Ctx, ctx context.Context, req *IngestHT
 			continue
 		}
 
-		if _, err := h.saveRecord(ctx, rr, "ingest-server", getProjectUUID(c)); err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %s", line, err.Error()))
-			continue
-		}
-		imported++
+		acc.add(rr)
 	}
+	imported, accErrs := acc.finish()
+	errors := append(parseErrors, accErrs...)
 
 	msg := fmt.Sprintf("imported %d requests from URL list", imported)
 	if skipped > 0 {

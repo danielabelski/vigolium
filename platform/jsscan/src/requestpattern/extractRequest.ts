@@ -9,6 +9,29 @@ import {
 } from "../mapping";
 import type { ExtractedRequest, TrackedVariableMap } from "./types";
 import { isURLLike } from "./utils";
+import { getEngineState } from "../context/engine-state";
+
+function reportResolutionLimit(code: string, message: string): void {
+  const state = getEngineState();
+  if (state.limitHits.has(code)) return;
+  state.limitHits.add(code);
+  state.reportLimit?.(code, message);
+}
+
+function boundedAlternatives(values: string[], combination = false): string[] {
+  const state = getEngineState();
+  const limit = combination
+    ? state.limits.maxTemplateCombinations
+    : state.limits.maxAlternativesPerValue;
+  const unique = [...new Set(values)];
+  if (unique.length <= limit) return unique;
+  reportResolutionLimit(
+    combination ? 'template_combination_limit_reached' : 'alternative_limit_reached',
+    `${unique.length} value alternatives were truncated to ${limit}`,
+  );
+  if (limit <= 1) return ['${X}'];
+  return [...unique.slice(0, limit - 1), '${X}'];
+}
 
 /**
  * Wrap a complex expression as a ${...} placeholder.
@@ -131,7 +154,7 @@ function extractUrlsFromConditional(
   }
 
   // Deduplicate
-  return [...new Set(urls)];
+  return boundedAlternatives(urls);
 }
 
 /**
@@ -181,6 +204,8 @@ export interface ResolutionContext {
   callSiteIndex?: number;
   /** Index of parent function's call site (for nested resolution) */
   parentCallSiteIndex?: number;
+  scopeId?: number;
+  scopeIds?: number[];
 }
 
 /**
@@ -319,14 +344,18 @@ export function getEffectiveIterationsForFunction(
 export function createResolutionContext(
   currentFunction: string | undefined,
   iteration: EffectiveIteration,
+  path?: NodePath,
 ): ResolutionContext | undefined {
+  const scopeIds: number[] = [];
+  for (let scope = path?.scope; scope; scope = scope.parent) scopeIds.push(scope.uid);
   if (!currentFunction || !hasFunction(currentFunction)) {
-    return undefined;
+    return path ? { scopeId: path.scope.uid, scopeIds } : undefined;
   }
   return {
     currentFunction,
     callSiteIndex: iteration.callSiteIndex,
     parentCallSiteIndex: iteration.parentCallSiteIndex,
+    ...(path ? { scopeId: path.scope.uid, scopeIds } : {}),
   };
 }
 
@@ -402,9 +431,12 @@ export function resolveValue(
     const varName = node.name;
 
     // First: check tracked variables (now returns array)
-    const trackedValues = trackedVars[varName];
+    const qualifiedValues = context?.scopeIds
+      ?.map((scopeId) => trackedVars[`scope:${scopeId}:${varName}`])
+      .find((values) => values?.length);
+    const trackedValues = qualifiedValues ?? trackedVars[varName];
     if (trackedValues && trackedValues.length > 0) {
-      return trackedValues;
+      return boundedAlternatives(trackedValues);
     }
 
     // Second: check function map if we have context
@@ -435,7 +467,10 @@ export function resolveValue(
     const fullPath = buildMemberExpressionPath(node);
 
     // Try full path first (for webpack imports like a.O.accountLogin)
-    const fullPathValues = fullPath ? trackedVars[fullPath] : undefined;
+    const qualifiedFullPathValues = fullPath && context?.scopeIds
+      ? context.scopeIds.map((scopeId) => trackedVars[`scope:${scopeId}:${fullPath}`]).find((values) => values?.length)
+      : undefined;
+    const fullPathValues = qualifiedFullPathValues ?? (fullPath ? trackedVars[fullPath] : undefined);
     if (fullPathValues && fullPathValues.length > 0) {
       return fullPathValues;
     }
@@ -446,7 +481,10 @@ export function resolveValue(
         ? node.property.value
         : "";
 
-    const propValues = propertyName ? trackedVars[propertyName] : undefined;
+    const qualifiedPropValues = propertyName && context?.scopeIds
+      ? context.scopeIds.map((scopeId) => trackedVars[`scope:${scopeId}:${propertyName}`]).find((values) => values?.length)
+      : undefined;
+    const propValues = qualifiedPropValues ?? (propertyName ? trackedVars[propertyName] : undefined);
     if (propValues && propValues.length > 0) {
       return propValues;
     }
@@ -487,12 +525,15 @@ export function resolveValue(
 
     // Cartesian product of all combinations
     const combinations: string[] = [];
+    const maxCombinations = getEngineState().limits.maxTemplateCombinations + 1;
     for (const l of leftValues) {
       for (const r of rightValues) {
         combinations.push(l + r);
+        if (combinations.length >= maxCombinations) break;
       }
+      if (combinations.length >= maxCombinations) break;
     }
-    return combinations;
+    return boundedAlternatives(combinations, true);
   }
 
   // Case 7: Conditional expression (ternary)
@@ -568,7 +609,7 @@ export function resolveValue(
     if (argumentValues.some(v => v.includes("${"))) {
       return [wrapExpressionAsPlaceholder()];
     }
-    return argumentValues.map(arg => `${node.operator}${arg}`);
+    return boundedAlternatives(argumentValues.map(arg => `${node.operator}${arg}`));
   }
 
   return ["${unknown}"];
@@ -607,12 +648,15 @@ function buildTemplateStrings(
 
     // Expand combinations: each result × each resolved value
     const newResults: string[] = [];
+    const maxCombinations = getEngineState().limits.maxTemplateCombinations + 1;
     for (const result of results) {
       for (const resolved of resolvedValues) {
         newResults.push(result + resolved + nextQuasi);
+        if (newResults.length >= maxCombinations) break;
       }
+      if (newResults.length >= maxCombinations) break;
     }
-    results = newResults;
+    results = boundedAlternatives(newResults, true);
   }
 
   return results;
@@ -954,7 +998,7 @@ function resolveCallExpression(
     // Try scope resolution first
     const resolved = path ? resolveFromScope(arg, path) : arg;
     if (resolved && t.isObjectExpression(resolved)) {
-      return JSON.parse(objectToJSON(resolved, trackedVars, path));
+      return JSON.parse(objectToJSON(resolved, trackedVars, path, context));
     }
 
     // Try function map resolution for identifiers (function parameters)
@@ -980,7 +1024,7 @@ function resolveCallExpression(
     // Try scope resolution first
     const resolved = path ? resolveFromScope(arg, path) : arg;
     if (resolved && t.isObjectExpression(resolved)) {
-      return JSON.parse(objectToJSON(resolved, trackedVars, path));
+      return JSON.parse(objectToJSON(resolved, trackedVars, path, context));
     }
 
     // Try function map resolution for identifiers (function parameters)
@@ -1013,12 +1057,13 @@ export function objectToJSON(
   node: t.Node | null | undefined,
   trackedVars: TrackedVariableMap,
   path?: NodePath | null,
+  context?: ResolutionContext,
 ): string {
   // If node is Identifier, resolve from scope first
   const resolved = path ? resolveFromScope(node, path) : node;
 
   if (!resolved || !t.isObjectExpression(resolved)) {
-    return resolveValueSingle(resolved ?? node, trackedVars);
+    return resolveValueSingle(resolved ?? node, trackedVars, context);
   }
 
   const obj: Record<string, unknown> = {};
@@ -1036,26 +1081,26 @@ export function objectToJSON(
 
     // Recursively resolve nested objects
     if (t.isObjectExpression(prop.value)) {
-      obj[keyName] = JSON.parse(objectToJSON(prop.value, trackedVars, path));
+      obj[keyName] = JSON.parse(objectToJSON(prop.value, trackedVars, path, context));
     }
     // Resolve identifiers from scope
     else if (t.isIdentifier(prop.value)) {
       const resolvedValue = path ? resolveFromScope(prop.value, path) : null;
       if (resolvedValue && t.isObjectExpression(resolvedValue)) {
         obj[keyName] = JSON.parse(
-          objectToJSON(resolvedValue, trackedVars, path),
+          objectToJSON(resolvedValue, trackedVars, path, context),
         );
       } else {
-        obj[keyName] = resolveValueSingle(prop.value, trackedVars);
+        obj[keyName] = resolveValueSingle(prop.value, trackedVars, context);
       }
     }
     // Handle call expressions specially
     else if (t.isCallExpression(prop.value)) {
-      obj[keyName] = resolveCallExpression(prop.value, trackedVars, path);
+      obj[keyName] = resolveCallExpression(prop.value, trackedVars, path, context);
     }
     // Handle arrays
     else if (t.isArrayExpression(prop.value)) {
-      obj[keyName] = arrayToValues(prop.value, trackedVars, path);
+      obj[keyName] = arrayToValues(prop.value, trackedVars, path, context);
     }
     // Primitives
     else if (t.isNumericLiteral(prop.value)) {
@@ -1073,7 +1118,7 @@ export function objectToJSON(
     ) {
       obj[keyName] = prop.value.argument.value === 0;
     } else {
-      obj[keyName] = resolveValueSingle(prop.value, trackedVars);
+      obj[keyName] = resolveValueSingle(prop.value, trackedVars, context);
     }
   }
 
@@ -1088,15 +1133,16 @@ function arrayToValues(
   node: t.ArrayExpression,
   trackedVars: TrackedVariableMap,
   path?: NodePath | null,
+  context?: ResolutionContext,
 ): unknown[] {
   return node.elements.map((elem) => {
     if (!elem) return null;
     if (t.isSpreadElement(elem))
-      return `\${...${resolveValueSingle(elem.argument, trackedVars)}}`;
+      return `\${...${resolveValueSingle(elem.argument, trackedVars, context)}}`;
     if (t.isObjectExpression(elem))
-      return JSON.parse(objectToJSON(elem, trackedVars, path));
+      return JSON.parse(objectToJSON(elem, trackedVars, path, context));
     if (t.isArrayExpression(elem))
-      return arrayToValues(elem, trackedVars, path);
+      return arrayToValues(elem, trackedVars, path, context);
     if (t.isNumericLiteral(elem)) return elem.value;
     if (t.isBooleanLiteral(elem)) return elem.value;
     if (t.isNullLiteral(elem)) return null;
@@ -1112,13 +1158,13 @@ function arrayToValues(
     if (t.isIdentifier(elem)) {
       const resolved = path ? resolveFromScope(elem, path) : null;
       if (resolved && t.isObjectExpression(resolved)) {
-        return JSON.parse(objectToJSON(resolved, trackedVars, path));
+        return JSON.parse(objectToJSON(resolved, trackedVars, path, context));
       }
     }
     if (t.isCallExpression(elem)) {
-      return resolveCallExpression(elem, trackedVars, path);
+      return resolveCallExpression(elem, trackedVars, path, context);
     }
-    return resolveValueSingle(elem, trackedVars);
+    return resolveValueSingle(elem, trackedVars, context);
   });
 }
 
@@ -1189,13 +1235,13 @@ export function objectToKeyValueWithNestedJSON(
     let value: string;
     // For nested objects, use JSON format
     if (t.isObjectExpression(prop.value)) {
-      value = objectToJSON(prop.value, trackedVars, path);
+      value = objectToJSON(prop.value, trackedVars, path, context);
     }
     // For identifiers that resolve to objects, also use JSON
     else if (t.isIdentifier(prop.value)) {
       const resolvedValue = path ? resolveFromScope(prop.value, path) : null;
       if (resolvedValue && t.isObjectExpression(resolvedValue)) {
-        value = objectToJSON(resolvedValue, trackedVars, path);
+        value = objectToJSON(resolvedValue, trackedVars, path, context);
       } else {
         value = resolveValueSingle(prop.value, trackedVars, context);
       }
@@ -1228,7 +1274,7 @@ export function extractBody(
 
   // Check if it's an ObjectExpression
   if (t.isObjectExpression(resolved)) {
-    return objectToJSON(resolved, trackedVars, path);
+    return objectToJSON(resolved, trackedVars, path, context);
   }
 
   // Handle Identifier that couldn't be resolved from scope - try function map
@@ -1266,7 +1312,7 @@ export function extractBody(
       // Try scope resolution first
       const argResolved = path ? resolveFromScope(arg, path) : arg;
       if (argResolved && t.isObjectExpression(argResolved)) {
-        return objectToJSON(argResolved, trackedVars, path);
+        return objectToJSON(argResolved, trackedVars, path, context);
       }
 
       // Try function map resolution for identifiers (function parameters)
@@ -1323,7 +1369,7 @@ export function extractBody(
         // Try scope resolution first
         const argResolved = path ? resolveFromScope(arg, path) : arg;
         if (argResolved && t.isObjectExpression(argResolved)) {
-          return objectToJSON(argResolved, trackedVars, path);
+          return objectToJSON(argResolved, trackedVars, path, context);
         }
 
         // Try function map resolution for identifiers (function parameters)

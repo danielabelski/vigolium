@@ -95,6 +95,13 @@ func TestHandleListFindings_SuccessAndFilters(t *testing.T) {
 	db, repo := newPinnedTestDB(t)
 	insertFindingReturning(t, db, database.DefaultProjectUUID)
 	insertFindingReturning(t, db, database.DefaultProjectUUID)
+	candidateID := insertFindingReturning(t, db, database.DefaultProjectUUID)
+	if _, err := db.NewUpdate().Model((*database.Finding)(nil)).
+		Set("record_kind = ?", database.RecordKindCandidate).
+		Where("id = ?", candidateID).
+		Exec(t.Context()); err != nil {
+		t.Fatalf("mark candidate: %v", err)
+	}
 
 	h := newBasicHandlers(t, ServerConfig{}, &fakeQueue{}, db, repo, nil)
 	app := fiber.New()
@@ -114,6 +121,27 @@ func TestHandleListFindings_SuccessAndFilters(t *testing.T) {
 		}
 		if resp.ProjectUUID != database.DefaultProjectUUID {
 			t.Errorf("project = %q", resp.ProjectUUID)
+		}
+	})
+
+	t.Run("candidate requires explicit record kind", func(t *testing.T) {
+		status, body := doGet(t, app, "/api/findings?record_kind=candidate", nil)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body %s", status, body)
+		}
+		var resp PaginatedResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if resp.Total != 1 {
+			t.Errorf("candidate total = %d, want 1", resp.Total)
+		}
+	})
+
+	t.Run("invalid record kind rejected", func(t *testing.T) {
+		status, _ := doGet(t, app, "/api/findings?record_kind=nope", nil)
+		if status != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", status)
 		}
 	})
 

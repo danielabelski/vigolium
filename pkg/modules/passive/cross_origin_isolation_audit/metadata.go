@@ -15,7 +15,7 @@ var (
 
 **Fix:** Send Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Resource-Policy: same-origin (add COEP where feasible) on authenticated responses.`
 
-	ModuleConfirmation = "Reported when a response that sets a session cookie or answers an authorized request lacks COOP and/or CORP headers"
+	ModuleConfirmation = "Observed when an authenticated response lacks COOP/CORP; a finding requires a concrete XS-Leak oracle or an application isolation requirement"
 	ModuleSeverity     = severity.Info
 	ModuleConfidence   = severity.Firm
 	ModuleTags         = []string{"client-side", "xs-leaks", "headers", "light"}

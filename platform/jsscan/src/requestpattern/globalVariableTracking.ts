@@ -3,13 +3,33 @@ import type { Transform } from '../ast-utils';
 import { getWebpackModuleMap, getWebpackBundleState } from '../mapping';
 import { isURLLike } from './utils';
 import type { TrackedVariableMap } from './types';
+import { getEngineState } from '../context/engine-state';
+import type { NodePath } from '../ast-utils/babel';
+import type { StructuralIndex } from '../structure';
 
 interface TrackedVariable {
     key: string;
     values: string[];  // Changed from single value to array
 }
 
-const trackedVariables: TrackedVariable[] = [];
+function trackedVariables(): Map<string, Set<string>> {
+    return getEngineState().trackedVariables;
+}
+
+function addQualifiedTrackedVariable(key: string, value: string): void {
+    const state = getEngineState();
+    const variables = state.trackedVariables;
+    if (variables.size >= state.limits.maxTrackedVariables && !variables.has(key)) {
+        state.reportLimit?.('tracked_variable_limit_reached', `Tracked variable index limited to ${state.limits.maxTrackedVariables} keys`);
+        return;
+    }
+    let values = variables.get(key);
+    if (!values) {
+        values = new Set();
+        variables.set(key, values);
+    }
+    if (values.size < state.limits.maxValuesPerVariable) values.add(value);
+}
 
 // ============================================================================
 // Constants for primitive value tracking
@@ -53,6 +73,15 @@ const GENERIC_VARIABLE_NAMES = new Set([
     // HTTP/fetch related
     'method', 'body', 'headers', 'params', 'query', 'url', 'path',
 ]);
+
+/**
+ * Return the scope that owns an identifier binding.  A visitor may currently
+ * be inside a nested block while assigning to a variable declared by an
+ * outer function, so `path.scope.uid` alone is not a stable binding key.
+ */
+function bindingScopeId(path: { scope: { uid: number; getBinding(name: string): { scope: { uid: number } } | undefined } }, name: string): number {
+    return path.scope.getBinding(name)?.scope.uid ?? path.scope.uid;
+}
 
 // ============================================================================
 // Helper functions for primitive value tracking
@@ -100,14 +129,24 @@ function extractPrimitiveValue(node: t.Node): PrimitiveValue | null {
     return null;
 }
 
-function addTrackedVariable(key: string, value: string, allowMultiple = false) {
+function addTrackedVariable(key: string, value: string, allowMultiple = false, scopeId?: number) {
     // Performance limit
-    if (trackedVariables.length >= MAX_TRACKED_VARIABLES) {
+    const state = getEngineState();
+    const variables = state.trackedVariables;
+    if (variables.size >= state.limits.maxTrackedVariables) {
+        state.reportLimit?.('tracked_variable_limit_reached', `Tracked variable index limited to ${state.limits.maxTrackedVariables} keys`);
         return;
     }
 
     // Get last part of key if it contains dots
     const finalKey = key.split('.').pop() || key;
+
+    // Preserve the binding-qualified value even for generic names such as id;
+    // only the low-priority unqualified alias is suppressed below.
+    if (scopeId !== undefined) {
+        addQualifiedTrackedVariable(`scope:${scopeId}:${key}`, value);
+        if (key !== finalKey) addQualifiedTrackedVariable(`scope:${scopeId}:${finalKey}`, value);
+    }
 
     // Skip generic variable names that appear in many contexts
     if (GENERIC_VARIABLE_NAMES.has(finalKey)) {
@@ -115,21 +154,18 @@ function addTrackedVariable(key: string, value: string, allowMultiple = false) {
     }
 
     // Check if key exists
-    const existingVar = trackedVariables.find(v => v.key === finalKey);
-    if (existingVar) {
+    const existingValues = variables.get(finalKey);
+    if (existingValues) {
         if (allowMultiple) {
-            // Add to values array if not already present
-            if (!existingVar.values.includes(value)) {
-                existingVar.values.push(value);
-            }
-        } else if (existingVar.values.length === 0 || (existingVar.values.length === 1 && !existingVar.values[0])) {
+            if (existingValues.size < state.limits.maxValuesPerVariable) existingValues.add(value);
+        } else if (existingValues.size === 0 || (existingValues.size === 1 && existingValues.has(''))) {
             // Only override if current values are empty
-            existingVar.values = [value];
+            variables.set(finalKey, new Set([value]));
         }
         return;
     }
 
-    trackedVariables.push({ key: finalKey, values: [value] });
+    variables.set(finalKey, new Set([value]));
 }
 
 /**
@@ -158,14 +194,14 @@ function addWebpackExportsToTrackedVariables(): void {
                     for (const [key, value] of Object.entries(resolvedValue.value)) {
                         if (typeof value === 'string') {
                             const fullPath = `${imp.localVar}.${exp.name}.${key}`;
-                            trackedVariables.push({ key: fullPath, values: [value] });
+                            addQualifiedTrackedVariable(fullPath, value);
                             // Also add just the property name for simpler lookups
                             addTrackedVariable(key, value);
                         }
                     }
                 } else if (resolvedValue.type === 'string') {
                     const fullPath = `${imp.localVar}.${exp.name}`;
-                    trackedVariables.push({ key: fullPath, values: [resolvedValue.value] });
+                    addQualifiedTrackedVariable(fullPath, resolvedValue.value);
                     addTrackedVariable(exp.name, resolvedValue.value);
                 }
             }
@@ -200,7 +236,7 @@ function addWebpackHttpCallsToTrackedVariables(): void {
             // If URL was resolved from import, add it with the import path as key
             if (httpCall.urlSource.resolvedValue && httpCall.urlSource.importPath) {
                 const key = httpCall.urlSource.importPath.join('.');
-                trackedVariables.push({ key, values: [httpCall.urlSource.resolvedValue] });
+                addQualifiedTrackedVariable(key, httpCall.urlSource.resolvedValue);
             }
         }
     }
@@ -219,7 +255,7 @@ export function createGlobalVariableTracking(): Transform {
                     if (t.isIdentifier(id) && init && shouldTrackVariableName(id.name)) {
                         const prim = extractPrimitiveValue(init);
                         if (prim) {
-                            addTrackedVariable(id.name, prim.value);
+                            addTrackedVariable(id.name, prim.value, false, bindingScopeId(path, id.name));
                         }
                     }
                 },
@@ -231,6 +267,9 @@ export function createGlobalVariableTracking(): Transform {
                     if (t.isIdentifier(key) && shouldTrackVariableName(key.name)) {
                         const prim = extractPrimitiveValue(value);
                         if (prim) {
+                            // An object key is not a lexical binding.  Keep the
+                            // historical non-generic fallback, but never index
+                            // it as though `{ id: ... }` defined the local `id`.
                             addTrackedVariable(key.name, prim.value);
                         }
                     }
@@ -250,7 +289,13 @@ export function createGlobalVariableTracking(): Transform {
                     if (varName && shouldTrackVariableName(varName)) {
                         const prim = extractPrimitiveValue(right);
                         if (prim) {
-                            addTrackedVariable(varName, prim.value);
+                            // Only an Identifier assignment refers to a lexical
+                            // binding. Member properties require an object-path
+                            // key and must not contaminate a same-named local.
+                            const scopeId = t.isIdentifier(left)
+                                ? bindingScopeId(path, varName)
+                                : undefined;
+                            addTrackedVariable(varName, prim.value, false, scopeId);
                         }
                     }
                 },
@@ -278,6 +323,8 @@ export function createGlobalVariableTracking(): Transform {
 
                                 const prim = extractPrimitiveValue(prop.value);
                                 if (prim) {
+                                    // Object(...) properties are property facts,
+                                    // not declarations of same-named bindings.
                                     addTrackedVariable(keyName, prim.value);
                                 }
                             }
@@ -297,12 +344,12 @@ export function createGlobalVariableTracking(): Transform {
                                 const prim = extractPrimitiveValue(args[1]);
                                 if (prim && isURLLike(prim.value)) {
                                     // Track with common URL-related keys (allow multiple for env-specific URLs)
-                                    addTrackedVariable('apiURL', prim.value, true);
-                                    addTrackedVariable('apiUrl', prim.value, true);
-                                    addTrackedVariable('baseURL', prim.value, true);
-                                    addTrackedVariable('baseUrl', prim.value, true);
-                                    addTrackedVariable('API_URL', prim.value, true);
-                                    addTrackedVariable('BASE_URL', prim.value, true);
+                                    addTrackedVariable('apiURL', prim.value, true, path.scope.uid);
+                                    addTrackedVariable('apiUrl', prim.value, true, path.scope.uid);
+                                    addTrackedVariable('baseURL', prim.value, true, path.scope.uid);
+                                    addTrackedVariable('baseUrl', prim.value, true, path.scope.uid);
+                                    addTrackedVariable('API_URL', prim.value, true, path.scope.uid);
+                                    addTrackedVariable('BASE_URL', prim.value, true, path.scope.uid);
                                 }
                             }
                         }
@@ -315,23 +362,45 @@ export function createGlobalVariableTracking(): Transform {
     } satisfies Transform;
 }
 
+// Consume nodes already collected by the post-transform structural pass. This
+// preserves the legacy tracking rules without another full AST traversal.
+export function collectTrackedVariablesFromIndex(index: StructuralIndex): void {
+    const visitor = createGlobalVariableTracking().visitor?.();
+    if (!visitor) return;
+    const handlers = visitor as unknown as {
+        VariableDeclarator(path: NodePath<t.VariableDeclarator>): void;
+        ObjectProperty(path: NodePath<t.ObjectProperty>): void;
+        AssignmentExpression(path: NodePath<t.AssignmentExpression>): void;
+        CallExpression(path: NodePath<t.CallExpression>): void;
+    };
+    for (const path of index.variableDeclarators) handlers.VariableDeclarator(path);
+    for (const path of index.objectProperties) handlers.ObjectProperty(path);
+    for (const path of index.assignmentExpressions) handlers.AssignmentExpression(path);
+    for (const path of index.callExpressions) handlers.CallExpression(path);
+}
+
 export function getTrackedVariables(): TrackedVariable[] {
-    return trackedVariables;
+    return [...trackedVariables()].map(([key, values]) => ({ key, values: [...values] }));
 }
 
 export function getTrackedVariablesMap(): TrackedVariableMap {
-    // Add webpack exports and HTTP calls to tracked variables before returning
-    addWebpackExportsToTrackedVariables();
-    addWebpackHttpCallsToTrackedVariables();
+    const state = getEngineState();
+    // Finalize cross-module values once per analysis, not once per matcher.
+    if (!state.trackedVariablesFinalized) {
+        addWebpackExportsToTrackedVariables();
+        addWebpackHttpCallsToTrackedVariables();
+        state.trackedVariablesFinalized = true;
+    }
 
     const map: TrackedVariableMap = {};
-    for (const v of trackedVariables) {
-        map[v.key] = v.values;
+    for (const [key, values] of trackedVariables()) {
+        map[key] = [...values];
     }
     return map;
 }
 
 export function clearTrackedVariables(): void {
-    trackedVariables.length = 0;
+    const state = getEngineState();
+    state.trackedVariables.clear();
+    state.trackedVariablesFinalized = false;
 }
-

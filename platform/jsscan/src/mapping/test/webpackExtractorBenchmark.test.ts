@@ -20,6 +20,7 @@ import {
 import { createEmptyFunctionMap, clearFunctionMap } from '../functionMap';
 
 const BENCHMARK_DIR = join(__dirname, '../../../testdata/benchmark-app/dist');
+const REQUIRE_BENCHMARKS = process.env.JSSCAN_REQUIRE_BENCHMARKS === '1';
 
 // Expected endpoints organized by difficulty
 const EXPECTED_ENDPOINTS = {
@@ -97,6 +98,15 @@ interface BenchmarkResult {
   };
   missing: string[];
   extra: string[];
+}
+
+function assertReleaseFloor(result: BenchmarkResult): void {
+  // These floors make the corpus a release gate rather than a reporting-only
+  // benchmark. They intentionally sit just below the measured baseline so
+  // normal runtime variance cannot affect them (the metrics are deterministic).
+  expect(result.detectionRate).toBeGreaterThanOrEqual(85);
+  expect(result.byDifficulty.easy.rate).toBe(100);
+  expect(result.byDifficulty.medium.rate).toBeGreaterThanOrEqual(95);
 }
 
 /**
@@ -211,6 +221,14 @@ function bundleExists(bundler: string): boolean {
   return existsSync(join(BENCHMARK_DIR, bundler, getBundleFilename(bundler)));
 }
 
+function requireBundle(bundler: string): boolean {
+  if (bundleExists(bundler)) return true;
+  const message = `Missing mandatory ${bundler} benchmark bundle. Run: cd testdata/benchmark-app && ./build.sh ${bundler}`;
+  if (REQUIRE_BENCHMARKS) throw new Error(message);
+  console.log(`Skipping ${bundler} - ${message}`);
+  return false;
+}
+
 describe('Webpack Extractor Benchmark', () => {
   beforeEach(() => {
     clearWebpackState();
@@ -219,10 +237,7 @@ describe('Webpack Extractor Benchmark', () => {
 
   // Test webpack5 bundle
   test('benchmark: webpack5 detection rate', async () => {
-    if (!bundleExists('webpack5')) {
-      console.log('Skipping webpack5 - bundle not found. Run: cd testdata/benchmark-app && ./build.sh webpack5');
-      return;
-    }
+    if (!requireBundle('webpack5')) return;
 
     const code = await readFile(
       join(BENCHMARK_DIR, 'webpack5', 'bundle.js'),
@@ -258,15 +273,12 @@ describe('Webpack Extractor Benchmark', () => {
 
     // Webpack 5 format: extractor should find some URLs
     // Note: The extractor is webpack-specific, so detection depends on output format
-    expect(requests.length).toBeGreaterThan(0);
+	assertReleaseFloor(result);
   });
 
   // Test rollup bundle
   test('benchmark: rollup detection rate', async () => {
-    if (!bundleExists('rollup')) {
-      console.log('Skipping rollup - bundle not found. Run: cd testdata/benchmark-app && ./build.sh rollup');
-      return;
-    }
+    if (!requireBundle('rollup')) return;
 
     const code = await readFile(
       join(BENCHMARK_DIR, 'rollup', 'bundle.js'),
@@ -293,15 +305,12 @@ describe('Webpack Extractor Benchmark', () => {
     console.log('========================================\n');
 
     // Rollup uses different format - document capability
-    expect(result).toBeDefined();
+	assertReleaseFloor(result);
   });
 
   // Test esbuild bundle
   test('benchmark: esbuild detection rate', async () => {
-    if (!bundleExists('esbuild')) {
-      console.log('Skipping esbuild - bundle not found. Run: cd testdata/benchmark-app && ./build.sh esbuild');
-      return;
-    }
+    if (!requireBundle('esbuild')) return;
 
     const code = await readFile(
       join(BENCHMARK_DIR, 'esbuild', 'bundle.js'),
@@ -328,15 +337,12 @@ describe('Webpack Extractor Benchmark', () => {
     console.log('========================================\n');
 
     // esbuild uses different format - document capability
-    expect(result).toBeDefined();
+	assertReleaseFloor(result);
   });
 
   // Test vite bundle
   test('benchmark: vite detection rate', async () => {
-    if (!bundleExists('vite')) {
-      console.log('Skipping vite - bundle not found. Run: cd testdata/benchmark-app && ./build.sh vite');
-      return;
-    }
+    if (!requireBundle('vite')) return;
 
     const code = await readFile(
       join(BENCHMARK_DIR, 'vite', 'bundle.js'),
@@ -363,15 +369,12 @@ describe('Webpack Extractor Benchmark', () => {
     console.log('========================================\n');
 
     // Vite uses Rollup format - document capability
-    expect(result).toBeDefined();
+	assertReleaseFloor(result);
   });
 
   // Test body extraction quality
   test('benchmark: body extraction accuracy (webpack5)', async () => {
-    if (!bundleExists('webpack5')) {
-      console.log('Skipping body extraction test - webpack5 bundle not found');
-      return;
-    }
+    if (!requireBundle('webpack5')) return;
 
     const code = await readFile(
       join(BENCHMARK_DIR, 'webpack5', 'bundle.js'),
@@ -410,10 +413,7 @@ describe('Webpack Extractor Benchmark', () => {
 
   // Test cross-module resolution
   test('benchmark: cross-module resolution (webpack5)', async () => {
-    if (!bundleExists('webpack5')) {
-      console.log('Skipping cross-module test - webpack5 bundle not found');
-      return;
-    }
+    if (!requireBundle('webpack5')) return;
 
     const code = await readFile(
       join(BENCHMARK_DIR, 'webpack5', 'bundle.js'),
@@ -488,6 +488,9 @@ describe('Webpack Extractor Benchmark', () => {
     }
 
     if (results.length === 0) {
+      if (REQUIRE_BENCHMARKS) {
+        throw new Error('No mandatory benchmark bundles were built');
+      }
       console.log('\n⚠️  No bundles found. Run: cd testdata/benchmark-app && ./build.sh all\n');
       return;
     }
@@ -506,6 +509,7 @@ describe('Webpack Extractor Benchmark', () => {
       const urls = `${r.detected}`.padEnd(4);
       console.log(`║ ${r.bundler.padEnd(9)} │ ${overall} │ ${easy} │ ${medium} │ ${hard} │ ${urls} ║`);
     }
+	for (const result of results) assertReleaseFloor(result);
 
     console.log('╚══════════════════════════════════════════════════════════════╝');
     console.log('\nNote: Webpack extractor is optimized for webpack format.');

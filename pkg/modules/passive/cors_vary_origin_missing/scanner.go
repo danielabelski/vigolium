@@ -98,7 +98,10 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	}
 
 	acac := ctx.Response().Header("Access-Control-Allow-Credentials")
-	resultSeverity := severity.Low
+	resultSeverity := severity.Info
+	kind := output.RecordKindObservation
+	grade := output.EvidenceGradeObservation
+	confidence := severity.Certain
 	var issues []string
 
 	issues = append(issues, fmt.Sprintf("Dynamic ACAO (%s) without Vary: Origin header", acao))
@@ -106,12 +109,24 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	if strings.EqualFold(acac, "true") {
 		issues = append(issues, "Access-Control-Allow-Credentials: true amplifies cache poisoning risk")
 	}
+	if hasSharedCacheEvidence(ctx.Response()) {
+		kind = output.RecordKindCandidate
+		grade = output.EvidenceGradeCandidate
+		resultSeverity = severity.Low
+		confidence = severity.Tentative
+		issues = append(issues, "response carries shared-cache evidence; active cache-hit confirmation is still required")
+	} else {
+		issues = append(issues, "no shared-cache evidence was observed; retained as configuration posture")
+	}
 
 	return []*output.ResultEvent{
 		{
-			Host:    urlx.Host,
-			URL:     urlx.String(),
-			Request: string(ctx.Request().Raw()),
+			Host:          urlx.Host,
+			URL:           urlx.String(),
+			Request:       string(ctx.Request().Raw()),
+			RecordKind:    kind,
+			EvidenceGrade: grade,
+			DedupKey:      fmt.Sprintf("cors-vary|%s|%s|%s", ctx.Request().Method(), urlx.Host, urlx.Path),
 			ExtractedResults: []string{
 				fmt.Sprintf("ACAO: %s", acao),
 				fmt.Sprintf("Vary: %s", vary),
@@ -121,9 +136,29 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 				Name:        "CORS Missing Vary: Origin",
 				Description: strings.Join(issues, "; "),
 				Severity:    resultSeverity,
-				Confidence:  severity.Firm,
+				Confidence:  confidence,
 				Tags:        []string{"cors", "cache-poisoning", "vary"},
 			},
 		},
 	}, nil
+}
+
+func hasSharedCacheEvidence(resp *httpmsg.HttpResponse) bool {
+	if resp == nil {
+		return false
+	}
+	cc := strings.ToLower(resp.Header("Cache-Control"))
+	if strings.Contains(cc, "no-store") || strings.Contains(cc, "private") {
+		return false
+	}
+	if strings.Contains(cc, "public") || strings.Contains(cc, "s-maxage=") {
+		return true
+	}
+	for _, name := range []string{"Age", "X-Cache", "CF-Cache-Status", "CDN-Cache-Status"} {
+		value := strings.ToLower(strings.TrimSpace(resp.Header(name)))
+		if value != "" && value != "0" && !strings.Contains(value, "miss") && !strings.Contains(value, "bypass") {
+			return true
+		}
+	}
+	return false
 }

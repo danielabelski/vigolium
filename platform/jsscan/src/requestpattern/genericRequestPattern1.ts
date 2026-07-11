@@ -3,6 +3,7 @@ import type { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import * as m from '@codemod/matchers';
 import type { Transform } from '../ast-utils';
+import type { AnalysisContext } from '../context';
 import { tracebackVariables } from '../traceback/tracebackVariables';
 import { appendPattern, appendExtractedRequest } from './utils';
 import { getTrackedVariablesMap } from './globalVariableTracking';
@@ -19,7 +20,11 @@ import {
   isValidUrlNode,
 } from './extractRequest';
 
-export function createGenericRequestPattern1Transform(ast: ParseResult<t.File> | null = null, sourceCode: string = ''): Transform {
+export function createGenericRequestPattern1Transform(
+  analysisContext: AnalysisContext,
+  ast: ParseResult<t.File> | null = null,
+  sourceCode: string = '',
+): Transform {
   return {
     name: 'genericRequestPattern1',
     tags: ['safe'],
@@ -71,6 +76,7 @@ export function createGenericRequestPattern1Transform(ast: ParseResult<t.File> |
       return {
         CallExpression: {
           exit(path: NodePath<t.CallExpression>) {
+            if (analysisContext.isRequestNodeClaimed(path.node)) return;
             if (!matcher.match(path.node)) return;
 
             const currentNodesInArg = nodesInArg.current!;
@@ -78,9 +84,11 @@ export function createGenericRequestPattern1Transform(ast: ParseResult<t.File> |
 
             const [firstArg, secondArg] = currentNodesInArg;
             if (isValidUrlNode(firstArg) || isValidUrlNode(secondArg)) {
+              analysisContext.claimRequestNode(path.node);
               // Output existing requestPattern
-              const result = tracebackVariables(path, [], { ast, sourceCode });
-              appendPattern(result, 'genericRequestPattern1');
+              if (analysisContext.has('requestEvidence')) {
+                appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'genericRequestPattern1', path.node);
+              }
 
               // Extract structured request data
               // Pattern: func(method, url, ...) or func(url, method, ...)
@@ -103,7 +111,7 @@ export function createGenericRequestPattern1Transform(ast: ParseResult<t.File> |
               const effectiveIterations = getEffectiveIterationsForFunction(currentFunction);
 
               for (const iteration of effectiveIterations) {
-                const context = createResolutionContext(currentFunction, iteration);
+                const context = createResolutionContext(currentFunction, iteration, path);
 
                 const method = t.isStringLiteral(methodNode)
                   ? methodNode.value.toUpperCase()
@@ -158,7 +166,10 @@ export function createGenericRequestPattern1Transform(ast: ParseResult<t.File> |
                     cookies: [],
                   });
 
-                  appendExtractedRequest(request);
+                  appendExtractedRequest(analysisContext, request, {
+                    extractor: 'generic-method-url', client: 'generic', confidence: 'medium',
+                    node: path.node, functionName: currentFunction,
+                  });
                 }
               }
             }

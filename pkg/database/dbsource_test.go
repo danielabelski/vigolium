@@ -409,6 +409,228 @@ func TestRiskPrioritizedDBInputSource_BatchedFetchAcrossChunks(t *testing.T) {
 	}
 }
 
+// TestRiskPrioritizedDBInputSource_ProjectScoped proves a scan in one project can
+// never consume another project's records, even when both projects contain the
+// exact same origin (host scope alone is not a tenancy boundary).
+func TestRiskPrioritizedDBInputSource_ProjectScoped(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	projA := uuid.New().String()
+	projB := uuid.New().String()
+	host := "shared.example.com"
+
+	// insert saves a record for the given project under the shared host.
+	insert := func(project string, i int) string {
+		raw := fmt.Sprintf("GET /p/%s/%d HTTP/1.1\r\nHost: %s\r\n\r\n", project, i, host)
+		rr, err := httpmsg.ParseRawRequest(raw)
+		if err != nil {
+			t.Fatalf("ParseRawRequest: %v", err)
+		}
+		rr = rr.WithResponse(httpmsg.NewHttpResponse([]byte("HTTP/1.1 200 OK\r\n\r\nok")))
+		u, err := repo.SaveRecord(ctx, rr, "test", project)
+		if err != nil {
+			t.Fatalf("SaveRecord: %v", err)
+		}
+		return u
+	}
+	wantA := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		wantA[insert(projA, i)] = true
+	}
+	for i := 0; i < 4; i++ {
+		insert(projB, i) // project B, same host — must never be emitted for a project-A scan
+	}
+
+	scanUUID := uuid.New().String()
+	if err := repo.CreateScan(ctx, &Scan{UUID: scanUUID, ProjectUUID: projA, Status: "running"}); err != nil {
+		t.Fatalf("CreateScan: %v", err)
+	}
+
+	source := NewRiskPrioritizedDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
+	var got []string
+	for {
+		item, err := source.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next(): %v", err)
+		}
+		got = append(got, item.RecordUUID)
+		item.Complete()
+	}
+
+	if len(got) != len(wantA) {
+		t.Fatalf("emitted %d records, want %d (only project A's)", len(got), len(wantA))
+	}
+	for _, u := range got {
+		if !wantA[u] {
+			t.Errorf("emitted a record %s not owned by project A — cross-project leak", u)
+		}
+	}
+}
+
+// TestRiskPrioritizedDBInputSource_RiskLaneSpansPages stresses the streaming
+// risk lane across multiple keyset pages: with more high-risk records than a
+// single page, they must still all be emitted before any non-high-risk record
+// and in non-increasing risk_score order, with full exactly-once coverage and a
+// fully-advanced cursor.
+func TestRiskPrioritizedDBInputSource_RiskLaneSpansPages(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+	scanUUID := createTestScan(t, repo)
+
+	host := "risklane.example.com"
+	const total = riskPrefetchBatchSize*2 + 40 // ~296 records
+	const highRiskN = riskPrefetchBatchSize + 30 // ~158 high-risk → risk lane spans 2 pages
+	inserted := insertTestRecordsWithHost(t, repo, host, total)
+
+	// Give the first highRiskN records distinct, strictly-decreasing scores so the
+	// risk lane's order is deterministic (score DESC).
+	scores := make(map[string]int, highRiskN)
+	scoreOf := make(map[string]int, highRiskN)
+	for i := 0; i < highRiskN; i++ {
+		s := highRiskN - i // highRiskN, highRiskN-1, ... 1 (all > 0, distinct)
+		scores[inserted[i]] = s
+		scoreOf[inserted[i]] = s
+	}
+	if err := repo.UpdateRiskScores(ctx, scores); err != nil {
+		t.Fatalf("UpdateRiskScores: %v", err)
+	}
+
+	source := NewRiskPrioritizedDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
+	var got []string
+	for {
+		item, err := source.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next(): %v", err)
+		}
+		got = append(got, item.RecordUUID)
+		item.Complete()
+	}
+
+	// Exactly-once coverage of every inserted record.
+	if len(got) != total {
+		t.Fatalf("got %d records, want %d", len(got), total)
+	}
+	seen := make(map[string]int, len(got))
+	for _, u := range got {
+		seen[u]++
+	}
+	for _, u := range inserted {
+		if seen[u] != 1 {
+			t.Fatalf("UUID %s returned %d times, want 1", u, seen[u])
+		}
+	}
+
+	// The first highRiskN emitted are the high-risk records, in non-increasing
+	// score order (risk lane keyset spanning pages); the rest are non-high-risk.
+	prev := int(^uint(0) >> 1) // max int
+	for i := 0; i < highRiskN; i++ {
+		sc, ok := scoreOf[got[i]]
+		if !ok {
+			t.Fatalf("position %d: expected a high-risk record, got a non-high-risk one", i)
+		}
+		if sc > prev {
+			t.Fatalf("risk order broken at %d: score %d > previous %d", i, sc, prev)
+		}
+		prev = sc
+	}
+	for i := highRiskN; i < total; i++ {
+		if _, isHigh := scoreOf[got[i]]; isHigh {
+			t.Fatalf("position %d: high-risk record emitted after the risk lane ended", i)
+		}
+	}
+
+	// Cursor advanced past the whole snapshot.
+	scan, _ := repo.GetScanByUUID(ctx, scanUUID)
+	remaining, err := repo.CountRecordsAfterCursor(ctx, scan.CursorAt, scan.CursorUUID, HostTarget{Hostname: host})
+	if err != nil {
+		t.Fatalf("CountRecordsAfterCursor: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("remaining=%d, want 0", remaining)
+	}
+}
+
+// TestRiskPrioritizedDBInputSource_CursorAdvancesDespiteMissingRecords proves the
+// durable cursor still advances when snapshot rows become unfetchable after the
+// snapshot is captured (rows deleted between selection and fetch). Before the
+// skip-accounting fix, such rows stayed counted in `total` while never being
+// acked, so acked never reached total, the cursor never advanced, and the whole
+// snapshot replayed on every resume.
+func TestRiskPrioritizedDBInputSource_CursorAdvancesDespiteMissingRecords(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+	scanUUID := createTestScan(t, repo)
+
+	host := "missing.example.com"
+	n := riskPrefetchBatchSize + 5 // spans 2 prefetch chunks
+	inserted := insertTestRecordsWithHost(t, repo, host, n)
+
+	source := NewRiskPrioritizedDBInputSource(db, repo, scanUUID).WithHostScopes([]HostTarget{{Hostname: host}})
+
+	got := make(map[string]struct{}, n)
+	deleted := false
+	for {
+		// Once the first chunk (which loads the full snapshot UUID list) is
+		// drained, delete two still-unfetched records so the next chunk fetch
+		// omits them — exercising the "missing UUID" skip path.
+		if !deleted && len(got) >= riskPrefetchBatchSize {
+			remaining := make([]string, 0, n)
+			for _, u := range inserted {
+				if _, seen := got[u]; !seen {
+					remaining = append(remaining, u)
+				}
+			}
+			if len(remaining) < 2 {
+				t.Fatalf("expected >=2 unfetched records to delete, got %d", len(remaining))
+			}
+			for _, u := range remaining[:2] {
+				if err := repo.DeleteRecord(ctx, u); err != nil {
+					t.Fatalf("DeleteRecord(%s): %v", u, err)
+				}
+			}
+			deleted = true
+		}
+
+		item, err := source.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next(): %v", err)
+		}
+		got[item.RecordUUID] = struct{}{}
+		item.Complete()
+	}
+
+	if !deleted {
+		t.Fatal("test setup: never reached the second chunk to delete records")
+	}
+	// Two records were deleted mid-drain, so only n-2 are served.
+	if len(got) != n-2 {
+		t.Fatalf("served %d records, want %d", len(got), n-2)
+	}
+
+	// The cursor must advance past the whole snapshot despite the two skips.
+	scan, _ := repo.GetScanByUUID(ctx, scanUUID)
+	remaining, err := repo.CountRecordsAfterCursor(ctx, scan.CursorAt, scan.CursorUUID, HostTarget{Hostname: host})
+	if err != nil {
+		t.Fatalf("CountRecordsAfterCursor: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("cursor stalled: remaining=%d, want 0 (skipped rows must not block the commit)", remaining)
+	}
+}
+
 // insertQueryRecord saves a single GET record with an explicit URL (carrying a
 // query string) so the param-shape coalescing path can see it.
 func insertQueryRecord(t *testing.T, repo *Repository, host, fullURL string) string {

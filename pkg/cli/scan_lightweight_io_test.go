@@ -146,9 +146,10 @@ func TestScanURLTargetFlag(t *testing.T) {
 
 	fs := pflag.NewFlagSet("scan-url", pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringSliceVarP(&globalTargets, "target", "t", nil, "")
+	fs.StringArrayVarP(&globalTargets, "target", "t", nil, "")
 
 	globalTargets = nil
-	require.NoError(t, fs.Parse([]string{"-t", "https://a.example", "-t", "https://b.example"}))
-	assert.Equal(t, []string{"https://a.example", "https://b.example"}, globalTargets)
+	// Commas are literal (StringArray): a query string with commas stays one target.
+	require.NoError(t, fs.Parse([]string{"-t", "https://a.example/api?ids=1,2,3", "-t", "https://b.example"}))
+	assert.Equal(t, []string{"https://a.example/api?ids=1,2,3", "https://b.example"}, globalTargets)
 }

@@ -35,10 +35,6 @@ func runStoragePresign(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if sc == nil {
-		return nil
-	}
-
 	key, _ := cmd.Flags().GetString("key")
 	methodFlag, _ := cmd.Flags().GetString("method")
 	expiry, _ := cmd.Flags().GetDuration("expiry")

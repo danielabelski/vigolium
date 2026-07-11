@@ -42,6 +42,7 @@ type QueryFilters struct {
 	ModuleName     string   // Filter findings by module name
 	ModuleType     string   // Filter findings by module type (active, passive, nuclei, etc.)
 	FindingSource  string   // Filter findings by source (audit, spa, agent, etc.)
+	RecordKinds    []string // finding (default), candidate, observation
 	RepoName       string   // Filter findings by repo name
 	Status         []string // Filter findings by lifecycle status (draft, triaged, false_positive, accepted_risk, fixed)
 
@@ -370,6 +371,14 @@ func (qb *QueryBuilder) applySorting(query *bun.SelectQuery) {
 	}
 
 	query.Order(fmt.Sprintf("%s %s", sortColumn, order))
+
+	// Append the unique uuid as a stable tie-breaker so rows sharing the primary
+	// sort value — e.g. the default second-precision created_at — keep a
+	// deterministic, page-stable order under concurrent ingestion instead of
+	// shifting between requests. Skip when the sort column already IS the uuid.
+	if sortColumn != "r.uuid" {
+		query.Order(fmt.Sprintf("r.uuid %s", order))
+	}
 }
 
 // mapSortColumn maps user-friendly sort names to actual column names
@@ -692,6 +701,15 @@ func (fqb *FindingsQueryBuilder) ExecuteWithCount(ctx context.Context) ([]*Findi
 
 // applyFindingFilters applies filter conditions to a findings query
 func (fqb *FindingsQueryBuilder) applyFindingFilters(query *bun.SelectQuery) {
+	// Existing callers are finding-oriented. Keep observations/candidates
+	// queryable through an explicit filter without allowing them to inflate
+	// vulnerability lists, reports, stats, or CI gates by default.
+	if len(fqb.filters.RecordKinds) > 0 {
+		query.Where("f.record_kind IN (?)", bun.List(fqb.filters.RecordKinds))
+	} else {
+		query.Where("(f.record_kind IS NULL OR f.record_kind = '' OR f.record_kind = ?)", RecordKindFinding)
+	}
+
 	// Project scoping
 	if fqb.filters.ProjectUUID != "" {
 		query.Where("f.project_uuid = ?", fqb.filters.ProjectUUID)
@@ -944,7 +962,8 @@ func CountFindingsBySeverity(ctx context.Context, db *DB, projectUUID string, ho
 	var rows []SeverityCount
 	q := db.NewSelect().
 		Model((*Finding)(nil)).
-		ColumnExpr("severity, COUNT(*) AS count")
+		ColumnExpr("severity, COUNT(*) AS count").
+		Where("(record_kind IS NULL OR record_kind = '' OR record_kind = ?)", RecordKindFinding)
 	if projectUUID != "" {
 		q = q.Where("project_uuid = ?", projectUUID)
 	}
@@ -1007,6 +1026,7 @@ func CountFindingsByAgenticScan(ctx context.Context, db *DB, agenticScanUUID str
 		Model((*Finding)(nil)).
 		ColumnExpr("severity, COUNT(*) AS count").
 		Where("agentic_scan_uuid = ?", agenticScanUUID).
+		Where("(record_kind IS NULL OR record_kind = '' OR record_kind = ?)", RecordKindFinding).
 		GroupExpr("severity").
 		Scan(ctx, &rows)
 	if err != nil {
@@ -1035,6 +1055,7 @@ func CountFindingsByAgenticScans(ctx context.Context, db *DB, agenticScanUUIDs [
 		Model((*Finding)(nil)).
 		ColumnExpr("severity, COUNT(*) AS count").
 		Where("agentic_scan_uuid IN (?)", bun.List(agenticScanUUIDs)).
+		Where("(record_kind IS NULL OR record_kind = '' OR record_kind = ?)", RecordKindFinding).
 		GroupExpr("severity").
 		Scan(ctx, &rows)
 	if err != nil {
@@ -1059,7 +1080,8 @@ func CountFindingsByModule(ctx context.Context, db *DB, projectUUID string) (map
 	}
 	q := db.NewSelect().
 		Model((*Finding)(nil)).
-		ColumnExpr("module_id, COUNT(*) AS count")
+		ColumnExpr("module_id, COUNT(*) AS count").
+		Where("(record_kind IS NULL OR record_kind = '' OR record_kind = ?)", RecordKindFinding)
 	if projectUUID != "" {
 		q = q.Where("project_uuid = ?", projectUUID)
 	}
@@ -1085,7 +1107,8 @@ func CountFindingsByURL(ctx context.Context, db *DB, projectUUID string) (map[st
 	q := db.NewSelect().
 		Model((*Finding)(nil)).
 		ColumnExpr("url, COUNT(*) AS count").
-		Where("url IS NOT NULL AND url != ''")
+		Where("url IS NOT NULL AND url != ''").
+		Where("(record_kind IS NULL OR record_kind = '' OR record_kind = ?)", RecordKindFinding)
 	if projectUUID != "" {
 		q = q.Where("project_uuid = ?", projectUUID)
 	}
@@ -1107,7 +1130,8 @@ func CountFindingsByConfidence(ctx context.Context, db *DB, projectUUID string) 
 	}
 	q := db.NewSelect().
 		Model((*Finding)(nil)).
-		ColumnExpr("confidence, COUNT(*) AS count")
+		ColumnExpr("confidence, COUNT(*) AS count").
+		Where("(record_kind IS NULL OR record_kind = '' OR record_kind = ?)", RecordKindFinding)
 	if projectUUID != "" {
 		q = q.Where("project_uuid = ?", projectUUID)
 	}

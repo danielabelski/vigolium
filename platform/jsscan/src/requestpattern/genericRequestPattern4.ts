@@ -3,8 +3,9 @@ import type { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import * as m from '@codemod/matchers';
 import type { Transform } from '../ast-utils';
+import type { AnalysisContext } from '../context';
 import { tracebackVariables } from '../traceback/tracebackVariables';
-import { appendPattern, collectAPIUrls, appendExtractedRequest } from './utils';
+import { appendPattern, appendExtractedRequest, isURLLike } from './utils';
 import { getTrackedVariablesMap } from './globalVariableTracking';
 import {
   createExtractedRequest,
@@ -28,6 +29,70 @@ const CONFIG_OBJECT_PROPERTIES = new Set([
   'proxy', 'cancelToken', 'decompress', // axios config
 ]);
 
+const REQUEST_LIKE_CALLEE = /(?:request|http|api|fetch|load|send|submit|query|mutat|upload|download|client)/i;
+const MAX_GENERIC_URLS = 8;
+
+function calleeLabel(node: t.CallExpression['callee']): string {
+  if (t.isIdentifier(node)) return node.name;
+  if (t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) {
+    const property = node.property;
+    if (t.isIdentifier(property)) return property.name;
+    if (t.isStringLiteral(property)) return property.value;
+  }
+  return '';
+}
+
+function renderDirectURL(node: t.Node, depth = 0): string | null {
+  if (depth > 3) return null;
+  if (t.isStringLiteral(node)) return node.value;
+  if (t.isTemplateLiteral(node)) {
+    let rendered = '';
+    for (let i = 0; i < node.quasis.length; i++) {
+      rendered += node.quasis[i].value.raw;
+      if (i < node.expressions.length) {
+        const expression = node.expressions[i];
+        rendered += t.isIdentifier(expression) ? `\${${expression.name}}` : '${value}';
+      }
+    }
+    return rendered;
+  }
+  if (t.isBinaryExpression(node, { operator: '+' })) {
+    const left = renderDirectURL(node.left, depth + 1);
+    const right = renderDirectURL(node.right, depth + 1);
+    if (left !== null && right !== null) return left + right;
+  }
+  if (t.isIdentifier(node)) return `\${${node.name}}`;
+  if (t.isMemberExpression(node)) return '${member}';
+  return null;
+}
+
+function collectBoundedURLs(node: t.Node | null | undefined, out: string[], depth = 0): void {
+  if (!node || depth > 2 || out.length >= MAX_GENERIC_URLS) return;
+  const rendered = renderDirectURL(node);
+  if (rendered && isURLLike(rendered) && !out.includes(rendered)) out.push(rendered);
+  if (t.isObjectExpression(node)) {
+    for (const property of node.properties) {
+      if (!t.isObjectProperty(property)) continue;
+      const key = t.isIdentifier(property.key) ? property.key.name : t.isStringLiteral(property.key) ? property.key.value : '';
+      if (/^(?:url|uri|path|endpoint|baseURL|action)$/i.test(key)) {
+        collectBoundedURLs(property.value, out, depth + 1);
+      }
+    }
+  } else if (t.isArrayExpression(node)) {
+    for (const element of node.elements.slice(0, MAX_GENERIC_URLS)) {
+      if (element && !t.isSpreadElement(element)) collectBoundedURLs(element, out, depth + 1);
+    }
+  }
+}
+
+function hasRequestConfig(args: t.CallExpression['arguments']): boolean {
+  return args.some((argument) => t.isObjectExpression(argument) && argument.properties.some((property) => {
+    if (!t.isObjectProperty(property)) return false;
+    const key = t.isIdentifier(property.key) ? property.key.name : t.isStringLiteral(property.key) ? property.key.value : '';
+    return /^(?:url|method|type|headers|body|data|params|query)$/i.test(key);
+  }));
+}
+
 /**
  * Check if an object looks like a config object (fetch options, ajax config, etc.)
  * rather than a params object.
@@ -47,7 +112,11 @@ function isConfigObject(node: t.ObjectExpression): boolean {
   return false;
 }
 
-export function createGenericRequestPattern4Transform(ast: ParseResult<t.File> | null = null, sourceCode: string = ''): Transform {
+export function createGenericRequestPattern4Transform(
+  analysisContext: AnalysisContext,
+  ast: ParseResult<t.File> | null = null,
+  sourceCode: string = '',
+): Transform {
   return {
     name: 'genericRequestPattern4',
     tags: ['safe'],
@@ -67,6 +136,7 @@ export function createGenericRequestPattern4Transform(ast: ParseResult<t.File> |
         CallExpression: {
           exit(path: NodePath<t.CallExpression>) {
             if (matcher.match(path.node)) {
+              if (analysisContext.isRequestNodeClaimed(path.node)) return;
               const args = path.node.arguments;
               if (args.length == 0) return;
 
@@ -102,12 +172,21 @@ export function createGenericRequestPattern4Transform(ast: ParseResult<t.File> |
                 return;
               }
 
-              const apiUrls = collectAPIUrls(path);
+              const apiUrls: string[] = [];
+              for (const argument of args.slice(0, 3)) {
+                if (!t.isSpreadElement(argument)) collectBoundedURLs(argument, apiUrls);
+              }
               if (apiUrls.length == 0) return;
+              const firstArgumentURLs: string[] = [];
+              if (args[0] && !t.isSpreadElement(args[0])) collectBoundedURLs(args[0], firstArgumentURLs);
+              if (!REQUEST_LIKE_CALLEE.test(calleeLabel(path.node.callee)) &&
+                  !hasRequestConfig(args) && firstArgumentURLs.length === 0) return;
+              analysisContext.claimRequestNode(path.node);
 
               // Output existing requestPattern
-              const result = tracebackVariables(path, [], { ast, sourceCode });
-              appendPattern(result, 'genericRequestPattern4');
+              if (analysisContext.has('requestEvidence')) {
+                appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'genericRequestPattern4', path.node);
+              }
 
               // Extract structured request data
               const trackedVars = getTrackedVariablesMap();
@@ -122,7 +201,7 @@ export function createGenericRequestPattern4Transform(ast: ParseResult<t.File> |
                 const queryParams = questionIndex === -1 ? '' : apiUrl.substring(questionIndex + 1);
 
                 for (const iteration of effectiveIterations) {
-                  const context = createResolutionContext(currentFunction, iteration);
+                  const context = createResolutionContext(currentFunction, iteration, path);
 
                   let params = queryParams;
 
@@ -147,7 +226,10 @@ export function createGenericRequestPattern4Transform(ast: ParseResult<t.File> |
                     cookies: [],
                   });
 
-                  appendExtractedRequest(request);
+                  appendExtractedRequest(analysisContext, request, {
+                    extractor: 'generic-call-subtree-url', client: 'generic', confidence: 'low',
+                    node: path.node, functionName: currentFunction,
+                  });
                 }
               }
             }

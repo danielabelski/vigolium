@@ -1,6 +1,6 @@
 {
   "name": "jsscan",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Extract API endpoints and HTTP request patterns from JavaScript bundles",
   "author": "theblackturtle",
   "license": "AGPL-3.0-only",
@@ -14,12 +14,17 @@
   "scripts": {
     "build": "bun build src/index.ts src/cli.ts --outdir dist --target node --packages=external --sourcemap=external && bun run build:types",
     "build:types": "tsc -p tsconfig.build.json",
-    "build:bin": "mkdir -p bin && bun run build:bin:linux-amd64 && bun run build:bin:linux-arm64 && bun run build:bin:darwin-amd64 && bun run build:bin:darwin-arm64 && bun run build:bin:windows",
-    "build:bin:linux-amd64": "bun build src/cli.ts --compile --target=bun-linux-x64 --external isolated-vm --outfile bin/jsscan-linux-amd64",
-    "build:bin:linux-arm64": "bun build src/cli.ts --compile --target=bun-linux-arm64 --external isolated-vm --outfile bin/jsscan-linux-arm64",
-    "build:bin:darwin-amd64": "bun build src/cli.ts --compile --target=bun-darwin-x64 --external isolated-vm --outfile bin/jsscan-darwin-amd64",
-    "build:bin:darwin-arm64": "bun build src/cli.ts --compile --target=bun-darwin-arm64 --external isolated-vm --outfile bin/jsscan-darwin-arm64",
-    "build:bin:windows": "bun build src/cli.ts --compile --target=bun-windows-x64 --external isolated-vm --outfile bin/jsscan-windows-amd64.exe",
+    "build:bin": "mkdir -p bin && bun run scripts/build-binaries.ts --all",
+    "build:bin:host": "mkdir -p bin && bun run scripts/build-binaries.ts --host",
+    "build:bin:linux-amd64": "mkdir -p bin && bun run scripts/build-binaries.ts --target=linux-amd64",
+    "build:bin:linux-arm64": "mkdir -p bin && bun run scripts/build-binaries.ts --target=linux-arm64",
+    "build:bin:darwin-amd64": "mkdir -p bin && bun run scripts/build-binaries.ts --target=darwin-amd64",
+    "build:bin:darwin-arm64": "mkdir -p bin && bun run scripts/build-binaries.ts --target=darwin-arm64",
+    "build:bin:windows": "mkdir -p bin && bun run scripts/build-binaries.ts --target=windows-amd64",
+    "source:fingerprint": "bun run scripts/source-fingerprint.ts",
+    "benchmark:build": "cd testdata/benchmark-app && npm ci --legacy-peer-deps && ./build.sh all",
+    "test:ci": "bun run build:types && bun run benchmark:build && JSSCAN_REQUIRE_BENCHMARKS=1 vitest run && bun run test:performance",
+    "test:performance": "bun run scripts/performance-gate.ts",
     "dev": "bun build src/index.ts src/cli.ts --outdir dist --target bun --sourcemap=external --watch",
     "start": "bun dist/cli.js",
     "test": "vitest run"
@@ -34,6 +39,7 @@
     "@codemod/matchers": "^1.7.1",
     "commander": "^15.0.0",
     "debug": "^4.4.3",
+    "graphql": "^16.11.0",
     "webcrack": "^2.16.0"
   },
   "devDependencies": {

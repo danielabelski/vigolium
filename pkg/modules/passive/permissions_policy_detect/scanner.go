@@ -45,6 +45,11 @@ func New() *Module {
 	return m
 }
 
+func (m *Module) CanProcess(ctx *httpmsg.HttpRequestResponse) bool {
+	return ctx != nil && ctx.Request() != nil && ctx.Response() != nil &&
+		strings.Contains(strings.ToLower(ctx.Response().Header("Content-Type")), "text/html")
+}
+
 // ScanPerHost checks Permissions-Policy and Feature-Policy headers once per host.
 func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {
 	service := ctx.Service()
@@ -75,7 +80,7 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 	var issues []string
 
 	if permissionsPolicy == "" && featurePolicy == "" {
-		issues = append(issues, "Neither Permissions-Policy nor Feature-Policy header is present")
+		return nil, nil // absence is not actionable without sensitive feature use
 	}
 
 	// Check Permissions-Policy for overly permissive directives
@@ -126,6 +131,9 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 			URL:              urlx.String(),
 			Request:          string(ctx.Request().Raw()),
 			ExtractedResults: issues,
+			RecordKind:       output.RecordKindObservation,
+			EvidenceGrade:    output.EvidenceGradeObservation,
+			DedupKey:         "permissions-policy-posture|" + host,
 			Info: output.Info{
 				Description: fmt.Sprintf("Permissions policy audit: %d issue(s) found", len(issues)),
 			},

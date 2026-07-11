@@ -16,11 +16,35 @@ import (
 )
 
 var dbListCmd = &cobra.Command{
-	Use:     "list",
+	Use:     "list [table]",
 	Aliases: []string{"ls"},
 	Short:   "List database records (default: http_records)",
-	Long:    "Browse rows from any database table. Defaults to http_records but accepts a positional table name (findings, scans, scopes, …). Supports tree view, raw HTTP display, column selection, and filters by host, method, status, scan ID, severity, and time range.",
+	Long:    "Browse rows from any database table. Defaults to http_records but accepts a positional table name (findings, scans, scopes, …). Supports tree view, raw HTTP display, column selection, and filters by host, method, status, scan UUID, severity, and time range. The parent --table flag is a deprecated alias for the positional table name.",
+	Args:    cobra.MaximumNArgs(1),
 	RunE:    runDBList,
+}
+
+// resolveDBListTable determines the target table for `db list [table]`. The
+// positional table name is the primary interface; the persistent --table flag is
+// kept as a deprecated alias. Supplying both with different values is a conflict
+// error rather than a silent pick, so `db list findings` can never quietly query
+// http_records. Defaults to http_records when neither is given.
+func resolveDBListTable(args []string) (string, error) {
+	positional := ""
+	if len(args) > 0 {
+		positional = strings.TrimSpace(args[0])
+	}
+	if positional != "" && globalTable != "" && !strings.EqualFold(positional, globalTable) {
+		return "", fmt.Errorf("conflicting table selection: positional %q vs --table %q; specify only one (--table is deprecated for db list — prefer the positional table name)", positional, globalTable)
+	}
+	switch {
+	case positional != "":
+		return positional, nil
+	case globalTable != "":
+		return globalTable, nil
+	default:
+		return "http_records", nil
+	}
 }
 
 var (
@@ -49,6 +73,7 @@ var (
 	// Finding type filtering flags
 	listModuleType    string
 	listFindingSource string
+	listRecordKind    string
 
 	// Sorting flags
 	listSort string
@@ -94,6 +119,7 @@ func registerListFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&listRemark, "remark", "", "Filter records containing this text in remarks")
 	cmd.Flags().StringVar(&listModuleType, "module-type", "", "Filter findings by module type (active, passive, nuclei, secret-scan, agent, source-tools, oast, extension)")
 	cmd.Flags().StringVar(&listFindingSource, "finding-source", "", "Filter findings by source (dynamic-assessment, spa, agent, oast, source-tools, extension)")
+	cmd.Flags().StringVar(&listRecordKind, "record-kind", "", "Filter by record kind (finding, candidate, observation; comma-separated). Default: finding")
 
 	// Date range flags
 	cmd.Flags().StringVar(&listFrom, "from", "", "Show records created after this date (YYYY-MM-DD or RFC3339)")
@@ -121,23 +147,19 @@ func runDBList(cmd *cobra.Command, args []string) error {
 		return runListTables(context.Background(), db)
 	}
 
+	// Resolve the target table from the positional arg (primary) / --table alias.
+	tableName, err := resolveDBListTable(args)
+	if err != nil {
+		return err
+	}
+
 	// Handle --list-columns: show columns for the table and exit (no watch)
 	if listColumnNames {
-		tableName := "http_records"
-		if globalTable != "" {
-			tableName = globalTable
-		}
 		return runListColumns(context.Background(), db, tableName)
 	}
 
 	return runWithWatch(func() error {
 		ctx := context.Background()
-
-		// Determine table name from --table flag
-		tableName := "http_records"
-		if globalTable != "" {
-			tableName = globalTable
-		}
 
 		// For non-default tables, use generic query
 		switch tableName {
@@ -290,6 +312,10 @@ func runListFindings(ctx context.Context, db *database.DB) error {
 	if err != nil {
 		return err
 	}
+	recordKinds, err := parseRecordKinds(listRecordKind)
+	if err != nil {
+		return err
+	}
 
 	filters := database.QueryFilters{
 		ProjectUUID:   projectUUID,
@@ -298,6 +324,7 @@ func runListFindings(ctx context.Context, db *database.DB) error {
 		Severity:      severities,
 		ModuleType:    listModuleType,
 		FindingSource: listFindingSource,
+		RecordKinds:   recordKinds,
 		DateFrom:      dateFrom,
 		DateTo:        dateTo,
 		SearchTerm:    dbSearch,

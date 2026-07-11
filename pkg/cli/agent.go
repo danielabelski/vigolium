@@ -19,6 +19,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// oliumProviderFlagUsage is the shared --provider help text for every agent
+// subcommand, generated from olium.ProviderNames so the advertised provider set
+// always matches exactly what the runtime accepts (no per-command drift).
+var oliumProviderFlagUsage = "Olium provider override: " + olium.ProviderNamesString(" | ") + " (falls back to agent.olium.provider config)"
+
 // Agent command flags
 var (
 	agentLabel           string
@@ -134,7 +139,7 @@ func init() {
 	rf.StringVar(&agentInstruction, "instruction", "", "Custom instruction to guide the agent (appended to prompt)")
 	rf.StringVar(&agentInstructionFile, "instruction-file", "", "Path to a file containing custom instructions")
 	rf.BoolVar(&agentUploadResults, "upload-results", false, "Upload session bundle to cloud storage after completion (requires storage config)")
-	rf.StringVar(&agentQueryOliumProvider, "provider", "", "Olium provider override: openai-codex-oauth | openai-api-key | anthropic-api-key | anthropic-oauth | anthropic-cli | anthropic-claude-sdk-bridge | anthropic-vertex | google-vertex | openai-compatible (falls back to agent.olium.provider config)")
+	rf.StringVar(&agentQueryOliumProvider, "provider", "", oliumProviderFlagUsage)
 	rf.StringVar(&agentQueryOliumModel, "model", "", "Olium model id override (falls back to agent.olium.model)")
 	rf.StringVar(&agentQueryOliumOAuthCred, "oauth-cred", "", "Olium OAuth/SA credential file (openai-codex-oauth, anthropic-vertex, or google-vertex; falls back to agent.olium.oauth_cred_path or $GOOGLE_APPLICATION_CREDENTIALS)")
 	rf.StringVar(&agentQueryOliumOAuthToken, "oauth-token", "", "Olium Anthropic OAuth bearer token (anthropic-oauth provider; falls back to agent.olium.oauth_token or $ANTHROPIC_API_KEY)")
@@ -304,15 +309,28 @@ func printAgentList(settings *config.Settings) error {
 		Auth        string
 		Description string
 	}
-	defaults := []providerEntry{
-		{"openai-codex-oauth", "gpt-5.5", "~/.codex/auth.json", "OpenAI Codex via ChatGPT OAuth (default)"},
-		{"openai-api-key", "gpt-5.5", "$OPENAI_API_KEY", "OpenAI chat API via API key"},
-		{"anthropic-api-key", "claude-opus-4-7", "$ANTHROPIC_API_KEY", "Anthropic Claude via API key"},
-		{"anthropic-oauth", "claude-opus-4-7", "$ANTHROPIC_API_KEY", "Anthropic Claude via OAuth bearer token (claude setup-token)"},
-		{"anthropic-cli", "claude-opus-4-7", "claude binary in PATH", "Anthropic Claude via local claude CLI (alias: anthropic-claude-cli)"},
-		{"anthropic-claude-sdk-bridge", "(claude default)", "Claude Code subscription", "Claude Code via Agent SDK (vigolium-audit bridge)"},
-		{"anthropic-vertex", "claude-opus-4-6", "GCP service-account JSON", "Anthropic Claude on Google Vertex AI"},
-		{"google-vertex", "gemini-2.5-pro", "GCP service-account JSON", "Google Gemini on Vertex AI"},
+	// Display metadata keyed by provider name. The rendered list is driven by
+	// olium.ProviderNames (the runtime's source of truth), so every accepted
+	// provider always appears — a provider added to the runtime without metadata
+	// here still shows up with a generic row rather than silently disappearing.
+	meta := map[string]providerEntry{
+		"openai-codex-oauth":          {Model: "gpt-5.5", Auth: "~/.codex/auth.json", Description: "OpenAI Codex via ChatGPT OAuth (default)"},
+		"openai-api-key":              {Model: "gpt-5.5", Auth: "$OPENAI_API_KEY", Description: "OpenAI chat API via API key"},
+		"openai-responses":            {Model: "gpt-5.5", Auth: "$OPENAI_API_KEY", Description: "OpenAI Responses API (/v1/responses) via API key"},
+		"anthropic-api-key":           {Model: "claude-opus-4-7", Auth: "$ANTHROPIC_API_KEY", Description: "Anthropic Claude via API key"},
+		"anthropic-oauth":             {Model: "claude-opus-4-7", Auth: "$ANTHROPIC_API_KEY", Description: "Anthropic Claude via OAuth bearer token (claude setup-token)"},
+		"anthropic-cli":               {Model: "claude-opus-4-7", Auth: "claude binary in PATH", Description: "Anthropic Claude via local claude CLI (alias: anthropic-claude-cli)"},
+		"anthropic-claude-sdk-bridge": {Model: "(claude default)", Auth: "Claude Code subscription", Description: "Claude Code via Agent SDK (vigolium-audit bridge)"},
+		"anthropic-vertex":            {Model: "claude-opus-4-6", Auth: "GCP service-account JSON", Description: "Anthropic Claude on Google Vertex AI"},
+		"google-vertex":               {Model: "gemini-2.5-pro", Auth: "GCP service-account JSON", Description: "Google Gemini on Vertex AI"},
+		"openai-compatible":           {Model: "custom_provider.model_id", Auth: "custom_provider.base_url", Description: "OpenAI-compatible endpoint (local Ollama/vLLM/gateway)"},
+		"anthropic-compatible":        {Model: "custom_provider.model_id", Auth: "custom_provider.base_url", Description: "Anthropic Messages-compatible gateway"},
+	}
+	defaults := make([]providerEntry, 0, len(olium.ProviderNames))
+	for _, name := range olium.ProviderNames {
+		e := meta[name]
+		e.Name = name
+		defaults = append(defaults, e)
 	}
 
 	activeProvider := olium.CanonicalProviderName(settings.Agent.Olium.Provider)

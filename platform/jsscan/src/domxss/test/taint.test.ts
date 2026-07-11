@@ -66,4 +66,126 @@ describe('dom-xss taint', () => {
     );
     expect(noSink).toHaveLength(0);
   });
+
+  test('does not use assignments that occur after the sink', async () => {
+    const f = await flows(`let value; el.innerHTML = value; value = location.hash;`);
+    expect(f).toHaveLength(0);
+  });
+
+  test('keeps same-named bindings in separate scopes isolated', async () => {
+    const f = await flows(`
+      function sourceOnly() { const value = location.hash; console.log(value); }
+      function sinkOnly() { const value = 'safe'; el.innerHTML = value; }
+    `);
+    expect(f).toHaveLength(0);
+  });
+
+  test('does not treat shadowed browser globals as sources', async () => {
+    const f = await flows(`
+      function render(location, document) {
+        const value = location.hash;
+        document.body.innerHTML = value;
+      }
+      render({hash: 'safe'}, {body: document.body});
+    `);
+    expect(f).toHaveLength(0);
+  });
+
+  test('an unconditional clean write kills earlier taint', async () => {
+    const f = await flows(`let value = location.hash; value = 'safe'; el.innerHTML = value;`);
+    expect(f).toHaveLength(0);
+  });
+
+  test('summarizes local return values across calls', async () => {
+    const f = await flows(`
+      function readHash() { return decodeURIComponent(location.hash); }
+      const value = readHash();
+      el.innerHTML = value;
+    `);
+    expect(f).toHaveLength(1);
+    expect(f[0].path.some((entry) => entry.kind === 'return')).toBe(true);
+  });
+
+  test('replays sink summaries with concrete call-site arguments', async () => {
+    const f = await flows(`
+      function render(value) { document.body.innerHTML = value; }
+      render(location.search);
+    `);
+    expect(f).toHaveLength(1);
+    expect(f[0].source).toBe('location.search');
+  });
+
+  test('recognizes strong sanitizer barriers', async () => {
+    const f = await flows(`
+      const value = DOMPurify.sanitize(location.hash);
+      document.body.innerHTML = value;
+    `);
+    expect(f).toHaveLength(0);
+  });
+
+  test('models postMessage event data as a medium-confidence source', async () => {
+    const f = await flows(`
+      window.addEventListener('message', (event) => {
+        document.body.innerHTML = event.data;
+      });
+    `);
+    expect(f).toHaveLength(1);
+    expect(f[0].source).toBe('postMessage.data');
+    expect(f[0].confidence).toBe('medium');
+  });
+
+  test('lowers postMessage confidence when a concrete origin check exists', async () => {
+    const f = await flows(`
+      window.addEventListener('message', (event) => {
+        if (event.origin !== 'https://trusted.example') return;
+        document.body.innerHTML = event.data;
+      });
+    `);
+    expect(f).toHaveLength(1);
+    expect(f[0].confidence).toBe('low');
+    expect(f[0].path[0].label).toContain('origin checked');
+  });
+
+  test('covers framework and parser HTML sinks', async () => {
+    const f = await flows(`
+      const value = location.hash;
+      new DOMParser().parseFromString(value, 'text/html');
+      $('<div>').append(value);
+      const view = <div dangerouslySetInnerHTML={{__html: value}} />;
+    `);
+    expect(f.map((flow) => flow.sink)).toEqual(expect.arrayContaining([
+      'DOMParser.parseFromString(text/html)', 'jquery.append', 'React.dangerouslySetInnerHTML',
+    ]));
+  });
+
+  test('classifies browser network/script URL flows separately', async () => {
+    const f = await flows(`
+      const target = location.hash;
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', target);
+      new WebSocket(target);
+      import(target);
+    `);
+    expect(f).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sink: 'XMLHttpRequest.open', flowType: 'clientRequestInjection' }),
+      expect.objectContaining({ sink: 'WebSocket.url', flowType: 'clientRequestInjection' }),
+      expect.objectContaining({ sink: 'dynamic import', flowType: 'scriptUrlInjection' }),
+    ]));
+  });
+
+  test('emits narrowly scoped prototype-pollution evidence', async () => {
+    const f = await flows(`Object.prototype[location.hash] = true;`);
+    expect(f).toEqual([
+      expect.objectContaining({ flowType: 'prototypePollution', sink: 'Object.prototype[dynamicKey]' }),
+    ]);
+  });
+
+  test('honours the configured flow-count budget', async () => {
+    const result = await jsscan(`
+      a.innerHTML = location.hash;
+      b.innerHTML = location.search;
+      c.innerHTML = location.href;
+    `, { profile: 'dom-security', limits: { maxDomFlows: 2 } });
+    expect(result.domFlows).toHaveLength(2);
+  });
 });

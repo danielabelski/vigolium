@@ -18,8 +18,8 @@ import (
 // registerInputSourceFlags registers the target/input/input-mode set used by
 // commands that ingest or scan from external sources.
 func registerInputSourceFlags(flags *pflag.FlagSet) {
-	flags.StringSliceVarP(&globalTargets, "target", "t", nil, "Target URL to scan (can be specified multiple times)")
-	flags.StringSliceVarP(&globalTargetFiles, "target-file", "T", nil, "File containing target URLs (one per line; repeatable for multiple files)")
+	flags.StringArrayVarP(&globalTargets, "target", "t", nil, "Target URL to scan (repeatable). Commas are literal so a URL query like ?ids=1,2,3 stays one target — repeat -t for multiple targets.")
+	flags.StringArrayVarP(&globalTargetFiles, "target-file", "T", nil, "File containing target URLs (one per line; repeatable for multiple files). Commas in the path are literal.")
 	flags.StringVarP(&globalInput, "input", "i", "-", "Input file path or spec (use - for stdin)")
 	flags.StringVarP(&globalInputMode, "input-mode", "I", "urls", "Input format: urls, openapi, swagger, burp, curl, nuclei, har (see --list-input-mode)")
 	flags.DurationVar(&globalInputReadTimeout, "input-read-timeout", 3*time.Minute, "Timeout for reading input from stdin or file")
@@ -30,7 +30,7 @@ func registerInputSourceFlags(flags *pflag.FlagSet) {
 func registerHTTPClientFlags(flags *pflag.FlagSet) {
 	flags.DurationVar(&globalTimeout, "timeout", 15*time.Second, "HTTP request timeout (e.g. 30s, 1m, 2h)")
 	flags.IntVarP(&globalConcurrency, "concurrency", "c", 50, "Number of concurrent scan workers")
-	flags.IntVarP(&globalRateLimit, "rate-limit", "r", 100, "Maximum HTTP requests per second")
+	flags.IntVarP(&globalRateLimit, "rate-limit", "r", 100, "Global requests/second cap, enforced across native scanning and known-issue-scan when set (unset = per-host concurrency only)")
 	flags.IntVar(&globalMaxPerHost, "max-per-host", 50, "Maximum concurrent requests allowed per host")
 	flags.IntVar(&globalMaxHostError, "max-host-error", 30, "Skip host after reaching this many consecutive errors")
 	flags.IntVar(&globalMaxFindingsPerModule, "max-findings-per-module", 10, "Stop reporting after N findings per module (0 = unlimited)")
@@ -55,7 +55,7 @@ func registerScanPipelineFlags(flags *pflag.FlagSet) {
 // (when -i is an OpenAPI file) and ingest.
 func registerSpecFlags(flags *pflag.FlagSet) {
 	flags.BoolVar(&globalSpecURL, "spec-url", false, "Use base URLs from the OpenAPI spec's servers field")
-	flags.StringSliceVar(&globalSpecHeader, "spec-header", nil, "Add HTTP header to OpenAPI-generated requests (repeatable)")
+	flags.StringArrayVar(&globalSpecHeader, "spec-header", nil, "Add HTTP header to OpenAPI-generated requests (repeatable; commas are literal)")
 	flags.StringSliceVar(&globalSpecVar, "spec-var", nil, "Set OpenAPI parameter value as key=value (repeatable)")
 	flags.StringVar(&globalSpecDefault, "spec-default", "1", "Fallback value for required OpenAPI parameters that lack examples")
 }

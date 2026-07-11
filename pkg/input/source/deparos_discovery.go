@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -29,6 +30,15 @@ import (
 type RecordSaver interface {
 	SaveRecord(ctx context.Context, httpRR *httpmsg.HttpRequestResponse, source string, projectUUID string) (string, error)
 	SaveRecordBatch(ctx context.Context, records []*httpmsg.HttpRequestResponse, source string, projectUUID string) ([]string, error)
+}
+
+type analysisArtifactSaver interface {
+	SaveAnalysisArtifact(
+		ctx context.Context,
+		httpRecordUUID, kind, filename, mediaType, sha256 string,
+		content []byte,
+		metadata string,
+	) error
 }
 
 // DeparosDiscoveryConfig configures the deparos content discovery source.
@@ -97,6 +107,7 @@ type DeparosDiscoveryConfig struct {
 	MaxConsecutiveWAFBlocks int
 	ObservedMaxItems        int
 	DisableKingfisher       bool
+	JSScan                  *deparosconfig.JSScanConfig
 
 	// Per-prefix circuit breaker (zero values = use deparos defaults).
 	PrefixBreakerEnabled        *bool   // nil = default (true)
@@ -561,6 +572,9 @@ func (d *DeparosDiscoverySource) buildDeparosConfig(target string) *deparosconfi
 		cfg.Engine.ObservedMaxItems = d.cfg.ObservedMaxItems
 	}
 	cfg.Engine.DisableKingfisher = d.cfg.DisableKingfisher
+	if d.cfg.JSScan != nil {
+		cfg.JSScan = *d.cfg.JSScan
+	}
 
 	// Prefix breaker overrides — zero/nil values keep deparos defaults.
 	if d.cfg.PrefixBreakerEnabled != nil {
@@ -823,9 +837,11 @@ func (d *DeparosDiscoverySource) discoverTarget(parentCtx context.Context, targe
 	// Persist + emit each record set under its own source label. Spec endpoints
 	// go out as request-only stubs (no response); the executor fetches a baseline
 	// for each and backfills the stored record so the route isn't left empty.
-	if err := d.saveAndEmit(ctx, crawled, crawlRecordSource); err != nil {
+	crawledUUIDs, err := d.saveAndEmitWithUUIDs(ctx, crawled, crawlRecordSource)
+	if err != nil {
 		return err
 	}
+	d.persistJSScanSourceArtifacts(ctx, siteMap, crawled, crawledUUIDs)
 	if err := d.saveAndEmit(ctx, specEndpoints, specRecordSource); err != nil {
 		return err
 	}
@@ -838,8 +854,13 @@ func (d *DeparosDiscoverySource) discoverTarget(parentCtx context.Context, targe
 // (so downstream findings link back to the stored record). A DB save failure is
 // logged and the records are still emitted (without UUIDs) so scanning proceeds.
 func (d *DeparosDiscoverySource) saveAndEmit(ctx context.Context, records []*httpmsg.HttpRequestResponse, recordSource string) error {
+	_, err := d.saveAndEmitWithUUIDs(ctx, records, recordSource)
+	return err
+}
+
+func (d *DeparosDiscoverySource) saveAndEmitWithUUIDs(ctx context.Context, records []*httpmsg.HttpRequestResponse, recordSource string) ([]string, error) {
 	if len(records) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var uuids []string
@@ -864,12 +885,63 @@ func (d *DeparosDiscoverySource) saveAndEmit(ctx context.Context, records []*htt
 
 		select {
 		case <-d.done:
-			return fmt.Errorf("source closed")
+			return uuids, fmt.Errorf("source closed")
 		case d.items <- item:
 		}
 	}
 
-	return nil
+	return uuids, nil
+}
+
+func (d *DeparosDiscoverySource) persistJSScanSourceArtifacts(
+	ctx context.Context,
+	siteMap *deparosstorage.SiteMap,
+	records []*httpmsg.HttpRequestResponse,
+	uuids []string,
+) {
+	saver, ok := d.cfg.Repository.(analysisArtifactSaver)
+	if !ok || siteMap == nil {
+		return
+	}
+	recordUUIDByURL := make(map[string]string, len(records))
+	for i, record := range records {
+		if record == nil || i >= len(uuids) || uuids[i] == "" {
+			continue
+		}
+		recordUUIDByURL[record.Target()] = uuids[i]
+	}
+	artifacts, err := siteMap.Extractions().GetJSScanSourceArtifacts(siteMap.SessionDBID())
+	if err != nil {
+		zap.L().Debug("Failed to load recovered source-map artifacts", zap.Error(err))
+		return
+	}
+	stored := 0
+	for _, artifact := range artifacts {
+		recordUUID := recordUUIDByURL[artifact.GeneratedURL]
+		if recordUUID == "" || artifact.Content == "" {
+			continue
+		}
+		metadata, marshalErr := json.Marshal(map[string]string{
+			"generated_url": artifact.GeneratedURL,
+			"virtual_url":   artifact.VirtualURL,
+			"source_path":   artifact.SourcePath,
+			"language":      artifact.Language,
+		})
+		if marshalErr != nil {
+			continue
+		}
+		if saveErr := saver.SaveAnalysisArtifact(
+			ctx, recordUUID, "source-map-original", artifact.SourcePath,
+			"application/javascript", artifact.ContentSHA256, []byte(artifact.Content), string(metadata),
+		); saveErr != nil {
+			zap.L().Debug("Failed to promote source-map artifact", zap.String("source", artifact.SourcePath), zap.Error(saveErr))
+			continue
+		}
+		stored++
+	}
+	if stored > 0 {
+		zap.L().Info("Stored recovered source-map artifacts", zap.Int("count", stored))
+	}
 }
 
 // extractSpecEndpoints scans discovered records for API specs (OpenAPI/Swagger/Postman)

@@ -103,6 +103,14 @@ type moduleFindingTracker struct {
 	warned sync.Once
 }
 
+// findingAdmission coordinates the first cap decision for one post-hook
+// root-cause identity. Duplicate emissions wait for ready before using allowed,
+// so they cannot race ahead and persist a finding that the owner is dropping.
+type findingAdmission struct {
+	ready   chan struct{}
+	allowed bool
+}
+
 // HookRunner transforms requests before scanning and filters results after scanning.
 type HookRunner interface {
 	RunPreHooks(req *httpmsg.HttpRequestResponse) (*httpmsg.HttpRequestResponse, error)
@@ -120,6 +128,8 @@ type OASTFlusher interface {
 type ExecutorConfig struct {
 	Workers               int
 	OnResult              func(*output.ResultEvent)
+	OnCandidate           func(*output.ResultEvent)
+	OnObservation         func(*output.ResultEvent)
 	OnTraffic             func(method, url string, statusCode int, contentType string) // Optional: called for each processed item
 	Services              *services.Services
 	HTTPRequester         *http.Requester
@@ -331,6 +341,12 @@ type scanCaches struct {
 	// Key: module ID → *moduleFindingTracker.
 	moduleFindingCount sync.Map
 
+	// emittedFindingIDs tracks final post-hook root-cause identities and their
+	// admission decisions. Repeated evidence is still persisted so the repository
+	// can merge it, but only the first distinct finding consumes caps, stats,
+	// callbacks, and notifications.
+	emittedFindingIDs sync.Map
+
 	// perHostActiveClaimed / perHostPassiveClaimed ensure per-host modules run
 	// exactly once per (module, host) pair even with concurrent workers.
 	// Key: hostClaimKey{moduleID, origin} → struct{}. Bounded LRUs rather than
@@ -372,6 +388,11 @@ type workerPool struct {
 	feedbackCh    chan *work.WorkItem
 	feeder        *executorFeeder
 	activeTaskSem chan struct{}
+	// passiveTaskSem bounds concurrent parallel-passive goroutines GLOBALLY across
+	// all record workers. Without it, ParallelPassive spawns one goroutine per
+	// eligible passive module for every in-flight record (workers × modules), which
+	// can reach thousands; this caps the fan-out to a fixed budget.
+	passiveTaskSem chan struct{}
 }
 
 // NewExecutor creates a new Executor with the given configuration.
@@ -462,6 +483,15 @@ func NewExecutor(
 		}
 	}
 	e.pool.activeTaskSem = make(chan struct{}, activeTaskLimit)
+
+	// Global budget for parallel-passive goroutines. Passive work is CPU-bound, so
+	// the bound only needs to keep cores busy — sized like the active budget so the
+	// fan-out is capped to hundreds instead of workers × registered-modules.
+	passiveTaskLimit := cfg.Workers * 8
+	if passiveTaskLimit < 64 {
+		passiveTaskLimit = 64
+	}
+	e.pool.passiveTaskSem = make(chan struct{}, passiveTaskLimit)
 
 	// Wire risk score updater, remarks annotator, record-response rewriter, and
 	// request UUID resolver into ScanContext
@@ -1240,7 +1270,11 @@ func (e *Executor) fetchBaselineResponse(ctx context.Context, req *httpmsg.HttpR
 		return req, req.Response(), nil, true
 	}
 
-	respChain, _, err := e.httpClient.Execute(req, http.Options{})
+	// Bind the phase context so a cancelled scan / phase deadline / Ctrl-C aborts
+	// the baseline fetch in flight. The context-less Execute would otherwise fall
+	// back to context.Background() and keep hitting the target after the phase
+	// asked every worker to stop.
+	respChain, _, err := e.httpClient.WithContext(ctx).Execute(req, http.Options{})
 	if err != nil {
 		zap.L().Debug("Failed to fetch baseline response, skipping item",
 			zap.String("url", req.Target()),
@@ -1665,17 +1699,28 @@ func (e *Executor) runPassiveWithTimeout(
 // timeout must not cancel a request other modules deduped onto. The per-module
 // timeout is still enforced here — a timed-out call returns (nil, false) and the
 // caller skips processResults — it just doesn't sever the shared socket early.
+// releaseSlot frees the active-task semaphore slot goActiveTask acquired for this
+// call. runActiveWithTimeout owns it and MUST call it exactly once: from the
+// background scan goroutine's defer (so the slot is held for as long as the real
+// work runs, even past a per-module timeout) or directly on the pre-spawn early
+// return. Releasing it when the wrapper merely *gives up waiting* would let the
+// executor admit replacement work while abandoned scans still hold connections,
+// so the active-task cap would understate true concurrency (a hot/slow target
+// could then be hit far harder than --concurrency allows).
 func (e *Executor) runActiveWithTimeout(
 	ctx context.Context,
 	scanFn func(context.Context) ([]*output.ResultEvent, error),
 	module modules.Module,
 	item *httpmsg.HttpRequestResponse,
+	releaseSlot func(),
 ) ([]*output.ResultEvent, bool) {
 	// Fast exit when the scan/phase context is already cancelled: skip the
 	// watchdog goroutine + pooled timer + result channel entirely (mirrors the
 	// <-ctx.Done() arm below). Avoids spawning doomed goroutines for the many
-	// modules still dispatched during shutdown or after a phase deadline.
+	// modules still dispatched during shutdown or after a phase deadline. No
+	// background goroutine is spawned here, so release the slot directly.
 	if ctx.Err() != nil {
+		releaseSlot()
 		return nil, false
 	}
 
@@ -1697,6 +1742,12 @@ func (e *Executor) runActiveWithTimeout(
 	start := time.Now()
 	ch := moduleResultChanPool.Get().(chan moduleCallResult)
 	go func() {
+		// Hold the active-task slot for the whole life of the real work. On the
+		// normal path this fires just as the wrapper receives the result; on the
+		// timeout / parent-cancel paths the wrapper has already returned but this
+		// abandoned goroutine keeps the slot until scanFn actually unwinds, so the
+		// executor's concurrency cap keeps reflecting genuinely in-flight scans.
+		defer releaseSlot()
 		events, err := scanFn(callCtx)
 		ch <- moduleCallResult{events, err}
 	}()

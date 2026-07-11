@@ -9,13 +9,13 @@ const (
 )
 
 var (
-	ModuleDesc = `**What it means:** The server returns a permissive Cross-Origin Resource Sharing (CORS) policy letting outside origins read its responses, confirmed via Access-Control-Allow-Origin reflecting an attacker-chosen origin, allowing null, pairing wildcard with credentials, or accepting forged subdomain or scheme variants.
+	ModuleDesc = `**What it means:** The server returns a permissive CORS policy. Reproduced origin handling remains a candidate; it becomes a finding only when a browser-valid credentialed request exposes content unavailable to an unauthenticated control.
 
-**How it's exploited:** An attacker hosts a page that scripts an authenticated cross-origin request. Because the server trusts the attacker's origin, the browser hands the response to attacker JavaScript, leaking session data like API or CSRF tokens.
+**How it's exploited:** An attacker hosts a page that performs a credentialed cross-origin request and reads protected content. Candidates still need that proof or control of a trusted origin.
 
 **Fix:** Validate Origin against a strict allowlist of exact trusted origins, never reflect arbitrary origins, never combine the wildcard with credentials, and reject null.`
 
-	ModuleConfirmation = "Confirmed when the server reflects a controlled Origin value in the Access-Control-Allow-Origin header, indicating permissive CORS policy"
+	ModuleConfirmation = "Confirmed only when reproduced attacker-origin handling, ACAC, and an authenticated-versus-unauthenticated response differential prove protected cross-origin data exposure"
 	ModuleSeverity     = severity.Low
 	ModuleConfidence   = severity.Firm
 	ModuleTags         = []string{"misconfiguration", "auth-bypass", "moderate"}

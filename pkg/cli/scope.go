@@ -25,6 +25,7 @@ var scopeViewCmd = &cobra.Command{
 	Aliases: []string{"ls", "list"},
 	Short:   "Display current scope configuration",
 	Long:    "Print all scope.* config entries. Pass a component name (host, path, status_code, request_content_type, response_content_type, request_string, response_string) to filter to that subset.",
+	Args:    cobra.MaximumNArgs(1),
 	RunE:    runScopeView,
 }
 

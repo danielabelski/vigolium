@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"strings"
 	"time"
 
@@ -93,28 +94,64 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // defaultMaxProxyBodySize is the maximum body size (request or response) that
 // the proxy will buffer for recording. Larger bodies are still forwarded to
-// the client but skipped for database recording to prevent OOM.
+// the client in full but skipped for database recording to prevent OOM.
 const defaultMaxProxyBodySize = 10 * 1024 * 1024 // 10 MB
 
-// handleHTTP forwards plain HTTP requests and records the transaction.
+// captureBuffer records up to limit bytes of a stream it is teed onto while
+// counting the total bytes seen. It lets the proxy forward a body to the client
+// in full yet retain only a bounded copy for recording — the recording limit must
+// never truncate the forwarded traffic. Write never returns short or errors, so
+// the io.Copy/TeeReader driving the forward is never throttled by the capture.
+type captureBuffer struct {
+	buf   bytes.Buffer
+	limit int
+	total int64
+}
+
+func (c *captureBuffer) Write(p []byte) (int, error) {
+	c.total += int64(len(p))
+	if rem := c.limit - c.buf.Len(); rem > 0 {
+		if len(p) > rem {
+			c.buf.Write(p[:rem])
+		} else {
+			c.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+// Bytes returns the captured prefix (valid only when !truncated for recording).
+func (c *captureBuffer) Bytes() []byte { return c.buf.Bytes() }
+
+// truncated reports whether the stream exceeded the capture limit, meaning the
+// captured copy is a prefix and must not be recorded as a complete message.
+func (c *captureBuffer) truncated() bool { return c.total > int64(c.limit) }
+
+// responseHasNoBody reports whether resp carries no message body per HTTP rules,
+// so it must be written with its original framing (no chunked body) instead of
+// being streamed.
+func responseHasNoBody(resp *http.Response, req *http.Request) bool {
+	if req != nil && req.Method == http.MethodHead {
+		return true
+	}
+	return resp.StatusCode == http.StatusNoContent ||
+		resp.StatusCode == http.StatusNotModified ||
+		(resp.StatusCode >= 100 && resp.StatusCode < 200)
+}
+
+// handleHTTP forwards plain HTTP requests and records the transaction. The
+// recording size limit only bounds the copy kept for the database — the full
+// request and response are always forwarded to the client untouched.
 func (p *proxyHandler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	const maxBody = defaultMaxProxyBodySize
 
-	// Buffer request body with size limit
-	var reqBody []byte
+	// Tee the request body: RoundTrip forwards the FULL body upstream while we
+	// retain a bounded copy for recording. A body larger than the limit is still
+	// forwarded intact — only the recorded copy is capped.
+	var reqCap *captureBuffer
 	if r.Body != nil {
-		limited := io.LimitReader(r.Body, maxBody+1)
-		var err error
-		reqBody, err = io.ReadAll(limited)
-		if err != nil {
-			http.Error(w, "failed to read request body", http.StatusBadGateway)
-			return
-		}
-		if int64(len(reqBody)) > maxBody {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(reqBody))
+		reqCap = &captureBuffer{limit: maxBody}
+		r.Body = io.NopCloser(io.TeeReader(r.Body, reqCap))
 	}
 
 	// Ensure absolute URL for proxy
@@ -132,46 +169,47 @@ func (p *proxyHandler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// If response is known to be too large, stream directly and skip recording
-	if resp.ContentLength > maxBody {
-		zap.L().Debug("Proxy: response too large, streaming without recording",
-			zap.String("url", r.URL.String()),
-			zap.Int64("content_length", resp.ContentLength))
-		for k, vv := range resp.Header {
-			for _, v := range vv {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-		return
-	}
-
-	// Buffer response body with size limit
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
-	if err != nil {
-		http.Error(w, "failed to read response", http.StatusBadGateway)
-		return
-	}
-
-	// Write response back to client
+	// Stream the full response body to the client, teeing a bounded copy for
+	// recording. Copying the header map (as adjusted by the transport) preserves
+	// the upstream framing, so streaming forwards the body byte-for-byte.
 	for k, vv := range resp.Header {
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(respBody)
 
-	// If response exceeded limit mid-read, skip recording
-	if int64(len(respBody)) > maxBody {
-		zap.L().Debug("Proxy: response exceeded size limit, skipping recording",
+	// Fast path for a response the transport already knows is oversize: forward it
+	// straight through without teeing into a capture buffer we'd only fill to the
+	// limit and then discard (recording is skipped for truncated bodies anyway).
+	if resp.ContentLength > maxBody {
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+
+	respCap := &captureBuffer{limit: maxBody}
+	if _, err := io.Copy(w, io.TeeReader(resp.Body, respCap)); err != nil {
+		// Client hung up or upstream errored mid-stream; the partial body already
+		// reached the client, so there's nothing faithful left to record.
+		zap.L().Debug("Proxy: response stream to client interrupted",
+			zap.String("url", r.URL.String()), zap.Error(err))
+		return
+	}
+
+	// A body larger than the capture limit was forwarded in full but is too large
+	// to record faithfully; skip recording rather than store a truncated body.
+	if respCap.truncated() || (reqCap != nil && reqCap.truncated()) {
+		zap.L().Debug("Proxy: body exceeded capture limit, forwarded but not recorded",
 			zap.String("url", r.URL.String()))
 		return
 	}
 
-	// Record transaction in background
-	go p.recordTransaction(r, reqBody, resp, respBody)
+	var reqBody []byte
+	if reqCap != nil {
+		reqBody = reqCap.Bytes()
+	}
+	// Record transaction in background so the client is off the DB-write path.
+	go p.recordTransaction(r, reqBody, resp, respCap.Bytes())
 }
 
 // handleConnect handles HTTPS CONNECT. With a MITM CA configured it intercepts
@@ -267,13 +305,13 @@ func (p *proxyHandler) serveDecrypted(tlsConn *tls.Conn, hostPort string) {
 			return
 		}
 
-		// Buffer the request body (size-limited) so it can be both forwarded
-		// and recorded.
-		var reqBody []byte
+		// Tee the request body so RoundTrip forwards it in full upstream while we
+		// keep a bounded copy for recording. A body larger than the limit is still
+		// forwarded intact — only the recorded copy is capped.
+		var reqCap *captureBuffer
 		if req.Body != nil {
-			reqBody, _ = io.ReadAll(io.LimitReader(req.Body, defaultMaxProxyBodySize+1))
-			_ = req.Body.Close()
-			req.Body = io.NopCloser(bytes.NewReader(reqBody))
+			reqCap = &captureBuffer{limit: defaultMaxProxyBodySize}
+			req.Body = io.NopCloser(io.TeeReader(req.Body, reqCap))
 		}
 
 		// Turn the origin-form request into an absolute one for the client
@@ -299,18 +337,39 @@ func (p *proxyHandler) serveDecrypted(tlsConn *tls.Conn, hostPort string) {
 			return
 		}
 
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, defaultMaxProxyBodySize+1))
-		_ = resp.Body.Close()
 		keepAlive := !resp.Close && !req.Close
+		respCap := &captureBuffer{limit: defaultMaxProxyBodySize}
 
 		// Write the response back to the client first, then record. Recording
-		// after the write keeps the client off the DB-write latency path and
-		// avoids racing recordTransaction against writeIntercepted's mutation
-		// of resp (both touch resp.Header).
-		if err := writeIntercepted(tlsConn, resp, respBody); err != nil {
-			return
+		// after the write keeps the client off the DB-write latency path.
+		if responseHasNoBody(resp, req) {
+			// No message body (204/304/HEAD): write with original framing.
+			_ = resp.Body.Close()
+			if err := writeIntercepted(tlsConn, resp, nil); err != nil {
+				return
+			}
+		} else {
+			// Stream the FULL body to the client (chunked framing) while teeing a
+			// bounded copy for recording, so a body larger than the capture limit
+			// is forwarded intact instead of truncated.
+			streamErr := streamIntercepted(tlsConn, resp, respCap, keepAlive)
+			_ = resp.Body.Close()
+			if streamErr != nil {
+				zap.L().Debug("Proxy MITM: response stream failed",
+					zap.String("url", req.URL.String()), zap.Error(streamErr))
+				return
+			}
 		}
-		p.recordTransaction(req, reqBody, resp, respBody)
+
+		// Record only when neither side exceeded the capture limit, so a truncated
+		// prefix is never stored as if it were the complete message.
+		if !respCap.truncated() && (reqCap == nil || !reqCap.truncated()) {
+			var reqBody []byte
+			if reqCap != nil {
+				reqBody = reqCap.Bytes()
+			}
+			p.recordTransaction(req, reqBody, resp, respCap.Bytes())
+		}
 
 		if !keepAlive {
 			return
@@ -343,6 +402,51 @@ func writeIntercepted(w io.Writer, resp *http.Response, body []byte) error {
 	resp.ContentLength = int64(len(body))
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	return resp.Write(w)
+}
+
+// streamIntercepted writes resp's status line and headers to the client, then
+// streams the FULL body with chunked transfer-encoding while teeing a bounded
+// copy into capture. Unlike writeIntercepted (which buffers the whole body), this
+// never truncates the forwarded body when it exceeds the recording limit. It does
+// NOT mutate resp.Header, so a later recordTransaction records the true upstream
+// headers rather than the proxy's re-framing.
+func streamIntercepted(w io.Writer, resp *http.Response, capture *captureBuffer, keepAlive bool) error {
+	var head bytes.Buffer
+	fmt.Fprintf(&head, "%s %s\r\n", resp.Proto, resp.Status)
+	for k, vv := range resp.Header {
+		// Drop hop-by-hop / framing headers we recompute; Content-Encoding is
+		// preserved so the client can still decode the forwarded (undecoded) body.
+		switch k {
+		case "Content-Length", "Transfer-Encoding", "Connection":
+			continue
+		}
+		for _, v := range vv {
+			fmt.Fprintf(&head, "%s: %s\r\n", k, v)
+		}
+	}
+	head.WriteString("Transfer-Encoding: chunked\r\n")
+	if keepAlive {
+		head.WriteString("Connection: keep-alive\r\n")
+	} else {
+		head.WriteString("Connection: close\r\n")
+	}
+	head.WriteString("\r\n")
+	if _, err := w.Write(head.Bytes()); err != nil {
+		return err
+	}
+
+	cw := httputil.NewChunkedWriter(w)
+	if _, err := io.Copy(cw, io.TeeReader(resp.Body, capture)); err != nil {
+		_ = cw.Close()
+		return err
+	}
+	if err := cw.Close(); err != nil {
+		return err
+	}
+	// Terminate the chunked stream (Close writes the 0-length chunk; the caller
+	// must send the final CRLF ending the empty trailer section).
+	_, err := w.Write([]byte("\r\n"))
+	return err
 }
 
 // writeBadGateway emits a minimal 502 onto a raw connection.

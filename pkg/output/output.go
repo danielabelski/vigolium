@@ -24,6 +24,27 @@ type Info struct {
 	Confidence  severity.Confidence `json:"confidence,omitempty"`
 }
 
+// RecordKind separates reconnaissance and unconfirmed hypotheses from
+// reportable vulnerabilities while keeping one backward-compatible event shape.
+type RecordKind string
+
+const (
+	RecordKindFinding     RecordKind = "finding"
+	RecordKindCandidate   RecordKind = "candidate"
+	RecordKindObservation RecordKind = "observation"
+)
+
+// EvidenceGrade records how far a result progressed through confirmation.
+type EvidenceGrade string
+
+const (
+	EvidenceGradeObservation  EvidenceGrade = "E0"
+	EvidenceGradeCandidate    EvidenceGrade = "E1"
+	EvidenceGradeDifferential EvidenceGrade = "E2"
+	EvidenceGradeBypass       EvidenceGrade = "E3"
+	EvidenceGradeImpact       EvidenceGrade = "E4"
+)
+
 // ResultEvent is a wrapped result event for a single scan output.
 // The format is designed to be compatible with Nuclei's JSONL output.
 type ResultEvent struct {
@@ -33,6 +54,12 @@ type ResultEvent struct {
 	// Info contains module metadata, serialized as a nested "info" object
 	// (matching Nuclei's JSONL output).
 	Info Info `json:"info"`
+
+	// RecordKind defaults to finding for compatibility with existing modules.
+	// Candidate and observation events are persisted but excluded from finding
+	// totals, notifications, and cross-module confirmed-result suppression.
+	RecordKind    RecordKind    `json:"record_kind,omitempty"`
+	EvidenceGrade EvidenceGrade `json:"evidence_grade,omitempty"`
 
 	// Type is the type of the result event (always "http" for this scanner)
 	Type string `json:"type"`
@@ -81,6 +108,23 @@ type ResultEvent struct {
 	DedupKey string `json:"-"`
 }
 
+// EffectiveRecordKind returns a validated kind, treating the zero value and
+// unknown legacy values as findings.
+func (r *ResultEvent) EffectiveRecordKind() RecordKind {
+	if r == nil {
+		return RecordKindFinding
+	}
+	switch r.RecordKind {
+	case RecordKindObservation, RecordKindCandidate, RecordKindFinding:
+		return r.RecordKind
+	default:
+		return RecordKindFinding
+	}
+}
+
+// IsFinding reports whether this event is a reportable vulnerability.
+func (r *ResultEvent) IsFinding() bool { return r.EffectiveRecordKind() == RecordKindFinding }
+
 // EvidenceSeparator delimits the request and response halves of a single
 // evidence entry. The primary Request/Response pair and every AdditionalEvidence
 // entry share this format. This is the single source of truth for the delimiter;
@@ -116,6 +160,12 @@ var sha1Pool = sync.Pool{
 func (r *ResultEvent) ID() string {
 	h := sha1Pool.Get().(hash.Hash)
 	h.Reset()
+	// Preserve historical hashes for default findings. Prefix only non-finding
+	// events so a candidate can later be promoted without colliding with itself.
+	if kind := r.EffectiveRecordKind(); kind != RecordKindFinding {
+		_, _ = io.WriteString(h, string(kind))
+		_, _ = io.WriteString(h, "|")
+	}
 
 	if r.DedupKey != "" {
 		_, _ = io.WriteString(h, "dedup|")

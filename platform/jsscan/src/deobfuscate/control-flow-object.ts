@@ -5,6 +5,7 @@ import * as m from '@codemod/matchers';
 import type { Transform } from '../ast-utils';
 import {
   applyTransform,
+  canInlineFunction,
   constKey,
   constMemberExpression,
   createFunctionMatcher,
@@ -109,6 +110,11 @@ export default {
       propertyName,
     );
 
+    // Inlining a logical/reordered wrapper with impure arguments can drop or
+    // reorder side effects. Only the `aggressive` rewrite level opts into that;
+    // Slice 2 threads the level in here. Default: reject impure-arg cases.
+    const allowImpureArgs = false;
+
     function isConstantBinding(binding: Binding) {
       // Workaround because sometimes babel treats the VariableDeclarator/binding itself as a violation
       return binding.constant || binding.constantViolations[0] === binding.path;
@@ -133,6 +139,31 @@ export default {
           ]),
         );
         if (!props.size) return changes;
+
+        // All-or-nothing safety gate. This transform removes the object
+        // declaration once every reference is resolved, so a reference we
+        // cannot safely resolve would be left dangling. Bail (leaving the
+        // object intact and the program valid) if any reference points at a
+        // missing property, a non-member use, or a function call we cannot
+        // inline without changing evaluation order / short-circuit semantics.
+        const allResolvable = binding.referencePaths.every((ref) => {
+          const memberPath = ref.parentPath;
+          if (!memberPath?.isMemberExpression()) return false;
+          const propName = getPropName(memberPath.node.property);
+          const value = propName != null ? props.get(propName) : undefined;
+          if (!value) return false;
+          if (t.isStringLiteral(value)) return true;
+          const callPath = memberPath.parentPath;
+          return (
+            !!callPath?.isCallExpression() &&
+            canInlineFunction(
+              value,
+              callPath as NodePath<t.CallExpression>,
+              allowImpureArgs,
+            )
+          );
+        });
+        if (!allResolvable) return changes;
 
         const oldRefs = [...binding.referencePaths];
 
@@ -240,9 +271,14 @@ export default {
 
           if (t.isStringLiteral(value)) {
             path.replaceWith(value);
-          } else if (path.parentPath.isCallExpression()) {
+          } else if (
+            path.parentPath.isCallExpression() &&
+            canInlineFunction(value, path.parentPath, allowImpureArgs)
+          ) {
             inlineFunction(value, path.parentPath);
           } else {
+            // Substituting the function value itself (rather than inlining its
+            // body) preserves semantics: `{f: fn}.f(x)` → `(fn)(x)`.
             path.replaceWith(value);
           }
           this.changes++;

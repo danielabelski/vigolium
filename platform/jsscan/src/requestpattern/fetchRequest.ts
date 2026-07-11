@@ -3,6 +3,7 @@ import type { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import * as m from '@codemod/matchers';
 import type { Transform } from '../ast-utils';
+import type { AnalysisContext } from '../context';
 import { tracebackVariables } from '../traceback/tracebackVariables';
 import { appendPattern, appendExtractedRequest } from './utils';
 import { getTrackedVariablesMap } from './globalVariableTracking';
@@ -20,7 +21,11 @@ import {
   isValidUrlNode,
 } from './extractRequest';
 
-export function createFetchRequestTransform(ast: ParseResult<t.File> | null = null, sourceCode: string = ''): Transform {
+export function createFetchRequestTransform(
+  analysisContext: AnalysisContext,
+  ast: ParseResult<t.File> | null = null,
+  sourceCode: string = '',
+): Transform {
   return {
     name: 'fetchRequest',
     tags: ['safe'],
@@ -43,10 +48,12 @@ export function createFetchRequestTransform(ast: ParseResult<t.File> | null = nu
               if (args[1] && !t.isObjectExpression(args[1])) {
                 return;
               }
+              analysisContext.claimRequestNode(path.node);
 
               // Output existing requestPattern
-              const result = tracebackVariables(path, [], { ast, sourceCode });
-              appendPattern(result, 'fetchRequest');
+              if (analysisContext.has('requestEvidence')) {
+                appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'fetchRequest', path.node);
+              }
 
               // Extract structured request data
               const trackedVars = getTrackedVariablesMap();
@@ -59,7 +66,7 @@ export function createFetchRequestTransform(ast: ParseResult<t.File> | null = nu
 
               // Generate request for each effective iteration (call site chain)
               for (const iteration of effectiveIterations) {
-                const context = createResolutionContext(currentFunction, iteration);
+                const context = createResolutionContext(currentFunction, iteration, path);
 
                 // extractURL now returns array of {url, queryParams} for multiple values
                 const urlResults = extractURL(args[0], trackedVars, context);
@@ -74,7 +81,10 @@ export function createFetchRequestTransform(ast: ParseResult<t.File> | null = nu
                     cookies: headersNode ? extractCookies(headersNode, trackedVars, context) : [],
                   });
 
-                  appendExtractedRequest(request);
+                  appendExtractedRequest(analysisContext, request, {
+                    extractor: 'fetch', client: 'fetch', confidence: 'high',
+                    node: path.node, functionName: currentFunction,
+                  });
                 }
               }
             }

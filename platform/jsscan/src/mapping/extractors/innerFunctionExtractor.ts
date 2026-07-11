@@ -14,6 +14,7 @@ import type { ParseResult } from '@babel/parser';
 import * as t from '@babel/types';
 import { traverse } from '../../ast-utils/babel';
 import type { FunctionMap, FunctionDefinition } from '../types';
+import type { StructuralIndex } from '../../structure';
 
 /**
  * Extract inner function definitions from AST
@@ -21,8 +22,32 @@ import type { FunctionMap, FunctionDefinition } from '../types';
 export function extractInnerFunctions(
   ast: ParseResult<t.File>,
   functionMap: FunctionMap,
-  _sourceCode: string
+  _sourceCode: string,
+  structuralIndex?: StructuralIndex,
 ): void {
+  if (structuralIndex) {
+    for (const path of structuralIndex.functionPaths) {
+      const node = path.node;
+      let funcName: string | null = null;
+      if (t.isFunctionDeclaration(node) && node.id) {
+        funcName = node.id.name;
+      } else if ((t.isFunctionExpression(node) || t.isArrowFunctionExpression(node)) && path.parentPath?.isVariableDeclarator() && t.isIdentifier(path.parentPath.node.id)) {
+        funcName = path.parentPath.node.id.name;
+      } else if ((t.isFunctionExpression(node) || t.isArrowFunctionExpression(node)) && path.parentPath?.isAssignmentExpression() && t.isMemberExpression(path.parentPath.node.left)) {
+        const property = path.parentPath.node.left.property;
+        funcName = t.isIdentifier(property) ? property.name : t.isStringLiteral(property) ? property.value : null;
+      }
+      if (!funcName || functionMap.functions.has(funcName)) continue;
+      functionMap.functions.set(funcName, {
+        fullName: funcName,
+        name: funcName,
+        params: extractParams(node),
+        startLine: node.loc?.start.line || 0,
+        endLine: node.loc?.end.line || 0,
+      });
+    }
+    return;
+  }
   traverse(ast, {
     // function fillDownloads(params, index) { ... }
     FunctionDeclaration(path) {

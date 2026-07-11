@@ -590,7 +590,9 @@ func emitImportReport(ctx context.Context, db *database.DB, scan *database.Agent
 		scanUUID = scan.UUID
 	}
 	var findings []*database.Finding
-	q := db.NewSelect().Model(&findings).OrderExpr("found_at DESC")
+	q := db.NewSelect().Model(&findings).
+		Where("record_kind IS NULL OR record_kind = '' OR record_kind = ?", database.RecordKindFinding).
+		OrderExpr("found_at DESC")
 	if scanUUID != "" {
 		q = q.Where("agentic_scan_uuid = ?", scanUUID)
 	}

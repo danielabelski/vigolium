@@ -12,14 +12,15 @@ import (
 
 // MergeStats tracks merge operation statistics
 type MergeStats struct {
-	SessionsMerged     int
-	SessionsSkipped    int
-	NodesMerged        int
-	NodesDeduped       int
-	NodesUpdated       int
-	SessionNodesMerged int
-	ExtractionsMerged  int
-	ObservedMerged     int
+	SessionsMerged        int
+	SessionsSkipped       int
+	NodesMerged           int
+	NodesDeduped          int
+	NodesUpdated          int
+	SessionNodesMerged    int
+	ExtractionsMerged     int
+	SourceArtifactsMerged int
+	ObservedMerged        int
 }
 
 // DBMerger handles database merging operations
@@ -112,6 +113,10 @@ func (m *DBMerger) MergeFrom(srcPath string) (*MergeStats, error) {
 
 	if err := m.mergeExtractions(ctx, stats); err != nil {
 		return stats, fmt.Errorf("merge extractions: %w", err)
+	}
+
+	if err := m.mergeJSScanSourceArtifacts(ctx, stats); err != nil {
+		return stats, fmt.Errorf("merge jsscan source artifacts: %w", err)
 	}
 
 	if err := m.mergeObserved(ctx, stats); err != nil {
@@ -309,11 +314,15 @@ func (m *DBMerger) mergeExtractions(ctx context.Context, stats *MergeStats) erro
 		res, err := m.dst.ExecContext(ctx, `
 			INSERT OR IGNORE INTO extractions (
 				source_node_id, session_id, hash, source, source_sub,
-				hostname, url, method, body, content_type, headers, cookies, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				hostname, url, method, body, content_type, headers, cookies,
+				source_url, record_kind, confidence, extractor, module_path,
+				source_line, template_json, schema_version, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, dstSourceNodeID, dstSessionID, src.Hash, src.Source, src.SourceSub,
 			src.Hostname, src.URL, src.Method, src.Body, src.ContentType,
-			src.Headers, src.Cookies, src.CreatedAt)
+			src.Headers, src.Cookies, src.SourceURL, src.RecordKind, src.Confidence,
+			src.Extractor, src.ModulePath, src.SourceLine, src.TemplateJSON,
+			src.SchemaVersion, src.CreatedAt)
 
 		if err != nil {
 			return err
@@ -323,6 +332,46 @@ func (m *DBMerger) mergeExtractions(ctx context.Context, stats *MergeStats) erro
 		}
 	}
 
+	return nil
+}
+
+// mergeJSScanSourceArtifacts retains recovered source-map content when worker
+// databases are combined. Older source databases legitimately lack the
+// additive table and are treated as having no artifacts.
+func (m *DBMerger) mergeJSScanSourceArtifacts(ctx context.Context, stats *MergeStats) error {
+	var tableCount int
+	if err := m.dst.NewRaw(`SELECT COUNT(*) FROM src.sqlite_master WHERE type = 'table' AND name = 'jsscan_source_artifacts'`).Scan(ctx, &tableCount); err != nil {
+		return err
+	}
+	if tableCount == 0 {
+		return nil
+	}
+
+	var artifacts []JSScanSourceArtifactModel
+	if err := m.dst.NewRaw(`SELECT * FROM src.jsscan_source_artifacts`).Scan(ctx, &artifacts); err != nil {
+		return err
+	}
+	for _, artifact := range artifacts {
+		dstSessionID, sessionOK := m.sessionMap[artifact.SessionID]
+		dstSourceNodeID, nodeOK := m.nodeMap[artifact.SourceNodeID]
+		if !sessionOK || !nodeOK {
+			continue
+		}
+		hash := sourceArtifactHash(dstSessionID, artifact.GeneratedURL, artifact.SourcePath, artifact.ContentSHA256)
+		res, err := m.dst.ExecContext(ctx, `
+			INSERT OR IGNORE INTO jsscan_source_artifacts (
+				source_node_id, session_id, hash, generated_url, virtual_url,
+				source_path, language, content_sha256, content, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, dstSourceNodeID, dstSessionID, hash, artifact.GeneratedURL, artifact.VirtualURL,
+			artifact.SourcePath, artifact.Language, artifact.ContentSHA256, artifact.Content, artifact.CreatedAt)
+		if err != nil {
+			return err
+		}
+		if rows, _ := res.RowsAffected(); rows > 0 {
+			stats.SourceArtifactsMerged++
+		}
+	}
 	return nil
 }
 

@@ -330,6 +330,8 @@ func compactFindingView(f *database.Finding, records []*database.HTTPRecord, opt
 		"module_name":    f.ModuleName,
 		"module_type":    f.ModuleType,
 		"finding_source": f.FindingSource,
+		"record_kind":    f.RecordKind,
+		"evidence_grade": f.EvidenceGrade,
 	}
 	if f.ModuleShort != "" {
 		m["short"] = f.ModuleShort

@@ -40,6 +40,13 @@ jobs:
       - name: Build embedded jsscan binaries
         run: make ensure-jsscan
 
+      - name: Verify jsscan contracts and mandatory bundle corpus
+        run: |
+          cd platform/jsscan
+          bun run test:ci
+          cd ../..
+          make verify-jsscan-fresh
+
       - name: Verify generated/managed sources (gofmt + go.mod tidy)
         run: make verify-generated
 

@@ -142,8 +142,8 @@ Use this to find the right command quickly:
 | View/modify configuration | `vigolium config ls` / `config set <key> <value>` |
 | View scanning strategies | `vigolium strategy` |
 | Manage scope rules | `vigolium scope view` |
-| Link source code repository | `vigolium source add --hostname <host> --path ./src` |
-| Clone and scan with source code | `vigolium scan -t <url> --source-url https://github.com/org/repo` |
+| Source-aware (whitebox) scan | `vigolium agent autopilot -t <url> --source ./src` |
+| Scan with source cloned from git | `vigolium agent swarm -t <url> --source https://github.com/org/repo` |
 | Manage projects | `vigolium project create <name>` / `project list` / `project use <name>` |
 | List cloud-storage objects for current project | `vigolium storage ls` (add `--prefix ugc/` or `--tree`) |
 | Upload a file to project storage | `vigolium storage upload ./report.pdf --key reports/q4.pdf` |
@@ -174,7 +174,7 @@ Load detailed reference based on what you need:
 | Server & ingestion | `references/server-and-ingestion.md` | server, ingest, traffic command flags |
 | Agent commands | `references/agent-commands.md` | agent, agent query, agent autopilot, agent swarm, agent olium, agent audit, agent session — flags, intensities, providers, templates |
 | Session / auth config | `references/session-auth-config.md` | --auth-file/--auth flags, YAML format, extract rules, authenticated scanning setup |
-| Data & management | `references/data-and-management.md` | db, module, extensions, js, config, scope, source, strategy, export, project, storage |
+| Data & management | `references/data-and-management.md` | db, module, extensions, js, config, scope, strategy, export, project, storage |
 | Complete flag index | `references/flags-reference.md` | Looking up any specific flag by name |
 | Writing extensions | `references/writing-extensions.md` | Creating custom JS scanner modules, extension API |
 
@@ -192,7 +192,7 @@ Strategies control which phases run during a scan. Use `--strategy <name>`:
 - Default strategy is set in config: `scanning_strategy.default_strategy`
 - **Balanced** is the default when `--strategy` is not specified
 - View all strategies: `vigolium strategy ls`
-- Whitebox requires `--source <path>` or `--source-url <git-url>` to link application source code
+- Whitebox/source-aware scanning is an agent feature (`agent autopilot`/`agent swarm`): pass `--source <path-or-git-url>` (local dir, git URL, .zip/.tar.gz, or gs:// archive)
 
 ## Scan Phases
 
@@ -205,8 +205,7 @@ Vigolium runs up to 8 phases. Use `--only <phase>` to isolate one, or `--skip <p
 | `external-harvest` | — | Aggregate URLs from Wayback Machine, Common Crawl, AlienVault OTX |
 | `spidering` | `spitolas` | Headless browser crawling for JS-driven routes and dynamic content |
 | `known-issue-scan` | — | Security posture assessment via Nuclei templates + Kingfisher secrets |
-| `sast` | — | Static analysis on linked source code (requires `--source`) |
-| `audit` | `dynamic-assessment` | Core vulnerability scanning with active and passive modules |
+| `dynamic-assessment` | `audit`, `dast`, `assessment` | Core vulnerability scanning with active and passive modules |
 | `extension` | `ext` | Run only JavaScript extension modules (enables extensions, skips built-in modules) |
 
 - `--only` and `--skip` are **mutually exclusive**
@@ -556,11 +555,11 @@ vigolium agent swarm --all-records --master-batch-size 10 --batch-concurrency 4 
 vigolium agent swarm -t https://example.com --source ./src --diff main...feature-branch
 vigolium agent swarm -t https://example.com --source ./src --last-commits 3
 
-# Skip SAST tools during source analysis
-vigolium agent swarm -t http://localhost:3000 --source ./src --skip-sast
-
-# Disable code audit (still runs source analysis + SAST)
+# Disable the AI code-audit phase (still runs source analysis)
 vigolium agent swarm -t http://localhost:3000 --source ./src --code-audit=false
+
+# Run only the source-analysis phase and exit
+vigolium agent swarm --source ./src --source-analysis-only
 
 # Enable triage and rescan loop
 vigolium agent swarm -t https://example.com/api/users --triage --max-iterations 5
@@ -954,22 +953,16 @@ vigolium scan -t https://example.com --fail-on high --soft-fail
 
 ### 17. Whitebox Scanning (Source-Aware)
 ```bash
-# Link source code and scan
-vigolium scan -t https://example.com --source ./src --strategy whitebox
+# Source-aware scanning is an agent feature. --source accepts a local path,
+# a git URL (cloned automatically), a local .zip/.tar.gz, or a gs:// archive.
+vigolium agent autopilot -t https://example.com --source ./src
 
-# Clone from git URL and scan
-vigolium scan -t https://example.com --source-url https://github.com/org/repo --strategy whitebox
+# Clone from a git URL and scan
+vigolium agent swarm -t https://example.com --source https://github.com/org/repo
 
-# Or link first, then scan
-vigolium source add --hostname example.com --path ./src
-vigolium scan -t https://example.com --strategy whitebox
-
-# SAST-only phase
-vigolium run sast --sast-adhoc /path/to/app
-vigolium run sast --sast-adhoc /path/to/app --rule gin
-
-# SAST from git URL (clones automatically)
-vigolium run sast --sast-adhoc https://github.com/org/repo
+# Source-only security audit (SAST/code-review harness; --source accepts a git URL too)
+vigolium agent audit --source /path/to/app
+vigolium agent query --source /path/to/app -t code-review
 ```
 
 ### 18. Configuration Tuning
@@ -1188,11 +1181,10 @@ These flags are available on all commands (persistent flags on root):
 | `--format` | — | `console` | Output format: console, jsonl, html, `sqlite` (needs `-S`), `fs` (flat traffic/finding tree). Comma-separated for multiple |
 | `--scan-on-receive` | `-S` | `false` | Continuously scan new HTTP records as they arrive in the database |
 | `--full-native-scan-on-receive` | — | `false` | Run the full native scan pipeline (discovery + spidering + dynamic-assessment) continuously on received records |
-| `--source` | — | — | Path to application source code |
-| `--source-url` | — | — | Git URL to clone for source-aware scanning |
-| `--scan-id` | — | — | Label for grouping scan session results |
+| `--source` | — | — | Source for agent scans (`agent autopilot`/`swarm`/`query`/`audit`): local path, git URL, .zip/.tar.gz, or gs:// archive |
+| `--scan-uuid` | — | — | Label for grouping scan session results |
 | `--scope-origin` | — | — | Origin scope: all, relaxed, balanced, strict |
-| `--project-id` | — | — | Project UUID to scope all operations to |
+| `--project-uuid` | — | — | Project UUID to scope all operations to |
 | `--project-name` | — | — | Project name to scope all operations to |
 | `--verbose` | `-v` | `false` | Verbose logging |
 | `--silent` | — | `false` | Suppress all output except findings |
@@ -1254,8 +1246,6 @@ These flags apply to `scan`, `scan-url`, `scan-request`, and `run` commands:
 | `--known-issue-scan-severities` | — | — | Filter Nuclei templates by severity (repeatable) |
 | `--known-issue-scan-exclude-tags` | — | — | Nuclei template tags to exclude (repeatable) |
 | `--known-issue-scan-templates-dir` | — | — | Custom Nuclei templates directory |
-| `--sast-adhoc` | — | — | Local path or git URL for ad-hoc SAST scan (auto-detected) |
-| `--rule` | — | — | Filter SAST rules by fuzzy name match |
 
 ## Constraints
 
@@ -1268,7 +1258,6 @@ These flags apply to `scan`, `scan-url`, `scan-request`, and `run` commands:
 - `--split-by-host` only takes effect in stateless multi-target mode (`-S -T <file>`); it is required for `-P > 1` parallel fan-out and ignored for a single target or under `--db-isolate`
 - Server `--mirror-fs <dir>` (config `server.mirror_fs_path`) mirrors ingested traffic + findings to a live `<dir>/traffic`+`<dir>/findings` tree (append-only `index.jsonl`); it is server-ingestion-only and never blocks the DB save — CLI scans are unaffected
 - `--target/-t` and `--spec-url` are mutually exclusive for ingest
-- `--source` and `--source-url` are mutually exclusive
 - `--stateless` requires `-o/--output`; `--stateless` and `--db` are mutually exclusive
 - `--ci-output-format` sets JSONL output, suppresses banners and color (implies `--json --silent`)
 - `--skip-heuristics` is equivalent to `--heuristics-check=none`
@@ -1277,8 +1266,8 @@ These flags apply to `scan`, `scan-url`, `scan-request`, and `run` commands:
 - The `--provider`, `--model`, `--oauth-cred`, `--oauth-token`, `--llm-api-key`, `--gcp-project`, `--gcp-location` flags override `agent.olium.*` for one run on `agent query`, `agent autopilot`, `agent swarm`, and `agent olium` (and the top-level `vigolium olium` / `ol` alias)
 - `--scan-on-receive/-S` is ignored in remote ingest mode (server handles scanning)
 - `db clean --all` requires `--force` for safety
-- `db clean --force` with no filter flags resets the entire database (SQLite only)
-- Whitebox/SAST phases require `--source <path>` or `--source-url <git-url>` to link application source code
+- `db clean` with **no selector** is rejected — it never implicitly wipes the DB. Use `db clean --all --force` to delete all rows, or `db reset --force` to delete and recreate the database file (SQLite only). VACUUM runs automatically after every delete
+- Whitebox/source-aware scanning is an agent feature (`agent autopilot`/`agent swarm`): pass `--source <path-or-git-url>` (local dir, git URL, .zip/.tar.gz, or gs:// archive)
 - Phase aliases: `deparos`/`discover` = `discovery`, `spitolas` = `spidering`, `ext` = `extension`. The legacy alias `dynamic-assessment` is accepted for `audit`
 - `--module-tag` uses OR logic: modules matching any specified tag are included
 - `-m` and `--module-tag` merge results (union)
@@ -1288,7 +1277,7 @@ These flags apply to `scan`, `scan-url`, `scan-request`, and `run` commands:
 - Agent audit: `--driver` must be `auto` (default), `both`, `audit`, or `piolium`. `auto` runs vigolium-audit and only falls back to piolium when the resolved claude/codex CLI is missing; `both` runs audit then piolium unconditionally. Under `auto`/`both`, `--mode` is restricted to the shared set (`lite`, `balanced`, `deep`, `revisit`, `confirm`, `merge`); driver-specific modes (audit's `reinvest`/`refresh`/`mock`/`diff`/`status`, piolium's `longshot`/`smoke`/`diff`/`status`) require forcing `--driver=audit|piolium`. `--intensity deep` resolves to the chain `deep,confirm`; `--modes a,b,c` chains modes. Audit-leg agent is selected by `--provider` (anthropic-*→claude, openai-*→codex) and `--agent {claude|codex}`, with BYOK via `--api-key`/`--oauth-token`/`--oauth-cred-file`. `-i/--interactive` hands you the audit harness (audit-only). `--driver=audit\|piolium` hard-errors on a missing runtime; under `both` a missing runtime is dropped with a warning. Post-pass project-wide findings dedup runs when a project UUID is set; suppress with `--no-dedup`
 - Agent audit `--driver=piolium`: `--mode` must be one of `lite`, `balanced`, `deep`, `revisit`, `confirm`, `merge`, `diff`, `longshot`, `status`, `smoke`. Requires `pi` in PATH and the piolium Pi extension installed. `--no-preflight` skips the pre-audit `pi` roundtrip
 - Intensity presets (`--intensity quick|balanced|deep`) are shared across `scan`, `agent autopilot`, `agent swarm`, `agent audit`; explicit flags always override the preset
-- `vigolium storage *` commands require `storage.enabled: true` (or `VIGOLIUM_STORAGE_ENABLED=true`) plus driver/bucket/access-key/secret-key configured. They scope to the active project (`--project-id` / `--project-name` / `VIGOLIUM_PROJECT`)
+- `vigolium storage *` commands require `storage.enabled: true` (or `VIGOLIUM_STORAGE_ENABLED=true`) plus driver/bucket/access-key/secret-key configured. They scope to the active project (`--project-uuid` / `--project-name` / `VIGOLIUM_PROJECT`)
 - `--source` accepts a local path, a git URL (auto-cloned with `--commit-depth`), a local archive (`.zip / .tar.gz / .tar.bz2 / .tar.xz` — auto-extracted), or a `gs://<project>/<key>` URI (downloaded + extracted). Applies to `agent audit`
 - `vigolium init` is a no-op on an existing installation unless `--force` is passed (regenerates API key + re-extracts preset data)
 - `vigolium config clean` prompts for confirmation unless `-F/--force` is passed; it wipes the entire `~/.vigolium/` directory

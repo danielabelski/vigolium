@@ -20,8 +20,23 @@ import (
 var dbCleanCmd = &cobra.Command{
 	Use:   "clean",
 	Short: "Clean database records",
-	Long:  "Delete records from the database by host, scan ID, age, status, or severity. Supports --dry-run to preview, --orphans to remove orphaned findings, and --vacuum to reclaim disk space after a delete.",
-	RunE:  runDBClean,
+	Long: "Delete records from the database by host, scan UUID, age, status, or severity. " +
+		"Supports --dry-run to preview and --orphans to remove orphaned findings; disk space is reclaimed " +
+		"automatically with VACUUM after a delete. Use --all --force to delete every row from the data tables, " +
+		"or `vigolium db reset --force` to delete and recreate the database file from scratch. " +
+		"A bare `db clean` with no selector is rejected — it never wipes the database implicitly.",
+	Args: cobra.NoArgs,
+	RunE: runDBClean,
+}
+
+var dbResetCmd = &cobra.Command{
+	Use:   "reset",
+	Short: "Delete and recreate the database from scratch (SQLite only)",
+	Long: "Remove the SQLite database file (and its WAL/SHM companions) and recreate it with a fresh, empty " +
+		"schema. This is destructive and irreversible: all scans, HTTP records, and findings are lost. " +
+		"Requires --force, or confirm interactively when run on a TTY.",
+	Args: cobra.NoArgs,
+	RunE: runDBReset,
 }
 
 var (
@@ -39,8 +54,9 @@ var (
 
 func init() {
 	dbCmd.AddCommand(dbCleanCmd)
+	dbCmd.AddCommand(dbResetCmd)
 
-	dbCleanCmd.Flags().BoolVar(&cleanAll, "all", false, "Delete all records (requires --force)")
+	dbCleanCmd.Flags().BoolVar(&cleanAll, "all", false, "Delete every row from all data tables (requires --force)")
 	dbCleanCmd.Flags().StringVar(&cleanHost, "host", "", "Delete records matching the specified hostname")
 	dbCleanCmd.Flags().StringVar(&cleanScanUUID, "scan-uuid", "", "Delete records belonging to the specified scan UUID")
 	dbCleanCmd.Flags().StringVar(&cleanBefore, "before", "", "Delete records created before this date (YYYY-MM-DD)")
@@ -55,14 +71,39 @@ func init() {
 	dbCleanCmd.Flags().StringVar(&cleanTable, "table", "", "Delete all rows from a specific table (e.g., http_records, findings, scans)")
 }
 
+func runDBReset(cmd *cobra.Command, args []string) error {
+	defer closeDatabaseOnExit()
+
+	if !globalForce {
+		fmt.Printf("%s %s\n", terminal.WarningSymbol(),
+			terminal.Yellow("This will DELETE and recreate the entire database. All scans, HTTP records, and findings will be lost."))
+		fmt.Print("\nProceed? (type 'yes' to confirm): ")
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("aborted: interactive confirmation required (pass --force to skip): %w", err)
+		}
+		if strings.TrimSpace(strings.ToLower(response)) != "yes" {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+	return resetDatabase()
+}
+
 func runDBClean(cmd *cobra.Command, args []string) error {
 	defer closeDatabaseOnExit()
 
-	// When --force is used without any filter flags, delete the database file and recreate it
-	noFilters := !cleanAll && cleanHost == "" && cleanScanUUID == "" && cleanBefore == "" &&
-		len(cleanStatus) == 0 && cleanSeverity == "" && !cleanOrphans && !cleanFindings && cleanTable == ""
-	if globalForce && noFilters {
-		return resetDatabase()
+	// A bare `db clean` with no selector must never implicitly wipe the database.
+	// --all --force deletes every row; `db reset --force` recreates the DB file.
+	noSelector := !cleanAll && cleanHost == "" && cleanScanUUID == "" && cleanBefore == "" &&
+		len(cleanStatus) == 0 && cleanSeverity == "" && !cleanOrphans && !cleanFindings &&
+		cleanTable == "" && dbSearch == ""
+	if noSelector {
+		return fmt.Errorf("no clean selector provided; narrow the delete with a filter " +
+			"(--host, --scan-uuid, --before, --status, --severity, --search, --orphans, --findings-only, --table), " +
+			"use `--all --force` to delete all records, " +
+			"or use `vigolium db reset --force` to delete and recreate the database")
 	}
 
 	db, err := getDB()

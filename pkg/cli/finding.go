@@ -42,6 +42,7 @@ var (
 	findingAgenticScan   string
 	findingModuleType    string
 	findingFindingSource string
+	findingRecordKind    string
 	findingID            int
 
 	// Display-only flags
@@ -73,6 +74,8 @@ var allFindingColumns = []findingColumnDef{
 	{"DESCRIPTION", "", func(f *database.Finding) string { return clicommon.Truncate(f.Description, 50) }, 50},
 	{"TYPE", "", func(f *database.Finding) string { return colorModuleType(f.ModuleType) }, 12},
 	{"SOURCE", "", func(f *database.Finding) string { return f.FindingSource }, 20},
+	{"KIND", "", func(f *database.Finding) string { return f.RecordKind }, 12},
+	{"EVIDENCE", "", func(f *database.Finding) string { return f.EvidenceGrade }, 8},
 	{"HOST_REPO", "URL / REPO NAME", func(f *database.Finding) string {
 		if f.RepoName != "" {
 			return clicommon.Truncate(f.RepoName, 60)
@@ -139,6 +142,7 @@ func init() {
 	pf.StringVar(&findingAgenticScan, "agentic-scan", "", "Filter by agentic-scan UUID (findings produced by an agent autopilot/swarm/audit run)")
 	pf.StringVar(&findingModuleType, "module-type", "", "Filter by module type (active, passive, nuclei, secret-scan, agent, source-tools, oast, extension)")
 	pf.StringVar(&findingFindingSource, "finding-source", "", "Filter by finding source (dynamic-assessment, spa, agent, oast, source-tools, extension)")
+	pf.StringVar(&findingRecordKind, "record-kind", "", "Filter by record kind (finding, candidate, observation; comma-separated). Default: finding")
 	pf.IntVar(&findingID, "id", 0, "Filter by finding ID")
 
 	// Display-only flags
@@ -439,6 +443,11 @@ func buildFindingFilters(fuzzyTerm string) (database.QueryFilters, error) {
 		return database.QueryFilters{}, err
 	}
 
+	recordKinds, err := parseRecordKinds(findingRecordKind)
+	if err != nil {
+		return database.QueryFilters{}, err
+	}
+
 	return database.QueryFilters{
 		ProjectUUID:         projectUUID,
 		FindingID:           findingID,
@@ -452,6 +461,7 @@ func buildFindingFilters(fuzzyTerm string) (database.QueryFilters, error) {
 		Confidence:          confidences,
 		ModuleType:          findingModuleType,
 		FindingSource:       findingFindingSource,
+		RecordKinds:         recordKinds,
 		DateFrom:            dateFrom,
 		DateTo:              dateTo,
 		FuzzyTerm:           fuzzyTerm,
@@ -466,6 +476,24 @@ func buildFindingFilters(fuzzyTerm string) (database.QueryFilters, error) {
 		SortBy:              findingSort,
 		SortAsc:             findingAsc,
 	}, nil
+}
+
+func parseRecordKinds(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	allowed := map[string]bool{
+		database.RecordKindFinding: true, database.RecordKindCandidate: true, database.RecordKindObservation: true,
+	}
+	var kinds []string
+	for _, part := range strings.Split(raw, ",") {
+		kind := strings.ToLower(strings.TrimSpace(part))
+		if !allowed[kind] {
+			return nil, fmt.Errorf("invalid record kind %q (want finding, candidate, or observation)", part)
+		}
+		kinds = append(kinds, kind)
+	}
+	return kinds, nil
 }
 
 // printActiveFindingFilters prints a one-line summary of the filter conditions

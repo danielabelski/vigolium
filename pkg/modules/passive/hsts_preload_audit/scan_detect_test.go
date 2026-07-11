@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/output"
 )
 
 func TestNew(t *testing.T) {
@@ -35,8 +36,8 @@ func makeHTTPCtx(hsts string) *httpmsg.HttpRequestResponse {
 	return httpmsg.NewHttpRequestResponse(req, resp)
 }
 
-// TestScanPerHost_MissingHeader drives an HTTPS HTML response with no HSTS
-// header and expects an audit finding listing the missing header.
+// Missing HSTS is owned by the generic browser-policy observation so this
+// preload-specific analyzer does not duplicate it.
 func TestScanPerHost_MissingHeader(t *testing.T) {
 	t.Parallel()
 	m := New()
@@ -44,7 +45,7 @@ func TestScanPerHost_MissingHeader(t *testing.T) {
 
 	results, err := m.ScanPerHost(ctx, &modkit.ScanContext{})
 	require.NoError(t, err)
-	require.NotEmpty(t, results)
+	assert.Empty(t, results)
 }
 
 // TestScanPerHost_IncompleteHeader drives an HSTS header that lacks
@@ -57,6 +58,7 @@ func TestScanPerHost_IncompleteHeader(t *testing.T) {
 	results, err := m.ScanPerHost(ctx, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.NotEmpty(t, results)
+	assert.Equal(t, output.RecordKindObservation, results[0].RecordKind)
 }
 
 // TestScanPerHost_PreloadReady drives a fully preload-ready HSTS header and

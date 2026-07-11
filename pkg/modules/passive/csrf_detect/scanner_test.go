@@ -9,6 +9,7 @@ import (
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/output"
 )
 
 // buildCtx assembles an HttpRequestResponse from a raw HTTP request for driving
@@ -45,8 +46,30 @@ func TestIsCSRFReachableContentType(t *testing.T) {
 // authenticated form POST with no anti-CSRF token, header, or SameSite.
 func TestScanPerRequest_CookieFormNoToken_Flags(t *testing.T) {
 	headers := "Content-Type: application/x-www-form-urlencoded\r\nCookie: session=abc123\r\n"
-	assert.Equal(t, 1, scan(t, headers, "amount=1000&to=acct2"),
-		"a cookie-auth form POST with no CSRF protection must be flagged")
+	results, err := New().ScanPerRequest(buildCtx(t, headers, "amount=1000&to=acct2"), &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, output.RecordKindCandidate, results[0].RecordKind)
+}
+
+func TestScanPerRequest_PreferenceCookieNoFinding(t *testing.T) {
+	headers := "Content-Type: application/x-www-form-urlencoded\r\nCookie: theme=dark\r\n"
+	assert.Equal(t, 0, scan(t, headers, "color=blue"))
+}
+
+func TestScanPerRequest_UsesPreviouslyObservedSameSitePolicy(t *testing.T) {
+	sc := &modkit.ScanContext{}
+	svc, err := httpmsg.NewService("example.com", 443, "https")
+	require.NoError(t, err)
+	login := httpmsg.NewHttpRequestResponse(
+		httpmsg.NewHttpRequestWithService(svc, []byte("GET /login HTTP/1.1\r\nHost: example.com\r\n\r\n")),
+		httpmsg.NewHttpResponse([]byte("HTTP/1.1 200 OK\r\nSet-Cookie: session=abc; Secure; HttpOnly; SameSite=Strict\r\n\r\n")),
+	)
+	sc.ObserveResponseCookies(login)
+	results, err := New().ScanPerRequest(buildCtx(t,
+		"Content-Type: application/x-www-form-urlencoded\r\nCookie: session=abc\r\n", "amount=1"), sc)
+	require.NoError(t, err)
+	assert.Empty(t, results)
 }
 
 // TestScanPerRequest_BearerNoCookie_NoFinding: header-based auth with no ambient
@@ -94,6 +117,7 @@ func TestCsrfParamPattern(t *testing.T) {
 		{"csrfmiddlewaretoken", "csrfmiddlewaretoken", true},
 		{"__RequestVerificationToken", "__RequestVerificationToken", true},
 		{"nonce", "nonce", true},
+		{"siteToken is application data", "siteToken", false},
 		{"username", "username", false},
 		{"password", "password", false},
 		{"email", "email", false},

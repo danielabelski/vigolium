@@ -697,15 +697,21 @@ func (f *Factory) CreateJSExtractedRequestTask(
 	dirURL *url.URL,
 	getExtractedRequests func() []jsscan.ExtractedRequest,
 	depth uint16,
+	getRequestTemplates ...func() []ExtractedRequestTemplate,
 ) Task {
 	if dirURL == nil || getExtractedRequests == nil {
 		return nil
 	}
 
+	var typedGetter func() []ExtractedRequestTemplate
+	if len(getRequestTemplates) > 0 {
+		typedGetter = getRequestTemplates[0]
+	}
 	return NewJSExtractedRequestTask(&JSExtractedRequestTaskConfig{
 		DirURL:               dirURL,
 		Depth:                depth,
 		GetExtractedRequests: getExtractedRequests,
+		GetRequestTemplates:  typedGetter,
 	})
 }
 

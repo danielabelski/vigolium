@@ -32,6 +32,9 @@ type Config struct {
 // NewQueue creates a queue based on the configuration.
 func NewQueue(cfg Config) (Queue, error) {
 	switch cfg.Type {
+	case QueueTypeMemory:
+		return NewMemoryQueue(cfg.MemBufferSize), nil
+
 	case QueueTypeDisk, "":
 		// Default to disk queue
 		diskCfg := DiskQueueConfig{

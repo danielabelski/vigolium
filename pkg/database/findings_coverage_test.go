@@ -58,6 +58,15 @@ func TestFindingGettersAndListing(t *testing.T) {
 		t.Errorf("severity = %q", got.Severity)
 	}
 
+	// Retained candidates share storage but must stay out of finding-oriented
+	// repository helpers and default lists.
+	saveFindingFull(t, repo, &Finding{
+		HTTPRecordUUIDs: []string{recUUID},
+		Severity:        SeverityHigh,
+		RecordKind:      RecordKindCandidate,
+		URL:             "https://find.example.com/x",
+	})
+
 	byRec, err := repo.GetFindingsByRecordUUID(ctx, recUUID)
 	if err != nil {
 		t.Fatalf("GetFindingsByRecordUUID: %v", err)
@@ -83,6 +92,16 @@ func TestFindingGettersAndListing(t *testing.T) {
 	}
 	if total != 2 || len(list) != 2 {
 		t.Errorf("ListFindings total=%d len=%d, want 2/2", total, len(list))
+	}
+	candidates, candidateTotal, err := repo.ListFindings(ctx, QueryFilters{
+		ProjectUUID: DefaultProjectUUID,
+		RecordKinds: []string{RecordKindCandidate},
+	})
+	if err != nil {
+		t.Fatalf("ListFindings(candidates): %v", err)
+	}
+	if candidateTotal != 1 || len(candidates) != 1 {
+		t.Errorf("candidate total=%d len=%d, want 1/1", candidateTotal, len(candidates))
 	}
 }
 

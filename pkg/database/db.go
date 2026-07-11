@@ -370,9 +370,41 @@ func (db *DB) adaptDDL(ddl string) string {
 	return ddl
 }
 
+// currentSchemaVersion is the schema revision this binary expects. Bump it when
+// adding a new one-time backfill/migration in CreateSchema so it re-runs once on
+// existing databases. A database already at this version skips the O(rows)
+// backfills and legacy-index reshaping, so a current database opens in roughly
+// constant time regardless of how many records it holds (rather than re-scanning
+// every table and rebuilding the covering index on every process start).
+const currentSchemaVersion = 1
+
+// schemaVersion reads the recorded schema version, or 0 when unset (a fresh
+// database, or one created before versioning). Requires schema_meta to exist.
+func (db *DB) schemaVersion(ctx context.Context) int {
+	var v int
+	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_meta WHERE id = 1").Scan(&v); err != nil {
+		return 0
+	}
+	return v
+}
+
+// setSchemaVersion records the schema version so later opens can skip the
+// one-time backfills. Best-effort: a failure just re-runs them next open.
+func (db *DB) setSchemaVersion(ctx context.Context, v int) {
+	db.execBestEffort(ctx, "record schema version",
+		"INSERT INTO schema_meta (id, version) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET version = excluded.version",
+		v)
+}
+
 // CreateSchema creates all database tables and indexes if they don't exist
 func (db *DB) CreateSchema(ctx context.Context) error {
 	tables := []string{
+		// Schema versioning: lets CreateSchema skip one-time O(rows) backfills once
+		// a database is current (see currentSchemaVersion). Single row, id always 1.
+		`CREATE TABLE IF NOT EXISTS schema_meta (
+			id INTEGER PRIMARY KEY,
+			version INTEGER NOT NULL DEFAULT 0
+		)`,
 		// Multi-tenancy: users and projects
 		`CREATE TABLE IF NOT EXISTS users (
 			uuid TEXT PRIMARY KEY NOT NULL,
@@ -473,6 +505,20 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 			remarks TEXT,
 			risk_score INTEGER DEFAULT 0
 		)`,
+		`CREATE TABLE IF NOT EXISTS analysis_artifacts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_uuid TEXT NOT NULL,
+			scan_uuid TEXT,
+			http_record_uuid TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			filename TEXT,
+			media_type TEXT,
+			sha256 TEXT NOT NULL,
+			byte_length INTEGER NOT NULL,
+			content BLOB NOT NULL,
+			metadata TEXT,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE TABLE IF NOT EXISTS findings (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			project_uuid TEXT NOT NULL,
@@ -485,6 +531,8 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 			module_name TEXT NOT NULL,
 			module_type TEXT DEFAULT '',
 			finding_source TEXT DEFAULT '',
+			record_kind TEXT NOT NULL DEFAULT 'finding',
+			evidence_grade TEXT DEFAULT '',
 			module_short TEXT DEFAULT '',
 			description TEXT,
 			severity TEXT NOT NULL,
@@ -629,6 +677,13 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 		}
 	}
 
+	// A database already at currentSchemaVersion has had the one-time backfills and
+	// legacy-index reshaping below applied, so skip them — they scan/rewrite whole
+	// tables and would otherwise run on every open. Cheap idempotent DDL (CREATE
+	// TABLE/INDEX IF NOT EXISTS, ADD COLUMN) still runs unconditionally so the
+	// schema stays self-healing.
+	schemaCurrent := db.schemaVersion(ctx) >= currentSchemaVersion
+
 	indexes := []string{
 		// -- http_records: project-aware composite indexes --
 		"CREATE INDEX IF NOT EXISTS idx_records_project_hostname ON http_records(project_uuid, hostname)",
@@ -653,6 +708,9 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 
 		// -- http_records: scan_uuid index --
 		"CREATE INDEX IF NOT EXISTS idx_records_project_scan ON http_records(project_uuid, scan_uuid)",
+		"CREATE INDEX IF NOT EXISTS idx_analysis_artifacts_project_record ON analysis_artifacts(project_uuid, http_record_uuid)",
+		"CREATE INDEX IF NOT EXISTS idx_analysis_artifacts_scan ON analysis_artifacts(scan_uuid)",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_artifacts_record_kind_hash ON analysis_artifacts(http_record_uuid, kind, sha256)",
 
 		// -- http_records: source-filtered cursor scan (scan-on-receive) --
 		// Supports WHERE source IN (...) AND created_at > cursor filters in
@@ -665,6 +723,7 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_findings_project_found_at ON findings(project_uuid, found_at)",
 		"CREATE INDEX IF NOT EXISTS idx_findings_project_module_type ON findings(project_uuid, module_type)",
 		"CREATE INDEX IF NOT EXISTS idx_findings_project_finding_source ON findings(project_uuid, finding_source)",
+		"CREATE INDEX IF NOT EXISTS idx_findings_project_record_kind ON findings(project_uuid, record_kind)",
 		"CREATE INDEX IF NOT EXISTS idx_findings_project_scan ON findings(project_uuid, scan_uuid)",
 		// Covers aggregateScanFindings (SELECT severity, COUNT(*) WHERE scan_uuid = ?
 		// GROUP BY severity), which runs on every scan-status tick. scan_uuid is not
@@ -725,34 +784,39 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_uuid)",
 	}
 
-	// Drop old indexes before creating the correct ones (migration for existing databases).
-	// Must run before CREATE UNIQUE INDEX so the unconditional unique index survives.
-	// idx_findings_hash_unique was a global UNIQUE(finding_hash) — superseded by the
-	// project-scoped idx_findings_project_hash_unique below. Dropping it lets the same
-	// finding_hash coexist across projects.
-	db.execBestEffort(ctx, "drop legacy index idx_findings_hash", "DROP INDEX IF EXISTS idx_findings_hash")
-	db.execBestEffort(ctx, "drop legacy index idx_findings_hash_unique", "DROP INDEX IF EXISTS idx_findings_hash_unique")
+	// Drop old indexes before creating the correct ones (migration for existing
+	// databases). Gated on schema version: once applied, the indexes already have
+	// their new shape, and re-dropping idx_records_dedup here would force a full
+	// covering-index rebuild (O(records)) on every open. Must run before CREATE
+	// UNIQUE INDEX so the unconditional unique index survives. idx_findings_hash_unique
+	// was a global UNIQUE(finding_hash) — superseded by the project-scoped
+	// idx_findings_project_hash_unique below; dropping it lets the same finding_hash
+	// coexist across projects.
+	if !schemaCurrent {
+		db.execBestEffort(ctx, "drop legacy index idx_findings_hash", "DROP INDEX IF EXISTS idx_findings_hash")
+		db.execBestEffort(ctx, "drop legacy index idx_findings_hash_unique", "DROP INDEX IF EXISTS idx_findings_hash_unique")
 
-	// idx_records_dedup was (project_uuid, method, hostname, path); it is
-	// recreated below as a covering index that also includes url, request_hash,
-	// and uuid so findDuplicateRecord resolves without a table fetch. Drop the
-	// old definition so the CREATE INDEX IF NOT EXISTS below actually applies on
-	// existing databases (IF NOT EXISTS would otherwise keep the stale shape).
-	db.execBestEffort(ctx, "drop legacy index idx_records_dedup", "DROP INDEX IF EXISTS idx_records_dedup")
+		// idx_records_dedup was (project_uuid, method, hostname, path); it is
+		// recreated below as a covering index that also includes url, request_hash,
+		// and uuid so findDuplicateRecord resolves without a table fetch. Drop the
+		// old definition so the CREATE INDEX IF NOT EXISTS below actually applies on
+		// existing databases (IF NOT EXISTS would otherwise keep the stale shape).
+		db.execBestEffort(ctx, "drop legacy index idx_records_dedup", "DROP INDEX IF EXISTS idx_records_dedup")
 
-	// Drop old single-column indexes superseded by project-aware composites
-	oldIndexes := []string{
-		"idx_records_hostname", "idx_records_method", "idx_records_status_code",
-		"idx_records_sent_at", "idx_records_host_method_status", "idx_records_scheme_host_port",
-		"idx_records_risk_score", "idx_records_created_at_uuid",
-		"idx_findings_module_id", "idx_findings_severity", "idx_findings_found_at", "idx_findings_scan_uuid",
-		"idx_scans_status", "idx_scans_started_at",
-		"idx_scopes_enabled_priority",
-		"idx_oast_interactions_scan_uuid",
-		"idx_scan_logs_scan_uuid",
-	}
-	for _, idx := range oldIndexes {
-		db.execBestEffort(ctx, "drop legacy index "+idx, "DROP INDEX IF EXISTS "+idx)
+		// Drop old single-column indexes superseded by project-aware composites
+		oldIndexes := []string{
+			"idx_records_hostname", "idx_records_method", "idx_records_status_code",
+			"idx_records_sent_at", "idx_records_host_method_status", "idx_records_scheme_host_port",
+			"idx_records_risk_score", "idx_records_created_at_uuid",
+			"idx_findings_module_id", "idx_findings_severity", "idx_findings_found_at", "idx_findings_scan_uuid",
+			"idx_scans_status", "idx_scans_started_at",
+			"idx_scopes_enabled_priority",
+			"idx_oast_interactions_scan_uuid",
+			"idx_scan_logs_scan_uuid",
+		}
+		for _, idx := range oldIndexes {
+			db.execBestEffort(ctx, "drop legacy index "+idx, "DROP INDEX IF EXISTS "+idx)
+		}
 	}
 
 	// Column migrations for existing databases — MUST run before the index loop
@@ -776,6 +840,8 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 	db.addColumnIfNotExists(ctx, "findings", "scan_uuid", "TEXT")
 	db.addColumnIfNotExists(ctx, "findings", "module_type", "TEXT DEFAULT ''")
 	db.addColumnIfNotExists(ctx, "findings", "finding_source", "TEXT DEFAULT ''")
+	db.addColumnIfNotExists(ctx, "findings", "record_kind", "TEXT NOT NULL DEFAULT 'finding'")
+	db.addColumnIfNotExists(ctx, "findings", "evidence_grade", "TEXT DEFAULT ''")
 	db.addColumnIfNotExists(ctx, "findings", "module_short", "TEXT DEFAULT ''")
 
 	// Scan cursor tracking migrations
@@ -867,37 +933,47 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 		}
 	}
 
-	// Backfill empty project_uuid values — Bun ORM inserts explicit empty strings
-	// which bypass the column DEFAULT, so rows created before ProjectUUID was
-	// propagated through all code paths end up with project_uuid = ''.
-	for _, table := range projectTables {
-		db.execBestEffort(ctx, "backfill project_uuid on "+table,
-			fmt.Sprintf("UPDATE %s SET project_uuid = ? WHERE project_uuid = ''", table),
-			DefaultProjectUUID)
+	// One-time O(rows) backfills. Gated on schema version: each scans a whole table
+	// (or every finding's JSON), so re-running them on every open makes startup
+	// scale with database size. New rows are written with correct values by the
+	// write paths, so these only reconcile pre-versioning legacy data.
+	if !schemaCurrent {
+		// Backfill empty project_uuid values — Bun ORM inserts explicit empty strings
+		// which bypass the column DEFAULT, so rows created before ProjectUUID was
+		// propagated through all code paths end up with project_uuid = ''.
+		for _, table := range projectTables {
+			db.execBestEffort(ctx, "backfill project_uuid on "+table,
+				fmt.Sprintf("UPDATE %s SET project_uuid = ? WHERE project_uuid = ''", table),
+				DefaultProjectUUID)
+		}
+
+		// Migrate legacy finding statuses: 'open' and 'confirmed' both collapse to
+		// 'triaged' in the current state model (see models.Status* constants).
+		db.execBestEffort(ctx, "migrate legacy finding statuses",
+			"UPDATE findings SET status = ? WHERE status IN (?, ?)",
+			StatusTriaged, "open", "confirmed")
+
+		// Backfill finding_records from existing JSONB data (idempotent)
+		if db.driver == "postgres" {
+			db.execBestEffort(ctx, "backfill finding_records", `
+				INSERT INTO finding_records (finding_id, record_uuid)
+				SELECT f.id, je
+				FROM findings f, jsonb_array_elements_text(f.http_record_uuids::jsonb) AS je
+				WHERE f.http_record_uuids IS NOT NULL AND f.http_record_uuids != '' AND f.http_record_uuids != '[]'
+				ON CONFLICT DO NOTHING
+			`)
+		} else {
+			db.execBestEffort(ctx, "backfill finding_records", `
+				INSERT OR IGNORE INTO finding_records (finding_id, record_uuid)
+				SELECT f.id, je.value
+				FROM findings f, json_each(f.http_record_uuids) AS je
+			`)
+		}
 	}
 
-	// Migrate legacy finding statuses: 'open' and 'confirmed' both collapse to
-	// 'triaged' in the current state model (see models.Status* constants).
-	db.execBestEffort(ctx, "migrate legacy finding statuses",
-		"UPDATE findings SET status = ? WHERE status IN (?, ?)",
-		StatusTriaged, "open", "confirmed")
-
-	// Backfill finding_records from existing JSONB data (idempotent)
-	if db.driver == "postgres" {
-		db.execBestEffort(ctx, "backfill finding_records", `
-			INSERT INTO finding_records (finding_id, record_uuid)
-			SELECT f.id, je
-			FROM findings f, jsonb_array_elements_text(f.http_record_uuids::jsonb) AS je
-			WHERE f.http_record_uuids IS NOT NULL AND f.http_record_uuids != '' AND f.http_record_uuids != '[]'
-			ON CONFLICT DO NOTHING
-		`)
-	} else {
-		db.execBestEffort(ctx, "backfill finding_records", `
-			INSERT OR IGNORE INTO finding_records (finding_id, record_uuid)
-			SELECT f.id, je.value
-			FROM findings f, json_each(f.http_record_uuids) AS je
-		`)
-	}
+	// Record the version so the next open can skip the gated work above. Done last
+	// so a failure partway through leaves the version unset and the migrations retry.
+	db.setSchemaVersion(ctx, currentSchemaVersion)
 
 	return nil
 }

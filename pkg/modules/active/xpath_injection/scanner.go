@@ -80,6 +80,71 @@ var (
 	numericInertControls = []string{` or 1=2`, ` and 1=1`}
 )
 
+// xpathFuncRound is one round of engine-discriminating XPath-function controls. Every
+// `truthy` payload is always-TRUE via an XPath CORE FUNCTION and must reproduce the true
+// page; every `falsy` payload is always-FALSE via an XPath core function and must render
+// a NON-true page. These functions (string-length, local-name, count, normalize-space,
+// boolean) have no SQL equivalent, so they are the engine discriminator: the generic
+// boolean payloads (' or '1'='1 / ' and '1'='2) are byte-for-byte identical to a SQL
+// injection's, and every other check in the boolean leg passes just as cleanly for a
+// SQL-injectable parameter (the classic ginandjuice.shop `category` SQLi) as for a real
+// XPath sink. A genuine XPath/XQuery engine evaluates the functions and drives BOTH the
+// true and the false page; a SQL engine raises a syntax error on the unknown function
+// and reproduces neither. The trailing '<a>'='<b> tail is deliberately the OPPOSITE
+// truth value, so the function — not the `or`/`and` keyword, and not the literal — is
+// the only thing that can produce the observed page.
+type xpathFuncRound struct {
+	truthy []string
+	falsy  []string
+}
+
+// stringXPathFuncRounds / numericXPathFuncRounds are TWO rounds of controls, using
+// DIFFERENT functions and operands. Requiring both rounds to hold (multi-pattern,
+// multi-round confirmation) means a reported injection is corroborated by several
+// independent XPath primitives across repeated requests — a single coincidental match,
+// a per-request content flip, or a parenthesis/keyword reaction that satisfies one
+// pattern once cannot survive two rounds of true-AND-false function evaluation. All
+// functions are XPath 1.0 core (also valid in XPath 2.0/XQuery); a WAF that strips them
+// only fails the round closed (no finding), never manufactures one.
+var (
+	stringXPathFuncRounds = []xpathFuncRound{
+		{
+			truthy: []string{
+				`' or string-length('vig')>0 or '1'='2`,
+				`' or local-name(.)=local-name(.) or '2'='1`,
+				`' or count(.)>=0 or '3'='4`,
+			},
+			falsy: []string{`' and string-length('vig')>999 and '1'='1`},
+		},
+		{
+			truthy: []string{
+				`' or string-length('xyzzy1')>2 or '5'='6`,
+				`' or normalize-space('x')='x' or '7'='8`,
+				`' or boolean(1) or '9'='0`,
+			},
+			falsy: []string{`' and count(.)>999 and '1'='1`},
+		},
+	}
+	numericXPathFuncRounds = []xpathFuncRound{
+		{
+			truthy: []string{
+				` or string-length('vig')>0`,
+				` or local-name(.)=local-name(.)`,
+				` or count(.)>=0`,
+			},
+			falsy: []string{` and string-length('vig')>999`},
+		},
+		{
+			truthy: []string{
+				` or string-length('xyzzy1')>2`,
+				` or normalize-space('x')='x'`,
+				` or boolean(1)`,
+			},
+			falsy: []string{` and count(.)>999`},
+		},
+	}
+)
+
 // Module implements the XPath Injection active scanner.
 type Module struct {
 	modkit.BaseActiveModule
@@ -164,9 +229,22 @@ func (m *Module) ScanPerInsertionPoint(
 		return nil, nil
 	}
 
-	// Leg 1: error-based (strongest signal).
+	// Leg 1: error-based (strongest signal). Not gated on XML/XPath context — an
+	// engine-specific XPath error string is self-corroborating wherever it surfaces.
 	if res := m.scanErrorBased(ctx, ip, httpClient, urlx.String(), base, baselineBody); res != nil {
 		return []*output.ResultEvent{res}, nil
+	}
+
+	// Tech-stack / request gate for the boolean leg. The boolean oracle (' or '1'='1)
+	// is indistinguishable at the HTTP layer from a SQL injection's, so on a generic
+	// HTML endpoint a SQL-injectable parameter reproduces the exact oracle (the
+	// ginandjuice.shop `category` false positive). Only run the boolean leg where an
+	// XPath/XQuery sink can actually exist: an XML/SOAP content-type or body, a
+	// web-service/XPath path, or an XML/XPath parameter name. Absent that evidence, a
+	// boolean differential is far more likely SQL (or another engine) than XPath, so
+	// fail closed here rather than risk mislabelling it.
+	if !hasXPathContextEvidence(ctx, ip, urlx.Path, baselineBody) {
+		return nil, nil
 	}
 
 	// Leg 2: boolean oracle.
@@ -241,6 +319,19 @@ func (m *Module) scanErrorBased(
 //     differential), not boolean truth. Testing both `or` and `and` keywords catches
 //     a keyword reaction on either token, which the former single OR-only control let
 //     through.
+//   - Engine discriminator (XPath vs SQL), multi-pattern and multi-round: the generic
+//     ' or '1'='1 / ' and '1'='2 payloads are IDENTICAL to a SQL injection's, so a
+//     SQL-injectable parameter (the classic ginandjuice.shop `category` SQLi) satisfies
+//     every check above. TWO rounds of XPath CORE FUNCTIONS (string-length, local-name,
+//     count, normalize-space, boolean) that a SQL engine cannot parse must, in each
+//     round, both reproduce the true page (always-true functions) and render a non-true
+//     page (always-false functions). An XPath engine drives both directions across both
+//     rounds; a SQL engine raises a syntax error and satisfies neither. This is the
+//     check that stops the module from mislabelling SQL injection as XPath.
+//
+// The whole boolean leg only runs after a tech-stack/context gate confirms an XML/XPath
+// surface (XML-SOAP content-type or body, a web-service/XPath path, or an XML parameter
+// name); see hasXPathContextEvidence.
 func (m *Module) scanBoolean(
 	ctx *httpmsg.HttpRequestResponse,
 	ip httpmsg.InsertionPoint,
@@ -249,9 +340,11 @@ func (m *Module) scanBoolean(
 ) *output.ResultEvent {
 	pairs := stringBoolPairs
 	inertControls := stringInertControls
+	funcRounds := stringXPathFuncRounds
 	if infra.IsNumericValue(base) {
 		pairs = numericBoolPairs
 		inertControls = numericInertControls
+		funcRounds = numericXPathFuncRounds
 	}
 
 	// Boolean matrix: three independent always-true and three always-false payloads.
@@ -278,10 +371,14 @@ func (m *Module) scanBoolean(
 	if !allBodiesSimilar(trueBodies) || !allBodiesSimilar(falseBodies) {
 		return nil
 	}
-	if modkit.BodiesSimilar(trueBodies[0], falseBodies[0]) {
+	// Build the true-page signature once. It is compared against the false branch, both
+	// inert controls, and every function-round probe, so tokenizing the stable true page
+	// a single time (rather than re-normalizing it on each BodiesSimilar call) avoids
+	// re-processing a potentially large page ~10 times per confirmed-oracle path.
+	truePageSig := modkit.BodySignature(trueBodies[0])
+	if modkit.BodiesSimilarSig(truePageSig, falseBodies[0]) {
 		return nil
 	}
-	truePage := trueBodies[0]
 
 	// Determinism precondition (only worth paying once a clean differential exists):
 	// the endpoint must answer the ORIGINAL value the same way twice on a stable 2xx.
@@ -300,17 +397,65 @@ func (m *Module) scanBoolean(
 	// blocked/failed/non-2xx inert probe (ok=false) proves nothing and is ignored
 	// (fails open, so a transient block on a control cannot manufacture a rejection).
 	for _, inert := range inertControls {
-		if ib, iok := m.sendUsable(ctx, ip, httpClient, base+inert); iok && modkit.BodiesSimilar(ib, truePage) {
+		if ib, iok := m.sendUsable(ctx, ip, httpClient, base+inert); iok && modkit.BodiesSimilarSig(truePageSig, ib) {
 			return nil
 		}
 	}
 
+	// Engine discriminator (XPath vs SQL), multi-pattern and multi-round. Everything
+	// above passes just as cleanly for a SQL boolean oracle — ' or '1'='1 / ' and '1'='2
+	// are identical payloads — so the module would otherwise report a SQL injection
+	// (e.g. ginandjuice.shop `category`) as XPath. Require TWO rounds of XPath
+	// core-function controls (string-length, local-name, count, normalize-space,
+	// boolean), each round proving the function drives BOTH the true page (always-true
+	// functions reproduce it) and a non-true page (always-false functions do not). A SQL
+	// engine raises a syntax error on these functions and satisfies neither round, so it
+	// is rejected; a genuine XPath sink satisfies every round.
+	if !m.confirmXPathFunctionOracle(ctx, ip, httpClient, base, truePageSig, funcRounds) {
+		return nil
+	}
+
 	return m.result(ctx, target, ip,
-		fmt.Sprintf("Parameter %q behaves as an XPath boolean oracle: three independent always-true payloads produced matching responses, three independent always-false payloads produced a different matching response, the true/false responses differ, and two symmetric inert controls (OR-false, AND-true) did not reproduce the true page — the injected boolean logic controls the query result.", ip.Name()),
+		fmt.Sprintf("Parameter %q behaves as an XPath boolean oracle: three independent always-true payloads produced matching responses, three independent always-false payloads produced a different matching response, the true/false responses differ, two symmetric inert controls (OR-false, AND-true) did not reproduce the true page, and two rounds of XPath core-function controls (string-length, local-name, count, normalize-space, boolean) — which a SQL boolean oracle cannot satisfy — drove both the true and the non-true page, ruling out SQL/other-engine injection. The injected boolean logic controls the query result.", ip.Name()),
 		[]string{
 			"true_payload=" + base + pairs[0].truthy,
 			"false_payload=" + base + pairs[0].falsy,
+			"xpath_function_confirmed=" + base + funcRounds[0].truthy[0],
 		})
+}
+
+// confirmXPathFunctionOracle runs the multi-pattern, multi-round engine discriminator.
+// For each round, every always-true XPath-function payload must reproduce truePage, and
+// every always-false XPath-function payload must render a NON-true page. Both directions
+// matter: the true controls prove an XPath function CAN drive the true page (a SQL engine
+// errors and cannot), and the false controls prove the function's boolean VALUE — not the
+// mere presence of a function name, parentheses, or an `or`/`and` keyword — is what the
+// endpoint reacts to. Any probe that is blocked, fails, or returns a non-2xx (sendUsable
+// false) is not a valid confirmation and fails the round closed; the discriminator can
+// only reject a finding, never manufacture one.
+func (m *Module) confirmXPathFunctionOracle(
+	ctx *httpmsg.HttpRequestResponse,
+	ip httpmsg.InsertionPoint,
+	httpClient *http.Requester,
+	base string,
+	truePageSig modkit.ResponseSignature,
+	rounds []xpathFuncRound,
+) bool {
+	for _, round := range rounds {
+		for _, t := range round.truthy {
+			body, ok := m.sendUsable(ctx, ip, httpClient, base+t)
+			if !ok || !modkit.BodiesSimilarSig(truePageSig, body) {
+				return false
+			}
+		}
+		for _, f := range round.falsy {
+			body, ok := m.sendUsable(ctx, ip, httpClient, base+f)
+			if !ok || modkit.BodiesSimilarSig(truePageSig, body) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // allBodiesSimilar reports whether every body in bodies is textually similar to the

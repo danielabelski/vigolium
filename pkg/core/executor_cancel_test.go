@@ -22,7 +22,7 @@ func TestGoActiveTask_ContextCancellationSkipsTask(t *testing.T) {
 
 	var ran atomic.Bool
 	var g conc.WaitGroup
-	e.goActiveTask(ctx, &g, func() { ran.Store(true) })
+	e.goActiveTask(ctx, &g, func(releaseSlot func()) { ran.Store(true); releaseSlot() })
 	g.Wait()
 
 	if ran.Load() {
@@ -38,7 +38,7 @@ func TestGoActiveTask_RunsWhenSlotAvailable(t *testing.T) {
 
 	done := make(chan struct{})
 	var g conc.WaitGroup
-	e.goActiveTask(context.Background(), &g, func() { close(done) })
+	e.goActiveTask(context.Background(), &g, func(releaseSlot func()) { close(done); releaseSlot() })
 	g.Wait()
 
 	select {

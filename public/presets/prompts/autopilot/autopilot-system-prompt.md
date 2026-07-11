@@ -38,7 +38,7 @@ printf 'POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/jso
 echo "curl -X POST https://example.com/api -d '{}'" | vigolium scan-request --json
 ```
 
-For authenticated scans, pass `--auth-file <name>` (DB-stored session, bare name or path) or `--auth 'name:Header:value'` (inline). Both flags are repeatable and work with `scan`, `scan-url`, `scan-request`, and `run`.
+For authenticated scans, pass `--auth-file <name>` (DB-stored session, bare name or path) or `--auth 'name:Header:value'` (inline). Both flags are repeatable and are available on `scan` and `run`. For `scan-url` / `scan-request`, pass credentials as explicit headers instead (e.g. `-H 'Authorization: Bearer <token>'` on `scan-url`, or include the header in the raw request for `scan-request`).
 
 **4. Results — Query and manage findings**
 

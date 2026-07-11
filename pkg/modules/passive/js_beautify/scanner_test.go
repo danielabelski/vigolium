@@ -35,6 +35,19 @@ type captureRewriter struct {
 	calls int
 }
 
+type captureArtifactWriter struct {
+	artifact *modkit.DerivedArtifact
+	calls    int
+}
+
+func (c *captureArtifactWriter) StoreDerivedArtifact(_ context.Context, artifact *modkit.DerivedArtifact) error {
+	c.calls++
+	clone := *artifact
+	clone.Content = append([]byte(nil), artifact.Content...)
+	c.artifact = &clone
+	return nil
+}
+
 func (c *captureRewriter) RewriteRecordResponse(_ context.Context, uuid string, raw []byte) error {
 	c.uuid = uuid
 	c.raw = raw
@@ -54,7 +67,7 @@ func (c *captureAnnotator) AppendRemarks(_ context.Context, ann map[string][]str
 	return nil
 }
 
-func TestScanPerRequest_OverwritesAndTags(t *testing.T) {
+func TestScanPerRequest_PreservesRawAndStoresArtifact(t *testing.T) {
 	if getScanner() == nil {
 		t.Skip("skipping: no valid jsscan binary available")
 	}
@@ -65,10 +78,12 @@ func TestScanPerRequest_OverwritesAndTags(t *testing.T) {
 		"application/javascript", webpackMinified,
 	)
 	rw := &captureRewriter{}
+	aw := &captureArtifactWriter{}
 	an := &captureAnnotator{}
 	sc := &modkit.ScanContext{
 		RequestUUIDResolver: fixedResolver("rec-1"),
 		RecordRewriter:      rw,
+		ArtifactWriter:      aw,
 		RemarksAnnotator:    an,
 	}
 
@@ -80,30 +95,28 @@ func TestScanPerRequest_OverwritesAndTags(t *testing.T) {
 		t.Fatalf("expected 1 finding, got %d", len(results))
 	}
 
-	// The stored response must have been overwritten with the beautified body.
-	if rw.calls != 1 {
-		t.Fatalf("rewriter called %d times, want 1", rw.calls)
+	// Captured traffic is immutable; the full derived document is stored beside it.
+	if rw.calls != 0 {
+		t.Fatalf("raw response rewriter called %d times, want 0", rw.calls)
 	}
-	if rw.uuid != "rec-1" {
-		t.Errorf("rewriter uuid = %q, want rec-1", rw.uuid)
+	if aw.calls != 1 || aw.artifact == nil {
+		t.Fatalf("artifact writer called %d times, want 1", aw.calls)
 	}
-	newResp := string(rw.raw)
-	if !strings.Contains(newResp, "// =====") || !strings.Contains(newResp, "fetch") {
-		t.Errorf("rewritten response is not the beautified document: %.200q", newResp)
+	if aw.artifact.RecordUUID != "rec-1" || aw.artifact.Kind != "beautified-source" {
+		t.Errorf("artifact linkage = %q/%q", aw.artifact.RecordUUID, aw.artifact.Kind)
 	}
-	// Content-Encoding must be dropped (new body is plain text).
-	if strings.Contains(strings.ToLower(newResp), "content-encoding") {
-		t.Error("rewritten response should not carry Content-Encoding")
+	if !strings.Contains(string(aw.artifact.Content), "// =====") || !strings.Contains(string(aw.artifact.Content), "fetch") {
+		t.Errorf("stored artifact is not the beautified document: %.200q", aw.artifact.Content)
 	}
 
 	// The record must be tagged.
-	if got := an.remarks["rec-1"]; !slices.Contains(got, "js-beautified") {
-		t.Errorf("remarks for rec-1 = %v, want js-beautified", got)
+	if got := an.remarks["rec-1"]; !slices.Contains(got, "js-beautified-artifact") {
+		t.Errorf("remarks for rec-1 = %v, want js-beautified-artifact", got)
 	}
 
-	// Finding metadata reflects the overwrite.
-	if f := results[0]; f.Metadata["rewritten"] != true || f.Metadata["inline"] != false {
-		t.Errorf("metadata rewritten/inline = %v/%v", f.Metadata["rewritten"], f.Metadata["inline"])
+	// Finding metadata proves that raw evidence was preserved.
+	if f := results[0]; f.Metadata["rewritten"] != false || f.Metadata["rawPreserved"] != true || f.Metadata["artifactStored"] != true {
+		t.Errorf("unexpected immutability metadata: %v", f.Metadata)
 	}
 }
 

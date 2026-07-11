@@ -771,12 +771,42 @@ func TestValidateAttacks_ConfirmationGates(t *testing.T) {
 			wantFinding:     false,
 		},
 		{
-			name:            "genuine ACL bypass: break 2xx differs in length → finding",
+			// Soft-auth wall: canonical is a 2xx login page, but the case/slash
+			// variant reaches SUBSTANTIVELY different (much larger) content — a real
+			// access gain, so it is reported (Layer 6.5 lets a large delta through).
+			name:            "genuine ACL bypass: 2xx canonical, break reaches much larger body → finding",
 			traversalLevels: 0,
 			softBase:        mkAttack(200, 1500, softFP(200)),
 			errorBase:       mkAttack(404, 0, errorFP),
 			breakAttack:     mkAttack(200, 9000, breakFP),
 			escapeAttack:    mkAttack(200, 1500, softFP(200)),
+			wantFinding:     true,
+		},
+		{
+			// The reported /login/ false positive: softBase=/login/=200 and
+			// break=/Login/=200 are the same public login page differing only by ~9
+			// bytes of CSRF/cookie jitter. The canonical is a 2xx success (nothing is
+			// access-restricted) and there is no substantive access gain, so Layer 6.5
+			// rejects it as case-insensitive routing, not an ACL bypass.
+			name:            "ACL bypass: 2xx canonical, break differs only by jitter → rejected (Layer 6.5)",
+			traversalLevels: 0,
+			softBase:        mkAttack(200, 7495, softFP(200)),
+			errorBase:       mkAttack(404, 0, errorFP),
+			breakAttack:     mkAttack(200, 7486, breakFP),
+			escapeAttack:    mkAttack(200, 7495, softFP(200)),
+			wantFinding:     false,
+		},
+		{
+			// Genuine case-sensitivity ACL bypass: the canonical (lowercase) path is
+			// access-RESTRICTED (403), and only the case variant reaches content (2xx).
+			// The status flip from restricted→2xx is a real access gain, so Layer 6.5
+			// (which only gates a 2xx canonical) does not apply and it is reported.
+			name:            "genuine ACL bypass: 403 canonical, break reaches 2xx → finding",
+			traversalLevels: 0,
+			softBase:        mkAttack(403, 512, softFP(403)),
+			errorBase:       mkAttack(404, 0, errorFP),
+			breakAttack:     mkAttack(200, 520, breakFP),
+			escapeAttack:    mkAttack(403, 512, softFP(403)),
 			wantFinding:     true,
 		},
 	}

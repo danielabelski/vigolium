@@ -345,7 +345,10 @@ func (db *DB) getScanSessionStats(ctx context.Context, stats *DatabaseStats, fil
 	return nil
 }
 
-// GetTopHosts retrieves top hosts by request count with finding counts in a single query.
+// GetTopHosts retrieves top hosts by request count with per-host finding counts.
+// It uses a constant TWO queries — one for the top hosts, one grouped
+// finding-count query — instead of the previous 1 + N (a per-host count query),
+// so its cost no longer grows with the requested host limit.
 func (db *DB) GetTopHosts(ctx context.Context, filters QueryFilters, limit int) ([]HostStats, error) {
 	type hostRow struct {
 		Scheme       string `bun:"scheme"`
@@ -366,20 +369,39 @@ func (db *DB) GetTopHosts(ctx context.Context, filters QueryFilters, limit int) 
 		return nil, err
 	}
 
+	// Finding counts per hostname in ONE grouped query. Clear any incoming
+	// HostPattern so every hostname is counted at once, then map back per host.
+	// COUNT(DISTINCT f.id) matches the old per-host countScopedFindings semantics:
+	// a finding linked to several records on one host counts once for that host.
+	fcFilters := filters
+	fcFilters.HostPattern = ""
+	type fcRow struct {
+		Hostname string `bun:"hostname"`
+		Count    int64  `bun:"fc"`
+	}
+	var fcRows []fcRow
+	if err := db.scopedFindingsQuery(fcFilters).
+		Join("INNER JOIN finding_records AS fr ON fr.finding_id = f.id").
+		Join("INNER JOIN http_records AS r ON r.uuid = fr.record_uuid").
+		ColumnExpr("r.hostname AS hostname").
+		ColumnExpr("COUNT(DISTINCT f.id) AS fc").
+		GroupExpr("r.hostname").
+		Scan(ctx, &fcRows); err != nil {
+		return nil, err
+	}
+	fcByHost := make(map[string]int64, len(fcRows))
+	for _, fr := range fcRows {
+		fcByHost[fr.Hostname] = fr.Count
+	}
+
 	hostStats := make([]HostStats, 0, len(rows))
 	for _, r := range rows {
-		findingFilters := filters
-		findingFilters.HostPattern = r.Hostname
-		findingCount, err := db.countScopedFindings(ctx, findingFilters)
-		if err != nil {
-			return nil, err
-		}
 		hostStats = append(hostStats, HostStats{
 			Scheme:       r.Scheme,
 			Hostname:     r.Hostname,
 			Port:         r.Port,
 			RequestCount: r.RequestCount,
-			FindingCount: int64(findingCount),
+			FindingCount: fcByHost[r.Hostname],
 		})
 	}
 

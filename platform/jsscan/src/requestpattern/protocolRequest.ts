@@ -2,6 +2,7 @@ import type { ParseResult } from '@babel/parser';
 import * as t from '@babel/types';
 import type { Transform } from '../ast-utils';
 import type { NodePath } from '../ast-utils/babel';
+import type { AnalysisContext } from '../context';
 import { appendExtractedRequest } from './utils';
 import { getTrackedVariablesMap } from './globalVariableTracking';
 import {
@@ -41,6 +42,7 @@ const PROTOCOL_CONSTRUCTORS: Record<string, string> = {
  *   - navigator.sendBeacon(url, data) -> method POST (real HTTP, replayable)
  */
 export function createProtocolRequestTransform(
+  analysisContext: AnalysisContext,
   ast: ParseResult<t.File> | null = null,
   _sourceCode: string = '',
 ): Transform {
@@ -58,21 +60,25 @@ export function createProtocolRequestTransform(
         dataNode?: t.Node | null,
       ) => {
         if (!isValidUrlNode(urlNode)) return;
+        analysisContext.claimRequestNode(path.node);
         const currentFunction = findContainingFunction(path);
         const effectiveIterations = getEffectiveIterationsForFunction(currentFunction);
 
         for (const iteration of effectiveIterations) {
-          const context = createResolutionContext(currentFunction, iteration);
+          const context = createResolutionContext(currentFunction, iteration, path);
           const urlResults = extractURL(urlNode, trackedVars, context);
           for (const { url, queryParams } of urlResults) {
-            appendExtractedRequest(createExtractedRequest({
+            appendExtractedRequest(analysisContext, createExtractedRequest({
               url,
               method,
               params: queryParams,
               body: dataNode ? extractBody(dataNode, trackedVars, path, context) : '',
               headers: [],
               cookies: [],
-            }));
+            }), {
+              extractor: 'browser-protocol', client: 'protocol', confidence: 'high',
+              node: path.node, functionName: currentFunction,
+            });
           }
         }
       };

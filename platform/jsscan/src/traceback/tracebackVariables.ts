@@ -18,6 +18,8 @@ interface TracebackOptions {
   ast?: ParseResult<t.File> | null;
   /** Source code (optional, if not provided will be read from hub.file.code) */
   sourceCode?: string;
+  /** Pre-split per-analysis source index; avoids one full split per match. */
+  sourceLines?: string[];
 }
 
 interface CallSiteInfo {
@@ -65,7 +67,7 @@ class LineBasedContextExtractor {
     sourceCode: string,
     options: TracebackOptions = {}
   ) {
-    this.sourceLines = sourceCode.split('\n');
+    this.sourceLines = options.sourceLines ?? sourceCode.split('\n');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const hub = startPath.hub as any;
     this.fileName = hub?.file?.opts?.filename || 'unknown';

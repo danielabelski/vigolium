@@ -10,7 +10,33 @@ type Config struct {
 	Filenames  FilenameConfig  `json:"filenames"`
 	Extensions ExtensionConfig `json:"extensions"`
 	Engine     EngineConfig    `json:"engine"`
+	JSScan     JSScanConfig    `json:"jsscan" yaml:"jsscan"`
 	Modules    ModuleConfig    `json:"modules"`
+}
+
+// JSScanConfig exposes safe, high-level JavaScript intelligence controls.
+// Byte-heavy internals remain owned by the shared jsscan service.
+type JSScanConfig struct {
+	Enabled            bool          `json:"enabled" yaml:"enabled"`
+	ReplayMode         string        `json:"replay_mode" yaml:"replay_mode"`
+	SourceMaps         bool          `json:"source_maps" yaml:"source_maps"`
+	AssetGraph         bool          `json:"asset_graph" yaml:"asset_graph"`
+	ProtocolHandshake  bool          `json:"protocol_handshake" yaml:"protocol_handshake"`
+	WorkerCount        int           `json:"worker_count" yaml:"worker_count"`
+	MemoryBudgetMB     int           `json:"memory_budget_mb" yaml:"memory_budget_mb"`
+	CacheMB            int           `json:"cache_mb" yaml:"cache_mb"`
+	WorkerMaxJobs      int           `json:"worker_max_jobs" yaml:"worker_max_jobs"`
+	WorkerMaxRSSMB     int           `json:"worker_max_rss_mb" yaml:"worker_max_rss_mb"`
+	JobTimeout         time.Duration `json:"job_timeout" yaml:"job_timeout"`
+	NormalInputMB      int           `json:"normal_input_mb" yaml:"normal_input_mb"`
+	MaxASTInputMB      int           `json:"max_ast_input_mb" yaml:"max_ast_input_mb"`
+	HardInputMB        int           `json:"hard_input_mb" yaml:"hard_input_mb"`
+	MaxRequestsPerFile int           `json:"max_requests_per_file" yaml:"max_requests_per_file"`
+	MaxASTNodes        int           `json:"max_ast_nodes" yaml:"max_ast_nodes"`
+	MaxAssetDepth      int           `json:"max_asset_depth" yaml:"max_asset_depth"`
+	MaxAssetsPerParent int           `json:"max_assets_per_parent" yaml:"max_assets_per_parent"`
+	MaxAssetsPerHost   int           `json:"max_assets_per_host" yaml:"max_assets_per_host"`
+	MaxAssetsTotal     int           `json:"max_assets_total" yaml:"max_assets_total"`
 }
 
 // TargetConfig defines where and what to discover.
@@ -157,7 +183,7 @@ type EngineConfig struct {
 	DisableKingfisher       bool                `json:"disable_kingfisher"`                           // Disable kingfisher secret scanning
 	EnableCookieJar         bool                `json:"enable_cookie_jar"`                            // Enable cookie jar for session persistence
 	ProxyURL                string              `json:"proxy_url"`                                    // HTTP proxy URL for discovery requests
-	JSScanConcurrency       int                 `yaml:"jsscan_concurrency" json:"jsscan_concurrency"` // Max concurrent jsscan analyses (0 = runtime.NumCPU())
+	JSScanConcurrency       int                 `yaml:"jsscan_concurrency" json:"jsscan_concurrency"` // Max concurrent jsscan analyses (0 = conservative default of 1)
 	PrefixBreaker           PrefixBreakerConfig `json:"prefix_breaker"`                               // Per-prefix circuit breaker for soft-404 / trap directories
 }
 

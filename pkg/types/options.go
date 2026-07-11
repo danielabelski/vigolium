@@ -209,6 +209,12 @@ type Options struct {
 	// MaxPerHostExplicitlySet tracks whether the CLI --max-per-host flag was explicitly provided
 	MaxPerHostExplicitlySet bool
 
+	// RateLimit is the global outbound requests-per-second cap for native scanning,
+	// set only when the operator explicitly passes --rate-limit (0 = unlimited, the
+	// default, preserves current throughput). When > 0 the scan's Services get a
+	// shared token-bucket rate limiter enforced at the request boundary.
+	RateLimit int
+
 	// ExtensionsOnly skips all built-in Go modules; runs only JS/YAML extension modules.
 	ExtensionsOnly bool
 

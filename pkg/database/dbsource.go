@@ -67,6 +67,7 @@ type DBInputSource struct {
 	mu             sync.Mutex
 	buffer         []*HTTPRecord
 	readCursorInit bool
+	projectUUID    string // the owning scan's project; scopes record selection (resolved on init)
 	readCursorAt   time.Time
 	readCursorUUID string
 	nextSeq        uint64
@@ -260,6 +261,7 @@ func (s *DBInputSource) fetchNextBatch(ctx context.Context) ([]*HTTPRecord, erro
 		}
 		s.readCursorAt = scan.CursorAt
 		s.readCursorUUID = scan.CursorUUID
+		s.projectUUID = scan.ProjectUUID
 		s.readCursorInit = true
 	}
 
@@ -282,6 +284,7 @@ func (s *DBInputSource) fetchNextBatch(ctx context.Context) ([]*HTTPRecord, erro
 	}
 
 	q = applyHostScopeFilter(q, s.hostScopes)
+	q = applyProjectFilter(q, s.projectUUID)
 
 	if len(s.includeSources) > 0 {
 		q = q.Where("source IN (?)", bun.List(s.includeSources))
@@ -432,6 +435,18 @@ func (s *DBInputSource) Close() error {
 	return nil
 }
 
+// applyProjectFilter scopes a record query to the owning scan's project, so a
+// scan in one project can never consume another project's records even when both
+// contain the same origin (host scope alone is not a tenancy boundary). An empty
+// projectUUID (unknown/legacy) leaves the query unscoped, preserving prior
+// behavior for single-project databases.
+func applyProjectFilter(q *bun.SelectQuery, projectUUID string) *bun.SelectQuery {
+	if projectUUID != "" {
+		return q.Where("project_uuid = ?", projectUUID)
+	}
+	return q
+}
+
 // riskPrefetchBatchSize bounds how many records the RiskPrioritized source pulls
 // from the database per round-trip. Mirrors DBInputSource's batched read so the
 // single feed goroutine isn't serialized on one GetRecordByUUID query per item
@@ -449,16 +464,38 @@ type RiskPrioritizedDBInputSource struct {
 	maxParamShapeSamples int          // when > 0, coalesce same-shape GET records to this many value-distinct samples
 	closed               atomic.Bool
 	mu                   sync.Mutex
-	loaded               bool
-	index                int
-	uuids                []string
-	buffer               []*HTTPRecord // prefetched records (risk-priority order), drained before fetching the next chunk
-	bufHead              int           // read cursor into buffer; lets refill reuse the backing array via buffer[:0]
-	total                int
-	acked                int
-	coalescedDropped     int
-	commitCursorAt       time.Time
-	commitCursorID       string
+
+	loaded      bool   // snapshot upper bound captured on first Next
+	hasBound    bool   // false → no eligible records (empty snapshot); Next returns EOF
+	projectUUID string // owning scan's project; scopes every page query
+	boundAt     time.Time
+	boundID     string
+	// resume cursor: the durable scan cursor captured at snapshot start; only
+	// records strictly after it are eligible this round.
+	resumeAt time.Time
+	resumeID string
+
+	// Single keyset cursor, ordered (risk_score DESC, created_at ASC, uuid ASC).
+	// That one ordering reproduces the old snapshot's effective set — high-risk
+	// records first (risk_score>0, score-descending), then the risk_score=0 tail in
+	// chronological order — without materializing every UUID in memory, because
+	// risk_score=0 sorts last and within any score the (created_at, uuid) order is
+	// the same. started is false until the first page fixes the cursor.
+	keyScore int
+	keyAt    time.Time
+	keyID    string
+	started  bool
+
+	buffer  []*HTTPRecord // full records for the current page's coalescing survivors
+	bufHead int           // read cursor into buffer; lets refill reuse the backing array
+
+	coalescer *paramShapeCoalescer // nil when coalescing is disabled
+
+	total            int  // coalescing survivors committed to (each ends acked or skipped)
+	acked            int  // survivors a worker acknowledged
+	skipped          int  // survivors that can't be served (parse fail, missing/deleted, fetch error)
+	committed        bool // guards the one-shot cursor advance so it can't fire twice
+	streamsExhausted bool // the stream is drained → total is final, so the commit can fire
 }
 
 // NewRiskPrioritizedDBInputSource creates a DBInputSource that processes
@@ -497,10 +534,37 @@ func (s *RiskPrioritizedDBInputSource) WithParamShapeCoalescing(maxSamples int) 
 func (s *RiskPrioritizedDBInputSource) CoalescedDropped() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.coalescedDropped
+	if s.coalescer != nil {
+		return s.coalescer.dropped
+	}
+	return 0
 }
 
-// Next returns records prioritized by risk_score, then falls back to cursor order.
+// riskPageRow is the per-record projection each lane page selects: identity +
+// ordering columns, plus the coalescing columns only when coalescing is enabled.
+type riskPageRow struct {
+	UUID                 string          `bun:"uuid"`
+	CreatedAt            time.Time       `bun:"created_at"`
+	RiskScore            int             `bun:"risk_score"`
+	Method               string          `bun:"method"`
+	URL                  string          `bun:"url"`
+	RequestContentType   string          `bun:"request_content_type"`
+	RequestContentLength int64           `bun:"request_content_length"`
+	Parameters           []EmbeddedParam `bun:"parameters,type:jsonb"`
+}
+
+func (r riskPageRow) desc() recordURLDesc {
+	return recordURLDesc{
+		method:        r.Method,
+		url:           r.URL,
+		contentType:   r.RequestContentType,
+		contentLength: r.RequestContentLength,
+		params:        r.Parameters,
+	}
+}
+
+// Next streams records high-risk-first then chronologically, via bounded keyset
+// pages, so memory scales with the page size (not the whole eligible table).
 func (s *RiskPrioritizedDBInputSource) Next(ctx context.Context) (*work.WorkItem, error) {
 	if s.closed.Load() {
 		return nil, io.EOF
@@ -508,18 +572,21 @@ func (s *RiskPrioritizedDBInputSource) Next(ctx context.Context) (*work.WorkItem
 
 	s.mu.Lock()
 	if !s.loaded {
-		if err := s.loadSnapshotLocked(ctx); err != nil {
+		if err := s.captureBoundLocked(ctx); err != nil {
 			s.mu.Unlock()
 			return nil, err
 		}
 		s.loaded = true
 	}
+	if !s.hasBound {
+		s.mu.Unlock()
+		return nil, io.EOF
+	}
 
 	for {
-		// Serve from the prefetch buffer first. Advancing a read cursor (rather
-		// than re-slicing the header) keeps buffer pointing at the full backing
-		// array, so the buffer[:0] reset on refill reuses it instead of forcing a
-		// fresh allocation every chunk.
+		// Serve from the current page buffer first. Advancing a read cursor (rather
+		// than re-slicing) keeps buffer pointing at the full backing array so the
+		// buffer[:0] reset on refill reuses it.
 		if s.bufHead < len(s.buffer) {
 			record := s.buffer[s.bufHead]
 			s.bufHead++
@@ -527,9 +594,11 @@ func (s *RiskPrioritizedDBInputSource) Next(ctx context.Context) (*work.WorkItem
 
 			rr, err := recordToHttpRequestResponse(record)
 			if err != nil {
-				// Parse failure: drop this record (no ack, matching the prior
-				// per-UUID skip-on-error behavior) and continue draining.
+				// Parse failure: drop but still resolve it so the acked+skipped ==
+				// total commit can be reached (one bad row must never stall the cursor).
 				s.mu.Lock()
+				s.skipped++
+				s.maybeCommitCursorLocked()
 				continue
 			}
 
@@ -543,182 +612,211 @@ func (s *RiskPrioritizedDBInputSource) Next(ctx context.Context) (*work.WorkItem
 			return item, nil
 		}
 
-		// Buffer empty — refill from the next chunk of snapshot UUIDs.
-		if s.index >= len(s.uuids) {
+		// Buffer empty — pull the next page (advancing lanes as needed).
+		more, err := s.fillNextPageLocked(ctx)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+		if !more {
+			// Both lanes drained: total is now final, so a pending commit can fire.
+			s.streamsExhausted = true
+			s.maybeCommitCursorLocked()
 			s.mu.Unlock()
 			return nil, io.EOF
 		}
-		end := s.index + riskPrefetchBatchSize
-		if end > len(s.uuids) {
-			end = len(s.uuids)
-		}
-		chunk := s.uuids[s.index:end]
-		s.index = end
-		// Release the lock across the DB fetch so worker ack callbacks
-		// (ackSnapshotItem) aren't blocked on it. Next() has a single caller
-		// (the feed goroutine), so no other goroutine advances s.index/s.buffer
-		// concurrently.
-		s.mu.Unlock()
+		// Loop: serve from the freshly filled buffer.
+	}
+}
 
-		records, err := s.repo.GetScanRecordsByUUIDs(ctx, chunk)
-		s.mu.Lock()
+// captureBoundLocked records the resume cursor and the snapshot's upper bound —
+// the greatest (created_at, uuid) among eligible records right now — so the
+// stream only reads records at/before it and records ingested mid-round are
+// deferred to the next round (deterministic coverage). Sets hasBound=false when
+// nothing is eligible. Caller holds s.mu.
+func (s *RiskPrioritizedDBInputSource) captureBoundLocked(ctx context.Context) error {
+	scan, err := s.repo.GetScanByUUID(ctx, s.scanUUID)
+	if err != nil {
+		return err
+	}
+	s.resumeAt = scan.CursorAt
+	s.resumeID = scan.CursorUUID
+	s.projectUUID = scan.ProjectUUID
+	s.coalescer = newParamShapeCoalescer(s.maxParamShapeSamples)
+
+	type boundRow struct {
+		CreatedAt time.Time `bun:"created_at"`
+		UUID      string    `bun:"uuid"`
+	}
+	q := s.db.NewSelect().Model((*HTTPRecord)(nil)).Column("created_at", "uuid")
+	if !s.resumeAt.IsZero() {
+		at := dbTimestampString(s.resumeAt)
+		q = q.Where("(created_at > ? OR (created_at = ? AND uuid > ?))", at, at, s.resumeID)
+	}
+	q = applyHostScopeFilter(q, s.hostScopes)
+	q = applyProjectFilter(q, s.projectUUID)
+
+	var rows []boundRow
+	if err := q.OrderExpr("created_at DESC, uuid DESC").Limit(1).Scan(ctx, &rows); err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil // empty snapshot; hasBound stays false
+	}
+	s.boundAt = rows[0].CreatedAt
+	s.boundID = rows[0].UUID
+	s.hasBound = true
+	return nil
+}
+
+// pageColumns is the projection each lane page selects — coalescing columns are
+// included only when coalescing is enabled (they cost a JSONB decode per row).
+func (s *RiskPrioritizedDBInputSource) pageColumns() []string {
+	cols := []string{"uuid", "created_at", "risk_score", "method", "url"}
+	if s.coalescer != nil {
+		cols = append(cols, "request_content_type", "request_content_length", "parameters")
+	}
+	return cols
+}
+
+// applyResumeAndBound restricts a page query to the eligible window: strictly
+// after the durable resume cursor and at/before the captured snapshot bound.
+func (s *RiskPrioritizedDBInputSource) applyResumeAndBound(q *bun.SelectQuery) *bun.SelectQuery {
+	if !s.resumeAt.IsZero() {
+		at := dbTimestampString(s.resumeAt)
+		q = q.Where("(created_at > ? OR (created_at = ? AND uuid > ?))", at, at, s.resumeID)
+	}
+	boundAt := dbTimestampString(s.boundAt)
+	q = q.Where("(created_at < ? OR (created_at = ? AND uuid <= ?))", boundAt, boundAt, s.boundID)
+	return applyProjectFilter(q, s.projectUUID)
+}
+
+// nextPageRowsLocked returns the next keyset page of eligible rows, ordered
+// risk_score DESC then (created_at, uuid) ASC — high-risk first, then the
+// chronological risk_score=0 tail. Returns (nil, nil) once the stream is drained.
+// Caller holds s.mu.
+func (s *RiskPrioritizedDBInputSource) nextPageRowsLocked(ctx context.Context) ([]riskPageRow, error) {
+	if s.streamsExhausted {
+		return nil, nil
+	}
+
+	q := s.db.NewSelect().Model((*HTTPRecord)(nil)).Column(s.pageColumns()...)
+	q = s.applyResumeAndBound(q)
+	if s.started {
+		// Keyset for (risk_score DESC, created_at ASC, uuid ASC): rows after the
+		// last one are lower-risk, or same-risk with a later (created_at, uuid).
+		at := dbTimestampString(s.keyAt)
+		q = q.Where("(risk_score < ? OR (risk_score = ? AND (created_at > ? OR (created_at = ? AND uuid > ?))))",
+			s.keyScore, s.keyScore, at, at, s.keyID)
+	}
+	q = applyHostScopeFilter(q, s.hostScopes)
+	q = q.OrderExpr("risk_score DESC, created_at ASC, uuid ASC").Limit(riskPrefetchBatchSize)
+
+	var rows []riskPageRow
+	if err := q.Scan(ctx, &rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil // caller marks the stream exhausted
+	}
+
+	last := rows[len(rows)-1]
+	s.keyScore, s.keyAt, s.keyID, s.started = last.RiskScore, last.CreatedAt, last.UUID, true
+	return rows, nil
+}
+
+// fillNextPageLocked pulls keyset pages (applying coalescing) until it has a
+// non-empty buffer of full records, or the stream is drained. Returns false when
+// there is nothing left to serve. Caller holds s.mu; the lock is briefly released
+// only across the bulk record fetch so ack callbacks aren't blocked.
+func (s *RiskPrioritizedDBInputSource) fillNextPageLocked(ctx context.Context) (bool, error) {
+	for {
+		rows, err := s.nextPageRowsLocked(ctx)
 		if err != nil {
-			// Whole-chunk fetch failed: skip it (index already advanced) and try
-			// the next chunk rather than spinning on the same failing UUIDs.
-			zap.L().Debug("RiskPrioritizedDBInputSource: batch record fetch failed, skipping chunk",
-				zap.Error(err), zap.Int("chunk_size", len(chunk)))
+			return false, err
+		}
+		if rows == nil {
+			return false, nil // stream drained
+		}
+
+		// Coalesce the page in priority order; survivors are the UUIDs to scan.
+		surviving := make([]string, 0, len(rows))
+		for i := range rows {
+			if s.coalescer.keep(rows[i].desc()) {
+				surviving = append(surviving, rows[i].UUID)
+			}
+		}
+		if len(surviving) == 0 {
+			continue // whole page coalesced away; pull the next page
+		}
+		s.total += len(surviving)
+
+		// Fetch full records for the survivors. Release the lock across the fetch so
+		// worker ack callbacks (ackSnapshotItem) aren't blocked on it. Next() has a
+		// single caller, so no other goroutine advances the lane state meanwhile.
+		s.mu.Unlock()
+		records, ferr := s.repo.GetScanRecordsByUUIDs(ctx, surviving)
+		s.mu.Lock()
+		if ferr != nil {
+			// Transient fetch failure: the lane cursor already advanced, so resolve
+			// these survivors as skipped and move on rather than spinning on them.
+			zap.L().Debug("RiskPrioritizedDBInputSource: batch record fetch failed, skipping page",
+				zap.Error(ferr), zap.Int("page_size", len(surviving)))
+			s.skipped += len(surviving)
+			s.maybeCommitCursorLocked()
 			continue
 		}
-		// GetScanRecordsByUUIDs returns records in arbitrary order and omits any UUIDs
-		// that no longer exist. Re-order into the risk-prioritized chunk order so
-		// the highest-risk records are still scanned first; missing UUIDs are
-		// simply skipped (matching the prior per-UUID skip-on-error behavior).
+
 		byUUID := make(map[string]*HTTPRecord, len(records))
 		for _, rec := range records {
 			byUUID[rec.UUID] = rec
 		}
-		// Pre-size once so the first refill doesn't pay incremental append growth;
-		// later refills reuse the backing array via [:0] (the bufHead cursor keeps
-		// the header at element 0).
 		if s.buffer == nil {
 			s.buffer = make([]*HTTPRecord, 0, riskPrefetchBatchSize)
 		} else {
 			s.buffer = s.buffer[:0]
 		}
 		s.bufHead = 0
-		for _, uuid := range chunk {
+		for _, uuid := range surviving {
 			if rec, ok := byUUID[uuid]; ok {
 				s.buffer = append(s.buffer, rec)
 			}
 		}
-		// Loop: serve from the freshly filled buffer (or refill again if every
-		// UUID in this chunk was missing).
-	}
-}
-
-func (s *RiskPrioritizedDBInputSource) loadSnapshotLocked(ctx context.Context) error {
-	scan, err := s.repo.GetScanByUUID(ctx, s.scanUUID)
-	if err != nil {
-		return err
-	}
-
-	type cursorRow struct {
-		UUID                 string          `bun:"uuid"`
-		CreatedAt            time.Time       `bun:"created_at"`
-		Method               string          `bun:"method"`
-		URL                  string          `bun:"url"`
-		RequestContentType   string          `bun:"request_content_type"`
-		RequestContentLength int64           `bun:"request_content_length"`
-		Parameters           []EmbeddedParam `bun:"parameters,type:jsonb"`
-	}
-
-	var ordered []cursorRow
-	// Only the snapshot's identity/order columns are always needed. The
-	// request_content_type/length + parameters projection exists solely to feed
-	// param-shape coalescing (it shapes POST/JSON bodies, and refuses to coalesce
-	// an unseen body, without loading the raw request). Loading parameters is a
-	// JSONB deserialize per record, so skip it entirely when coalescing is off.
-	cols := []string{"uuid", "created_at", "method", "url"}
-	if s.maxParamShapeSamples > 0 {
-		cols = append(cols, "request_content_type", "request_content_length", "parameters")
-	}
-	orderedQ := s.db.NewSelect().Model((*HTTPRecord)(nil)).Column(cols...)
-
-	if !scan.CursorAt.IsZero() {
-		cursorAt := dbTimestampString(scan.CursorAt)
-		orderedQ = orderedQ.Where("(created_at > ? OR (created_at = ? AND uuid > ?))",
-			cursorAt, cursorAt, scan.CursorUUID)
-	}
-
-	orderedQ = applyHostScopeFilter(orderedQ, s.hostScopes)
-
-	if err := orderedQ.OrderExpr("created_at ASC, uuid ASC").Scan(ctx, &ordered); err != nil {
-		return err
-	}
-	if len(ordered) == 0 {
-		return nil
-	}
-
-	var highRisk []string
-	riskQ := s.db.NewSelect().Model((*HTTPRecord)(nil)).Column("uuid").
-		Where("risk_score > 0").
-		OrderExpr("risk_score DESC")
-
-	if !scan.CursorAt.IsZero() {
-		cursorAt := dbTimestampString(scan.CursorAt)
-		riskQ = riskQ.Where("(created_at > ? OR (created_at = ? AND uuid > ?))",
-			cursorAt, cursorAt, scan.CursorUUID)
-	}
-
-	riskQ = applyHostScopeFilter(riskQ, s.hostScopes)
-
-	if err := riskQ.Scan(ctx, &highRisk); err != nil {
-		return err
-	}
-
-	seen := make(map[string]struct{}, len(ordered))
-	s.uuids = make([]string, 0, len(ordered))
-	for _, uuid := range highRisk {
-		if _, ok := seen[uuid]; ok {
-			continue
+		// UUIDs the DB no longer returns (deleted between listing and fetch) are
+		// never served; resolve them so they can't stall the cursor commit.
+		if missing := len(surviving) - len(s.buffer); missing > 0 {
+			s.skipped += missing
+			s.maybeCommitCursorLocked()
 		}
-		seen[uuid] = struct{}{}
-		s.uuids = append(s.uuids, uuid)
-	}
-	for _, row := range ordered {
-		if _, ok := seen[row.UUID]; ok {
-			continue
+		if len(s.buffer) == 0 {
+			continue // every survivor was missing; pull the next page
 		}
-		seen[row.UUID] = struct{}{}
-		s.uuids = append(s.uuids, row.UUID)
+		return true, nil
 	}
-
-	// Coalesce same-param-shape GET records to a bounded set of value-distinct
-	// samples. Walking the already-prioritized list means high-risk records (at
-	// the front) claim the per-shape sample slots first. The commit cursor below
-	// is still the last ordered record, so the cursor advances past every record
-	// (including coalesced-away ones) when the pruned set is fully acked.
-	if s.maxParamShapeSamples > 0 {
-		descByUUID := make(map[string]recordURLDesc, len(ordered))
-		for _, row := range ordered {
-			descByUUID[row.UUID] = recordURLDesc{
-				method:        row.Method,
-				url:           row.URL,
-				contentType:   row.RequestContentType,
-				contentLength: row.RequestContentLength,
-				params:        row.Parameters,
-			}
-		}
-		pruned, dropped := coalesceUUIDsByParamShape(s.uuids, descByUUID, s.maxParamShapeSamples)
-		s.uuids = pruned
-		s.coalescedDropped = dropped
-		if dropped > 0 {
-			zap.L().Info("dynamic-assessment param-shape coalescing",
-				zap.Int("dropped", dropped),
-				zap.Int("kept", len(pruned)),
-				zap.Int("max_samples", s.maxParamShapeSamples))
-		}
-	}
-
-	last := ordered[len(ordered)-1]
-	s.commitCursorAt = last.CreatedAt
-	s.commitCursorID = last.UUID
-	s.total = len(s.uuids)
-	return nil
 }
 
 func (s *RiskPrioritizedDBInputSource) ackSnapshotItem() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.total == 0 {
-		return
-	}
 	s.acked++
-	if s.acked != s.total {
+	s.maybeCommitCursorLocked()
+}
+
+// maybeCommitCursorLocked advances the durable scan cursor to the snapshot's
+// upper bound once BOTH lanes are fully drained AND every survivor has been
+// resolved (acknowledged by a worker or skipped as unservable). Gating on
+// streamsExhausted is essential: the total grows as pages stream in, so an
+// early acked+skipped == total (before the last page is pulled) must NOT commit.
+// One-shot (guarded by s.committed). Caller holds s.mu.
+func (s *RiskPrioritizedDBInputSource) maybeCommitCursorLocked() {
+	if s.committed || !s.streamsExhausted {
 		return
 	}
-	if err := s.repo.AdvanceScanCursorBy(context.Background(), s.scanUUID, s.commitCursorAt, s.commitCursorID, int64(s.total)); err != nil {
+	if s.acked+s.skipped < s.total {
+		return
+	}
+	s.committed = true
+	if err := s.repo.AdvanceScanCursorBy(context.Background(), s.scanUUID, s.boundAt, s.boundID, int64(s.total)); err != nil {
 		zap.L().Warn("RiskPrioritizedDBInputSource: failed to acknowledge snapshot", zap.Error(err))
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/notify"
 	"github.com/vigolium/vigolium/pkg/types"
+	"golang.org/x/time/rate"
 )
 
 // Services contains runtime services used across the application.
@@ -16,6 +17,14 @@ type Services struct {
 
 	// HostLimiter limits concurrent requests per hostname
 	HostLimiter *hostlimit.HostRateLimiter
+
+	// RateLimiter, when non-nil, caps the GLOBAL outbound request rate (requests
+	// per second) across all hosts — distinct from HostLimiter's per-host
+	// concurrency. It is engaged only when the operator sets an explicit
+	// --rate-limit, so default scans keep their current throughput. Shared across
+	// every Requester built from these Services (and their WithContext clones), so
+	// one token bucket governs the whole scan.
+	RateLimiter *rate.Limiter
 
 	// HostErrors tracks host failures for circuit breaking
 	HostErrors *hosterrors.Cache

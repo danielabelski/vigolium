@@ -24,4 +24,7 @@ export interface ResolutionContext {
   callSiteIndex?: number;
   /** Index of parent function's call site (for nested resolution) */
   parentCallSiteIndex?: number;
+  /** Babel lexical scope used for binding-qualified value lookup. */
+  scopeId?: number;
+  scopeIds?: number[];
 }

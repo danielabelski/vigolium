@@ -2,6 +2,7 @@ import type { ParseResult } from '@babel/parser';
 import * as t from '@babel/types';
 import * as m from '@codemod/matchers';
 import type { Transform } from '../ast-utils';
+import type { AnalysisContext } from '../context';
 import { tracebackVariables } from '../traceback/tracebackVariables';
 import { appendPattern, appendExtractedRequest } from './utils';
 import { getTrackedVariablesMap } from './globalVariableTracking';
@@ -19,7 +20,20 @@ import {
   isValidUrlNode,
 } from './extractRequest';
 
-export function createJqueryMethodTransform(ast: ParseResult<t.File> | null = null, sourceCode: string = ''): Transform {
+export function createJqueryMethodTransform(
+  analysisContext: AnalysisContext,
+  ast: ParseResult<t.File> | null = null,
+  sourceCode: string = '',
+): Transform {
+	const isJQueryReceiver = (path: import('../ast-utils/babel').NodePath, node: t.Node): boolean => {
+	  if (!t.isIdentifier(node)) return false;
+	  if (node.name === '$' || node.name === 'jQuery') return true;
+	  const binding = path.scope.getBinding(node.name);
+	  if (binding?.path.isImportDefaultSpecifier() || binding?.path.isImportSpecifier()) {
+		return binding.path.parentPath?.isImportDeclaration() === true && binding.path.parentPath.node.source.value === 'jquery';
+	  }
+	  return false;
+	};
   return {
     name: 'jqueryMethod',
     tags: ['safe'],
@@ -46,6 +60,7 @@ export function createJqueryMethodTransform(ast: ParseResult<t.File> | null = nu
           exit(path) {
             if (matcher.match(path.node)) {
               if (path.node.arguments.length === 0) return;
+			  if (!t.isMemberExpression(path.node.callee) || !isJQueryReceiver(path, path.node.callee.object)) return;
 
               const method = methodCapture.current!.name.toUpperCase();
               if (!methodsRegex.test(method)) return;
@@ -54,6 +69,7 @@ export function createJqueryMethodTransform(ast: ParseResult<t.File> | null = nu
 
               // Validate that first arg is a valid URL node
               if (!isValidUrlNode(firstArg)) return;
+              analysisContext.claimRequestNode(path.node);
 
               // Check for false positives: if the resolved URL is just a camelCase/lowercase string
               let url: string | undefined;
@@ -68,8 +84,9 @@ export function createJqueryMethodTransform(ast: ParseResult<t.File> | null = nu
               }
 
               // Output existing requestPattern
-              const result = tracebackVariables(path, [], { ast, sourceCode });
-              appendPattern(result, 'jqueryMethod');
+              if (analysisContext.has('requestEvidence')) {
+                appendPattern(analysisContext, () => tracebackVariables(path, [], { ast, sourceCode, sourceLines: analysisContext.sourceLines }), 'jqueryMethod', path.node);
+              }
 
               // Extract structured request data
               // $.get(url, data?, callback?), $.post(url, data?, callback?)
@@ -80,7 +97,7 @@ export function createJqueryMethodTransform(ast: ParseResult<t.File> | null = nu
               const effectiveIterations = getEffectiveIterationsForFunction(currentFunction);
 
               for (const iteration of effectiveIterations) {
-                const context = createResolutionContext(currentFunction, iteration);
+                const context = createResolutionContext(currentFunction, iteration, path);
 
                 const urlResults = extractURL(firstArg, trackedVars, context);
 
@@ -114,7 +131,10 @@ export function createJqueryMethodTransform(ast: ParseResult<t.File> | null = nu
                     cookies: [],
                   });
 
-                  appendExtractedRequest(request);
+                  appendExtractedRequest(analysisContext, request, {
+                    extractor: 'jquery-method', client: 'jquery', confidence: 'medium',
+                    node: path.node, functionName: currentFunction,
+                  });
                 }
               }
             }
