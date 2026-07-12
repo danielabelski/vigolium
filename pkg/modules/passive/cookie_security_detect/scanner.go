@@ -9,6 +9,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
@@ -84,6 +85,7 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 			continue
 		}
 		cookieName := policy.Name
+		isSession := modkit.LikelySessionCookie(cookieName)
 
 		var issues []string
 
@@ -125,19 +127,49 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		}
 
 		if len(issues) > 0 {
+			kind := output.RecordKindObservation
+			grade := output.EvidenceGradeObservation
+			sev := severity.Info
+			confidence := severity.Certain
+			// Only likely authentication/session cookies rise to candidates, and
+			// missing SameSite alone remains hygiene because modern browsers default
+			// an unspecified SameSite value to Lax-like behavior.
+			materialSessionIssue := isSession && (containsIssue(issues, "Missing Secure flag") || containsIssue(issues, "Missing HttpOnly flag"))
+			if materialSessionIssue {
+				kind = output.RecordKindCandidate
+				grade = output.EvidenceGradeCandidate
+				sev = severity.Low
+				confidence = severity.Tentative
+			}
 			results = append(results, &output.ResultEvent{
-				Host: urlx.Host,
-				URL:  urlx.String(),
+				Host:          urlx.Host,
+				URL:           urlx.String(),
+				RecordKind:    kind,
+				EvidenceGrade: grade,
+				DedupKey:      fmt.Sprintf("cookie-policy|%s|%s|%s", urlx.Host, strings.ToLower(cookieName), strings.Join(issues, "|")),
 				ExtractedResults: []string{
 					fmt.Sprintf("Cookie: %s", cookieName),
 					fmt.Sprintf("Issues: %s", strings.Join(issues, ", ")),
 				},
 				Info: output.Info{
 					Description: fmt.Sprintf("Cookie %q: %s", cookieName, strings.Join(issues, ", ")),
+					Severity:    sev,
+					Confidence:  confidence,
 				},
+				Metadata: map[string]any{"cookie_class": map[bool]string{true: "session", false: "non-session"}[isSession]},
 			})
 		}
 	}
 
 	return results, nil
+}
+
+// containsIssue reports whether want is present in issues.
+func containsIssue(issues []string, want string) bool {
+	for _, issue := range issues {
+		if issue == want {
+			return true
+		}
+	}
+	return false
 }

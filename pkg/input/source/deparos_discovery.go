@@ -952,11 +952,9 @@ func (d *DeparosDiscoverySource) discoverTarget(parentCtx context.Context, targe
 
 	if len(referenced) > 0 {
 		terminal.NoticeArrow("jstangle", fmt.Sprintf(
-			"Preserved %d application-referenced (JS/form) requests from discovery of "+
-				"%s under provenance-specific labels — exempt from the fuzz-noise "+
-				"dedup/status cleanup so their real methods, bodies and 401/403/404 "+
-				"baselines reach dynamic assessment intact",
-			len(referenced), target))
+			"Preserved %d JS/form-referenced request(s), kept out of fuzz-noise "+
+				"dedup so real methods/bodies/baselines survive to assessment — %s",
+			len(referenced), terminal.Gray(target)))
 	}
 
 	localStats.Imported = len(crawled) + len(specEndpoints)

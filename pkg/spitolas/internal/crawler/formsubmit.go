@@ -23,7 +23,6 @@ import (
 const getFormSubmitURLsScript = `(() => {
   const out = [];
   const seen = new Set();
-  const DESTRUCTIVE = /log\s*out|sign\s*out|logout|signout|delete|destroy|(?:^|[^a-z])remove|deactivate|unsubscribe|close[-_]?account|cancel[-_]?account/i;
   let forms;
   try { forms = document.querySelectorAll('form'); } catch (e) { forms = []; }
   for (const form of forms) {
@@ -32,9 +31,6 @@ const getFormSubmitURLsScript = `(() => {
     let action;
     try { action = new URL(form.action || location.href, location.href); } catch (e) { continue; }
     if (action.origin !== location.origin) continue;
-    // Never synthesize a credentialed GET to a destructive endpoint (logout,
-    // delete, unsubscribe): some frameworks mutate state on GET.
-    if (DESTRUCTIVE.test(action.pathname)) continue;
     const params = new URLSearchParams();
     let named = 0;
     let els; try { els = form.elements; } catch (e) { els = []; }

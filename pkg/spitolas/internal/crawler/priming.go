@@ -4,10 +4,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"regexp"
 
 	"github.com/vigolium/vigolium/pkg/spitolas/internal/browser"
 	"go.uber.org/zap"
 )
+
+// destructivePathRe matches URL paths that commonly end a session or mutate state
+// (logout, delete, unsubscribe, close-account). It mirrors the DESTRUCTIVE guard the
+// DOM-side POST-form enumeration applies to form controls, so no in-page primer
+// fetches such an endpoint with the browser's live credentials.
+var destructivePathRe = regexp.MustCompile(`(?i)log\s*out|sign\s*out|logout|signout|delete|destroy|(?:^|[^a-z])remove|deactivate|unsubscribe|close[-_]?account|cancel[-_]?account`)
+
+// filterDestructiveURLs returns urls with any whose path reads as destructive
+// removed. A URL that fails to parse is kept — it was already same-origin-validated
+// by the discovery script that produced it.
+func filterDestructiveURLs(urls []string) []string {
+	kept := make([]string, 0, len(urls))
+	for _, raw := range urls {
+		if u, err := url.Parse(raw); err == nil && destructivePathRe.MatchString(u.Path) {
+			continue
+		}
+		kept = append(kept, raw)
+	}
+	return kept
+}
 
 // inPageFetchScript fetches a Go-supplied JSON array of same-origin URLs from the
 // page (with credentials, following redirects) so the browser's network capture
@@ -41,6 +63,13 @@ const inPageFetchScript = `(async () => {
 // the shared tail of every in-page URL primer (iframe/form/anchor).
 func (c *Crawler) fetchURLsInPage(ctx context.Context, page *browser.Page, urls []string, kind string) {
 	if page == nil || len(urls) == 0 || ctx.Err() != nil {
+		return
+	}
+	// Drop destructive endpoints before priming with live credentials. Applied here
+	// — the shared tail of every in-page URL primer (iframe, GET-form, anchor) — so
+	// all priming paths inherit one guard instead of each script filtering its own.
+	urls = filterDestructiveURLs(urls)
+	if len(urls) == 0 {
 		return
 	}
 	payload, err := json.Marshal(urls)

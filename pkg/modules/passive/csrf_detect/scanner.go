@@ -25,9 +25,6 @@ var csrfParamPattern = regexp.MustCompile(`(?i)(csrf|xsrf|\btoken\b|authenticity
 // csrfHeaderPattern matches custom headers used for CSRF protection.
 var csrfHeaderPattern = regexp.MustCompile(`(?i)^(x-csrf-token|x-xsrf-token|x-requested-with|x-csrftoken|anti-csrf-token)$`)
 
-// sameSitePattern matches SameSite cookie attribute with Strict or Lax.
-var sameSitePattern = regexp.MustCompile(`(?i)samesite=(strict|lax)`)
-
 // stateChangingMethods are HTTP methods that modify server state.
 var stateChangingMethods = map[string]bool{
 	"POST":   true,

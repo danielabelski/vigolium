@@ -473,7 +473,7 @@ func ParseRawRequest(raw string) (rr *HttpRequestResponse, err error) {
 			// none) so a same-host Origin/Referer on a DIFFERENT port is not treated
 			// as same-origin and cannot flip the scheme (e.g. a :3000 frontend Origin
 			// on a request to an :8443 API must not infer http for the TLS service).
-			if s, _, ok := originRefererScheme(raw, hostValue, port); ok {
+			if s, _, ok := OriginRefererScheme(raw, hostValue, port); ok {
 				protocol = s
 			}
 		}
@@ -500,26 +500,18 @@ func ParseRawRequest(raw string) (rr *HttpRequestResponse, err error) {
 
 // OriginRefererScheme returns the URL scheme ("http" or "https") declared by the
 // request's Origin or Referer header, but only when that header names the same
-// host we are about to connect to. It lets raw requests captured from a
-// browser/proxy keep their real scheme when the request line is origin-form (no
-// scheme) and the port is non-standard — e.g. an http service on :3000. A
-// cross-origin Origin/Referer (a different host, as in a CORS request or an
-// external referrer) is ignored so it cannot mislead scheme inference; Origin is
-// preferred over Referer as it is the exact origin the browser attached. host
-// must be the bare hostname (no port). header names which header supplied the
-// scheme ("Origin"/"Referer"), which callers can surface to the user. Returns
-// ok=false when neither header yields a same-host http/https scheme.
-func OriginRefererScheme(raw, host string) (scheme, header string, ok bool) {
-	// Derive the target port from the request's own Host header so external callers
-	// get the same cross-port safety as the parse path (0 when the Host carried no
-	// explicit port, which preserves host-only matching).
-	return originRefererScheme(raw, host, hostHeaderPort(raw))
-}
-
-// originRefererScheme is the port-aware core of OriginRefererScheme. targetPort is
-// the port of the service being connected to (0 when unknown); when > 0 an
-// Origin/Referer must match both host and port to be treated as same-origin.
-func originRefererScheme(raw, host string, targetPort int) (scheme, header string, ok bool) {
+// host — and, when targetPort > 0, the same port — we are about to connect to. It
+// lets raw requests captured from a browser/proxy keep their real scheme when the
+// request line is origin-form (no scheme) and the port is non-standard — e.g. an
+// http service on :3000. A cross-origin Origin/Referer (a different host, or a
+// different port when targetPort is known, as in a CORS request or an external
+// referrer) is ignored so it cannot mislead scheme inference; Origin is preferred
+// over Referer as it is the exact origin the browser attached. host must be the
+// bare hostname (no port); targetPort is the port being connected to (0 when
+// unknown, which falls back to host-only matching). header names which header
+// supplied the scheme ("Origin"/"Referer"). Returns ok=false when neither header
+// yields a same-origin http/https scheme.
+func OriginRefererScheme(raw, host string, targetPort int) (scheme, header string, ok bool) {
 	if host == "" {
 		return "", "", false
 	}
@@ -579,44 +571,15 @@ func sameHostScheme(rawURL, host string, targetPort int) string {
 }
 
 // originURLPort returns the authority port of u, normalizing an empty port to the
-// scheme's default (80 for http, 443 for https/other).
+// scheme's default (80 for http, 443 for https; 443 for any other scheme).
 func originURLPort(u *url.URL) int {
 	if p := u.Port(); p != "" {
 		return parsePort(p)
 	}
-	if u.Scheme == "http" {
-		return 80
+	if dp := GetDefaultPort(u.Scheme); dp > 0 {
+		return dp
 	}
 	return 443
-}
-
-// hostHeaderPort returns the port declared in the request's Host header, or 0
-// when the Host header is absent or carries no explicit port.
-func hostHeaderPort(raw string) int {
-	sc := bufio.NewScanner(strings.NewReader(raw))
-	sc.Buffer(make([]byte, 0, 8*1024), 1024*1024)
-	first := true
-	for sc.Scan() {
-		line := sc.Text()
-		if first { // request line
-			first = false
-			continue
-		}
-		if line == "" { // blank line terminates the header block
-			break
-		}
-		name, value, cut := strings.Cut(line, ":")
-		if !cut {
-			continue
-		}
-		if strings.EqualFold(name, "Host") {
-			if _, p, err := net.SplitHostPort(strings.TrimSpace(value)); err == nil {
-				return parsePort(p)
-			}
-			return 0
-		}
-	}
-	return 0
 }
 
 // ParseRawRequestWithURL parses a raw HTTP request with explicit URL override.

@@ -93,23 +93,25 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	if len(body) == 0 {
 		return nil, nil
 	}
+	// Block gate: drop a WAF/CDN challenge interstitial served with a 200.
+	if modkit.IsEdgeBlockedResponse(resp) {
+		return nil, nil
+	}
+
+	// Header verdict: is the page actually framable in a browser? Runs before the
+	// body copy below so the ≤maxBodyScan string allocation is paid only for a
+	// framable page, not on every non-framable HTML response for the host.
+	framable, headerReason := framingVerdict(resp)
+	if !framable {
+		return nil, nil
+	}
+
 	// Cap the byte slice before converting so the copy is bounded by maxBodyScan,
 	// not the full body size (Body() is zero-copy; string() allocates).
 	if len(body) > maxBodyScan {
 		body = body[:maxBodyScan]
 	}
 	scan := string(body)
-
-	// Block gate: drop a WAF/CDN challenge interstitial served with a 200.
-	if modkit.IsEdgeBlockedResponse(resp) {
-		return nil, nil
-	}
-
-	// Header verdict: is the page actually framable in a browser?
-	framable, headerReason := framingVerdict(resp)
-	if !framable {
-		return nil, nil
-	}
 
 	// Interactive-content baseline: is the page worth hijacking? Static framable
 	// pages are deferred to security_headers_missing / csp_weakness_audit.

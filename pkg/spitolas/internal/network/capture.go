@@ -581,10 +581,7 @@ func (c *Capture) fetchResponseBody(sessionID proto.TargetSessionID, requestID p
 				return nil, err
 			}
 
-			if result.Base64Encoded {
-				return base64.StdEncoding.DecodeString(result.Body)
-			}
-			return []byte(result.Body), nil
+			return decodeResponseBody(result)
 		}
 	}
 
@@ -612,6 +609,12 @@ func (c *Capture) fetchResponseBodyBySession(sessionID proto.TargetSessionID, re
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, err
 	}
+	return decodeResponseBody(&result)
+}
+
+// decodeResponseBody returns the raw body from a Network.getResponseBody result,
+// base64-decoding it when CDP flagged the body as base64-encoded.
+func decodeResponseBody(result *proto.NetworkGetResponseBodyResult) ([]byte, error) {
 	if result.Base64Encoded {
 		return base64.StdEncoding.DecodeString(result.Body)
 	}

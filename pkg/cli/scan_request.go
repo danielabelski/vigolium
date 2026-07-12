@@ -138,7 +138,7 @@ func warnInferredRequestScheme(raw string, rr *httpmsg.HttpRequestResponse) {
 	host := svc.Host()
 	authority := fmt.Sprintf("%s:%d", host, port)
 	target := rr.Target()
-	if s, header, ok := httpmsg.OriginRefererScheme(raw, host); ok {
+	if s, header, ok := httpmsg.OriginRefererScheme(raw, host, port); ok {
 		fmt.Fprintf(os.Stderr, "%s request line has no scheme — inferred %s from the %s header; sending to %s\n",
 			terminal.WarnPrefix(), terminal.BoldYellow(s+"://"), header, terminal.Cyan(target))
 		fmt.Fprintf(os.Stderr, "  pass %s to pin the scheme (use %s to force TLS)\n",

@@ -497,8 +497,9 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 	// full-rate entry created later is re-fingerprinted and re-armed rather than
 	// pinned at full rate by the stale (monotonic) claim.
 	if services != nil && services.HostLimiter != nil {
+		ep := r.edgePacer
 		services.HostLimiter.SetEvictNotifier(func(host string) {
-			r.edgePacer.seen.Delete(strings.ToLower(host))
+			ep.seen.Delete(strings.ToLower(host))
 		})
 	}
 

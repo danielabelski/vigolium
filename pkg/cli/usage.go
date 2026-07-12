@@ -221,7 +221,7 @@ var scanFlagGroups = []flagGroup{
 	{"KnownIssueScan", []string{"known-issue-scan", "known-issue-scan-tags", "known-issue-scan-exclude-tags", "known-issue-scan-severities", "known-issue-scan-templates-dir"}},
 	{"Request", []string{"method", "body", "header", "advanced-options", "retries", "stream"}},
 	{"Authentication", []string{"auth", "auth-file"}},
-	{"Speed Control", []string{"timeout", "concurrency", "rate-limit", "max-per-host", "max-host-error", "max-findings-per-module", "no-clustering"}},
+	{"Speed Control", []string{"timeout", "concurrency", "rate-limit", "max-per-host", "no-waf-pacing", "max-host-error", "max-findings-per-module", "no-clustering"}},
 	{"Output", []string{"output", "stats", "fail-on", "include-response", "omit-response", "report-url", "upload-results", "print-finding", "print-traffic", "print-traffic-tree"}},
 	{"Stateless & Parallel", []string{"stateless", "split-by-host", "db-isolate", "parallel", "resume"}},
 }

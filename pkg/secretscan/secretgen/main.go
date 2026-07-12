@@ -92,13 +92,13 @@ func run() error {
 	// fixture isn't a live blob of provider-shaped secrets. Plain base64 is not
 	// enough — secret scanners decode base64 and match the plaintext — so XOR
 	// the bytes with a fixed key first. loadExamples in detector_test.go reverses it.
-	for id, vals := range prunedExamples {
+	for _, vals := range prunedExamples {
 		for i, v := range vals {
 			b := []byte(v)
 			for j := range b {
 				b[j] ^= 0x5A
 			}
-			prunedExamples[id][i] = base64.StdEncoding.EncodeToString(b)
+			vals[i] = base64.StdEncoding.EncodeToString(b)
 		}
 	}
 	if err := writeJSON(*examplesOut, prunedExamples); err != nil {

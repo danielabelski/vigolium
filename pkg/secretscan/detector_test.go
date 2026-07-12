@@ -34,7 +34,7 @@ func loadExamples(t *testing.T) map[string][]string {
 			for j := range dec {
 				dec[j] ^= 0x5A
 			}
-			ex[id][i] = string(dec)
+			vals[i] = string(dec)
 		}
 	}
 	return ex

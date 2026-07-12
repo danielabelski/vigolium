@@ -131,25 +131,3 @@ func TestCsrfHeaderPattern(t *testing.T) {
 		})
 	}
 }
-
-func TestSameSitePattern(t *testing.T) {
-	tests := []struct {
-		name     string
-		cookie   string
-		expected bool
-	}{
-		{"strict", "session=abc; SameSite=Strict; Secure", true},
-		{"lax", "session=abc; SameSite=Lax; HttpOnly", true},
-		{"none", "session=abc; SameSite=None; Secure", false},
-		{"no samesite", "session=abc; HttpOnly; Secure", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := sameSitePattern.MatchString(tt.cookie)
-			if got != tt.expected {
-				t.Errorf("sameSitePattern.MatchString(%q) = %v, want %v", tt.cookie, got, tt.expected)
-			}
-		})
-	}
-}

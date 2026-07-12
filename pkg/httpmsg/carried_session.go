@@ -95,13 +95,7 @@ func normalizedOrigin(scheme, host, port string) string {
 
 // isDefaultPort reports whether port is the well-known default for scheme.
 func isDefaultPort(scheme, port string) bool {
-	switch scheme {
-	case "http", "ws":
-		return port == "80"
-	case "https", "wss":
-		return port == "443"
-	}
-	return false
+	return GetDefaultPort(scheme) == parsePort(port)
 }
 
 // cookieDomainMatches reports whether a cookie with the given Domain attribute
