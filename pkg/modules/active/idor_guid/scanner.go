@@ -246,11 +246,15 @@ func (m *Module) tryPredictedID(
 			return nil, nil
 		}
 
-		// Predictability plus a stable different object is useful evidence, but one
-		// identity cannot prove that the object is unauthorized. A credential only
-		// proves authentication, not ownership.
-		confidence := severity.Tentative
-		authenticated := authzutil.RequestCarriesCredential(ctx.Request())
+		// Authorization-boundary gate: a predictable id only proves broken
+		// object-level authorization when the original request carried a credential
+		// whose per-user boundary it crossed. An unauthenticated "different id →
+		// different page" is the expected behavior of public content (blogs,
+		// catalogs, docs), so report it as a Tentative lead rather than Firm.
+		confidence := severity.Firm
+		if !authzutil.RequestCarriesCredential(ctx.Request()) {
+			confidence = severity.Tentative
+		}
 
 		return &output.ResultEvent{
 			URL:              urlStr,
@@ -259,18 +263,11 @@ func (m *Module) tryPredictedID(
 			Response:         resp.FullResponseString(),
 			FuzzingParameter: paramName,
 			ExtractedResults: []string{fmt.Sprintf("technique=%s predicted_id=%s", technique, predictedID)},
-			RecordKind:       output.RecordKindCandidate,
-			EvidenceGrade:    output.EvidenceGradeDifferential,
-			DedupKey:         fmt.Sprintf("idor-guid-candidate|%s|%s|%s", urlStr, paramName, ctx.Request().IdentityFingerprint()),
 			Info: output.Info{
 				Name:        fmt.Sprintf("IDOR GUID Predictability: %s", technique),
 				Description: fmt.Sprintf("Predicted identifier %q injected into parameter %q returned a valid different resource, indicating predictable object references", predictedID, paramName),
 				Severity:    severity.Medium,
 				Confidence:  confidence,
-			},
-			Metadata: map[string]any{
-				"authenticated_probe": authenticated,
-				"authorization_proof": "single-identity differential only",
 			},
 		}, nil
 	}

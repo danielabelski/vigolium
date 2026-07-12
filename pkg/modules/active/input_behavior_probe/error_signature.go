@@ -3,6 +3,8 @@ package input_behavior_probe
 import (
 	"regexp"
 	"strings"
+
+	"github.com/vigolium/vigolium/pkg/modules/modkit"
 )
 
 // maxErrorScanBytes caps how much of a 5xx body bodyLeaksServerError inspects.
@@ -46,15 +48,11 @@ var serverErrorDisclosurePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\t[\w/.]+\.go:\d+`),
 	regexp.MustCompile(`(?i)\bpanic: `),
 	regexp.MustCompile(`(?i)runtime error:`),
-	// SQL
+	// A loose MySQL phrase kept local because the shared modkit catalog matches
+	// the stricter "SQL syntax .*? MySQL" form; the full DBMS signature set —
+	// including the Node.js SQLite/Sequelize format that hid the Juice Shop login
+	// SQLi — is inherited via modkit.BodyHasSQLError in bodyLeaksServerError.
 	regexp.MustCompile(`(?i)You have an error in your SQL syntax`),
-	regexp.MustCompile(`(?i)SQL syntax.*(?:MySQL|MariaDB)`),
-	regexp.MustCompile(`(?i)ORA-\d{5}`),
-	regexp.MustCompile(`(?i)SQLSTATE\[`),
-	regexp.MustCompile(`(?i)PG::\w+`),
-	regexp.MustCompile(`(?i)(?:psycopg2|sqlite3?)\.\w*Error`),
-	regexp.MustCompile(`(?i)Incorrect syntax near`),
-	regexp.MustCompile(`(?i)Unclosed quotation mark`),
 }
 
 // serverErrorDisclosureKeywords are lowercase substrings that only appear in a
@@ -99,5 +97,8 @@ func bodyLeaksServerError(body string) bool {
 			return true
 		}
 	}
-	return false
+	// Inherit the full shared DBMS error catalog (span-bounded to reject page
+	// noise) so every backend signature — notably the Node.js SQLite/Sequelize
+	// format — is recognized here without maintaining a second copy.
+	return modkit.BodyHasSQLError(body)
 }

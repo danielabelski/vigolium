@@ -21,17 +21,83 @@ const (
 	increaseAfterHealthy = 4
 )
 
+// usesAdaptiveEntries reports whether hosts get resizable token pools rather than
+// fixed semaphores — true under plain Adaptive mode and under WafAutoArm (where the
+// pool sits pinned at MaxPerHost until a WAF block arms it).
+func (h *HostRateLimiter) usesAdaptiveEntries() bool {
+	return h.adaptive || h.wafAutoArm
+}
+
+// PreArmable reports whether PreArm can throttle a host — true only when hosts use
+// adaptive token pools (plain Adaptive or WafAutoArm) AND proactive pacing has not
+// been disabled (--no-waf-pacing). It lets a caller skip the per-response edge
+// fingerprint entirely when pre-arming would be a no-op (static mode or disabled).
+func (h *HostRateLimiter) PreArmable() bool {
+	return h.usesAdaptiveEntries() && !h.preArmDisabled
+}
+
+// preArmStart is the reduced concurrency a host is dropped to when proactively
+// pre-armed for a CDN/WAF edge (before any block). A firm quarter of MaxPerHost
+// (floored at MinPerHost, never below 1): low enough that the active phase's opening
+// burst does not arm a rate-based WAF, high enough that a healthy (non-WAF) edge
+// ramps back toward the ceiling on clean completions. Deliberately more decisive
+// than Feedback's reactive halving so the proactive drop meaningfully cuts the burst.
+func (h *HostRateLimiter) preArmStart() int {
+	// Floor at minPerHost (the constructor guarantees it is >= 1). Not redundant with
+	// setLimit's own min-clamp: this value is also reported in PreArmNotice/logged, so
+	// it must equal what setLimit will actually apply.
+	return max(h.maxPerHost/4, h.minPerHost)
+}
+
+// PreArm proactively arms a host's AIMD back-off and drops it to preArmStart before
+// any distress is observed — the proactive counterpart to the reactive WAF-block
+// arming in Feedback. A caller invokes it when a host is fingerprinted behind a
+// CDN/WAF edge (which commonly arms a rate-based WAF once a scan bursts it), so the
+// next phase paces that host from its first request instead of bursting into the edge
+// and tripping it. vendor is the fingerprinted edge (for the operator notice; may be
+// ""). It arms exactly once (CompareAndSwap): a host already armed — by a real block
+// or an earlier pre-arm — is left at whatever limit its AIMD control has reached, so a
+// later fingerprint never bumps a host that has since backed off further, and the
+// once-per-host notice fires only on the arming call. No-op in static mode and for an
+// empty host.
+func (h *HostRateLimiter) PreArm(host, vendor string) {
+	if !h.PreArmable() || host == "" {
+		return
+	}
+	shard := h.shardFor(host)
+	entry := h.getOrCreateEntry(shard, host)
+	if entry.tokens == nil {
+		return
+	}
+	from := int(entry.limit.Load())
+	if !entry.armed.CompareAndSwap(false, true) {
+		return // already armed (block or prior pre-arm) — leave its current limit
+	}
+	h.anyArmed.Store(true)
+	start := h.preArmStart()
+	h.setLimit(entry, start)
+	zap.L().Debug("HostRateLimiter: CDN/WAF edge fingerprinted — pre-arming pacing",
+		zap.String("host", host), zap.String("vendor", vendor),
+		zap.Int("from", from), zap.Int("start", start), zap.Int("ceiling", h.ceilingPerHost))
+	if h.preArmSink != nil {
+		h.preArmSink(PreArmNotice{Host: host, Vendor: vendor, From: from, Start: start, Ceiling: h.ceilingPerHost})
+	}
+}
+
 // newEntry builds a hostEntry for the limiter's current mode. Static mode gets a
-// fixed-cap channel semaphore (the unchanged hot path); adaptive mode gets a
-// resizable token pool sized to the ramp ceiling and pre-filled to the start
-// limit (MaxPerHost).
+// fixed-cap channel semaphore (the unchanged hot path); adaptive (or WAF-auto-arm)
+// mode gets a resizable token pool sized to the ramp ceiling and pre-filled to the
+// start limit (MaxPerHost) — under WafAutoArm it stays pinned there until armed.
 func (h *HostRateLimiter) newEntry() *hostEntry {
-	if !h.adaptive {
+	if !h.usesAdaptiveEntries() {
 		return &hostEntry{sem: make(chan struct{}, h.maxPerHost)}
 	}
 	start := min(max(h.maxPerHost, h.minPerHost), h.ceilingPerHost)
 	e := &hostEntry{tokens: make(chan struct{}, h.ceilingPerHost)}
 	e.limit.Store(int64(start))
+	// Adaptive hosts are armed from birth (adjust from the first request); WAF-auto-arm
+	// hosts start unarmed and stay pinned at MaxPerHost until a WAF block arms them.
+	e.armed.Store(h.adaptive)
 	for i := 0; i < start; i++ {
 		e.tokens <- struct{}{}
 	}
@@ -40,11 +106,22 @@ func (h *HostRateLimiter) newEntry() *hostEntry {
 
 // Feedback reports the outcome of one request to the host so adaptive mode can
 // adjust its concurrency limit. It is a no-op in static mode (and for an evicted
-// host). A distress signal (429/503/502/504, connection error, or timeout) backs
-// the limit off; a healthy completion counts toward the next ramp-up. statusCode
-// may be 0 when err != nil (transport-level failure).
-func (h *HostRateLimiter) Feedback(host string, statusCode int, err error) {
-	if !h.adaptive {
+// host). A distress signal (429/503/502/504, connection error, timeout, or a
+// confirmed WAF/CDN block) backs the limit off; a healthy completion counts toward
+// the next ramp-up. statusCode may be 0 when err != nil (transport-level failure).
+// wafBlocked marks the response as a classified WAF/CDN block: it always counts as
+// distress, and in WAF-auto-arm mode it is the signal that arms this host's AIMD
+// control (before which the host stays pinned at MaxPerHost, unaffected by ordinary
+// 429/5xx so a non-WAF scan is never throttled by this path).
+func (h *HostRateLimiter) Feedback(host string, statusCode int, err error, wafBlocked bool) {
+	if !h.usesAdaptiveEntries() {
+		return
+	}
+	// WAF-auto-arm mode stays dormant until some host trips a WAF block: until then no
+	// non-block response can change any limit, so skip the per-host shard lookup and
+	// keep Feedback ~free on the common non-WAF hot path. (wafAutoArm implies
+	// !adaptive; plain Adaptive arms every host at birth, so anyArmed is moot there.)
+	if h.wafAutoArm && !wafBlocked && !h.anyArmed.Load() {
 		return
 	}
 	shard := h.shardFor(host)
@@ -55,7 +132,18 @@ func (h *HostRateLimiter) Feedback(host string, statusCode int, err error) {
 		return
 	}
 
-	if isDistress(statusCode, err) {
+	// A confirmed WAF block arms this host's AIMD control (adaptive hosts are armed at
+	// birth in newEntry). Until armed, the host stays pinned at MaxPerHost.
+	if wafBlocked && entry.armed.CompareAndSwap(false, true) {
+		h.anyArmed.Store(true)
+		zap.L().Info("HostRateLimiter: WAF/CDN block detected — arming adaptive back-off",
+			zap.String("host", host))
+	}
+	if !entry.armed.Load() {
+		return
+	}
+
+	if wafBlocked || isDistress(statusCode, err) {
 		entry.healthy.Store(0)
 		// One back-off per cooldown window — coalesce concurrent failures.
 		now := time.Now().UnixNano()

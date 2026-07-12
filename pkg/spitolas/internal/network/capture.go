@@ -46,13 +46,21 @@ var authHeaders = map[string]struct{}{
 // Capture handles HTTP traffic capture using Chrome DevTools Protocol.
 // Uses browser-level event subscription to capture traffic from ALL pages.
 type Capture struct {
-	mu                     sync.Mutex
-	writer                 Writer
-	pending                map[proto.NetworkRequestID]*pendingEntry
-	logged                 map[string]struct{} // Track logged entries by hash to prevent stderr duplicates
-	seenHashes             map[string]bool     // Track written hashes to prevent file duplicates
-	duplicateCount         int                 // Count skipped duplicates
-	writtenCount           int                 // Count successfully written entries
+	mu         sync.Mutex
+	writer     Writer
+	pending    map[proto.NetworkRequestID]*pendingEntry
+	logged     map[string]struct{} // Track logged entries by hash to prevent stderr duplicates
+	seenHashes map[string]bool     // Track written hashes to prevent file duplicates
+	// shapeVariants counts how many DISTINCT query-value variants of each endpoint
+	// shape (the value-blind computeHash key) have been written, so up to
+	// maxParamVariants of them survive instead of collapsing to one. Keyed by shape
+	// hash. Only parameterized (has-query) entries touch it.
+	shapeVariants map[string]int
+	// maxParamVariants caps the distinct value-variants kept per shape (see
+	// Config.MaxParamValueVariants). 0 or 1 restores the original value-blind dedup.
+	maxParamVariants       int
+	duplicateCount         int // Count skipped duplicates
+	writtenCount           int // Count successfully written entries
 	stopped                bool
 	browser                *rod.Browser // Browser reference for fetching response bodies
 	noColor                bool         // Disable colored output
@@ -85,6 +93,7 @@ func New(writer Writer, noColor, silent, verbose, includeResponseBody, includeRe
 		pending:                make(map[proto.NetworkRequestID]*pendingEntry),
 		logged:                 make(map[string]struct{}),
 		seenHashes:             make(map[string]bool),
+		shapeVariants:          make(map[string]int),
 		noColor:                noColor,
 		silent:                 silent,
 		verbose:                verbose,
@@ -94,6 +103,16 @@ func New(writer Writer, noColor, silent, verbose, includeResponseBody, includeRe
 	}
 	c.SetTargetHost(targetHost)
 	return c
+}
+
+// SetMaxParamValueVariants sets how many distinct query-value variants of one
+// endpoint shape the capture keeps before falling back to value-blind dedup (see
+// Config.MaxParamValueVariants). Call once before the crawl starts; n<=1 keeps
+// the original behavior of one representative per shape.
+func (c *Capture) SetMaxParamValueVariants(n int) {
+	c.mu.Lock()
+	c.maxParamVariants = n
+	c.mu.Unlock()
 }
 
 // SetTargetHost re-points the cross-origin stderr-log filter at host. The
@@ -747,7 +766,27 @@ func (c *Capture) writeEntry(entry *TrafficEntry) {
 		return
 	}
 
-	entry.Hash = computeHash(entry)
+	// The dedup key has two layers. shapeHash is value-blind (method, path, param
+	// NAMES, auth, body, response shape) — the classic key. For a parameterized
+	// request we additionally fold the query VALUES into fullHash, so distinct
+	// value-variants of the same shape (…?category=Books vs ?category=Gin) are kept
+	// apart up to maxParamVariants representatives; beyond that they collapse back
+	// onto the shape. Path-only and POST-body-only requests are unaffected
+	// (fullHash == shapeHash for them). writeEntry is the per-event capture hot
+	// path, so the URL is parsed (and its query decoded) exactly once here and
+	// threaded into both hashers.
+	parsedURL, parseErr := url.Parse(entry.Request.URL)
+	var query url.Values
+	if parseErr == nil {
+		query = parsedURL.Query()
+	}
+	hasQuery := len(query) > 0
+	shapeHash := computeShapeHash(entry, parsedURL, query, parseErr)
+	fullHash := shapeHash
+	if hasQuery {
+		fullHash = computeVariantHash(shapeHash, query)
+	}
+	entry.Hash = fullHash
 	entry.TargetHost = c.targetHostValue()
 
 	c.mu.Lock()
@@ -763,10 +802,26 @@ func (c *Capture) writeEntry(entry *TrafficEntry) {
 		return
 	}
 
-	// Check if hash already written to file
+	// Check if this exact request (shape + values) was already written.
 	_, alreadyWritten := c.seenHashes[entry.Hash]
-	if alreadyWritten {
-		// Duplicate detected - skip file write
+
+	// For a parameterized request that is a NEW value-variant, enforce the
+	// per-shape cap: once maxParamVariants distinct variants of this shape have
+	// been kept, further variants collapse back onto the shape (dropped as dups).
+	shapeCapExceeded := false
+	if !alreadyWritten && hasQuery {
+		limit := c.maxParamVariants
+		if limit < 1 {
+			limit = 1
+		}
+		if c.shapeVariants[shapeHash] >= limit {
+			shapeCapExceeded = true
+		}
+	}
+
+	if alreadyWritten || shapeCapExceeded {
+		// Duplicate (exact repeat, or this shape already has enough distinct
+		// value-variants) - skip file write.
 		c.duplicateCount++
 
 		// Still handle stderr logging independently
@@ -792,6 +847,15 @@ func (c *Capture) writeEntry(entry *TrafficEntry) {
 
 	// Hash is NEW - mark as seen and write to file
 	c.seenHashes[entry.Hash] = true
+	if hasQuery {
+		// Lazy-init guards the write: New() always makes this map, but tests
+		// construct Capture{} via struct literal without it. (Nil-map reads above
+		// are safe — they return 0 — so only this write needs the guard.)
+		if c.shapeVariants == nil {
+			c.shapeVariants = make(map[string]int)
+		}
+		c.shapeVariants[shapeHash]++
+	}
 	err := c.writer.Write(entry)
 	if err == nil {
 		c.writtenCount++
@@ -884,22 +948,37 @@ func (c *Capture) cleanupStalePending() {
 	}
 }
 
-// computeHash generates a SHA256 hash for deduplication based on:
-// method, path, param names, auth headers, request body, response content-type, status, server header.
+// computeHash generates the value-blind shape hash for an entry by parsing its
+// URL. It is the convenience entry point used by tests and any caller that does
+// not already have the URL parsed; writeEntry calls computeShapeHash directly to
+// avoid re-parsing on the hot path.
 func computeHash(entry *TrafficEntry) string {
+	parsedURL, err := url.Parse(entry.Request.URL)
+	var query url.Values
+	if err == nil {
+		query = parsedURL.Query()
+	}
+	return computeShapeHash(entry, parsedURL, query, err)
+}
+
+// computeShapeHash generates a SHA256 hash for deduplication based on: method,
+// path, param names, auth headers, request body, response content-type, status,
+// server header. parsedURL/query are the pre-parsed request URL and decoded query
+// (query may be nil); parseErr is url.Parse's error, in which case the raw URL is
+// hashed instead. The values are value-BLIND — only param names participate.
+func computeShapeHash(entry *TrafficEntry, parsedURL *url.URL, query url.Values, parseErr error) string {
 	h := sha256.New()
 
 	// 1. Method
 	h.Write([]byte(entry.Request.Method))
 
 	// 2. Full URL path (scheme://host/path, no query)
-	parsedURL, err := url.Parse(entry.Request.URL)
-	if err == nil {
+	if parseErr == nil {
 		h.Write([]byte(parsedURL.Scheme + "://" + parsedURL.Host + parsedURL.Path))
 
 		// 3. Param names only, sorted alphabetically
 		var paramNames []string
-		for k := range parsedURL.Query() {
+		for k := range query {
 			paramNames = append(paramNames, k)
 		}
 		sort.Strings(paramNames)
@@ -946,6 +1025,21 @@ func computeHash(entry *TrafficEntry) string {
 		}
 	}
 
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// computeVariantHash derives a per-value-variant dedup key from the value-blind
+// shapeHash plus the sorted, fully-encoded query (names AND values). Two requests
+// to the same endpoint shape that differ only in a parameter value get distinct
+// variant hashes, so the writeEntry per-shape cap can keep several of them apart
+// instead of collapsing every value onto one representative. query is the entry's
+// pre-decoded, non-empty query (writeEntry only calls this for has-query entries).
+func computeVariantHash(shapeHash string, query url.Values) string {
+	h := sha256.New()
+	h.Write([]byte(shapeHash))
+	// url.Values.Encode() sorts by key and percent-encodes, so the same query in a
+	// different textual order hashes identically (a stable variant identity).
+	h.Write([]byte(query.Encode()))
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 

@@ -1065,7 +1065,7 @@ func DifferentialSurfaceUnreliable(resp *httpmsg.HttpResponse) bool {
 	// not a trustworthy differential surface: its per-request content churn
 	// manufactures phantom TRUE/FALSE differentials for the boolean/size oracles that
 	// gate on this. The cache-header and large-HTML checks above miss a blob served
-	// with a 200 and no cache header (the evr-kr.roche.com /cdn-cgi challenge class).
+	// with a 200 and no cache header (the evr-kr.acme.com /cdn-cgi challenge class).
 	if infra.LooksOpaqueBody(resp.BodyToString()) {
 		return true
 	}

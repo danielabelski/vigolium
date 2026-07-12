@@ -226,7 +226,7 @@ func groupReSpiderSeedsByHost(chosen []respiderSeed) [][]respiderSeed {
 // remaining seeds are skipped and feeds the wall host into the scan-wide fuzz
 // exclusion the discovery auto-fuzz uses. Returns true when the seed hit a wall.
 func (r *Runner) applyReSpiderSSO(result *spitolas.SpiderResult, hostKey string, ssoSkip map[string]struct{}) bool {
-	if !(result.OffHostRedirect && result.LandingIsLogin) {
+	if !result.OffHostRedirect || !result.LandingIsLogin {
 		return false
 	}
 	ssoSkip[hostKey] = struct{}{}

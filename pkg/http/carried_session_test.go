@@ -61,6 +61,36 @@ func TestCarriedSession_InjectsCookieAndUA(t *testing.T) {
 	}
 }
 
+// TestCarriedSession_InjectsAuthorization proves a harvested token-session
+// credential (JWT/Bearer) is applied to a request that has no Authorization of its
+// own — the token-based-SPA analogue of the cookie carry.
+func TestCarriedSession_InjectsAuthorization(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		gotAuth = req.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	r := newTestRequester(t)
+
+	host := httpmsg.NormalizeHost(mustHost(t, srv.URL))
+	r.SetCarriedSessions(map[string]httpmsg.CarriedSession{
+		host: {AuthorizationHeader: "Bearer eyJ.jwt.token"},
+	})
+
+	rr, err := httpmsg.GetRawRequestFromURL(srv.URL)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if _, _, err := r.Execute(rr, Options{NoClustering: true}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if gotAuth != "Bearer eyJ.jwt.token" {
+		t.Errorf("Authorization = %q, want carried bearer token", gotAuth)
+	}
+}
+
 // TestCarriedSession_CustomHeaderWins proves an explicit -H Cookie/User-Agent
 // overrides the carried session — the session never clobbers operator headers.
 func TestCarriedSession_CustomHeaderWins(t *testing.T) {

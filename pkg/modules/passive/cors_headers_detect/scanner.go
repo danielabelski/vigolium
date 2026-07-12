@@ -13,7 +13,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
-	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
@@ -124,17 +123,6 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		return nil, nil
 	}
 
-	kind := output.RecordKindObservation
-	grade := output.EvidenceGradeObservation
-	sev := severity.Info
-	confidence := severity.Certain
-	if strings.EqualFold(acao, "null") || reflectsCrossOrigin(ctx.Request().Header("Origin"), acao, urlx.Hostname()) {
-		kind = output.RecordKindCandidate
-		grade = output.EvidenceGradeCandidate
-		sev = severity.Low
-		confidence = severity.Tentative
-	}
-
 	// Annotate record with semantic tags
 	if scanCtx != nil && scanCtx.RemarksAnnotator != nil && scanCtx.RequestUUIDResolver != nil {
 		uuid := scanCtx.RequestUUIDResolver.ResolveRequestUUID(ctx.Request().ID())
@@ -151,20 +139,15 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 
 	return []*output.ResultEvent{
 		{
-			Host:          urlx.Host,
-			URL:           urlx.String(),
-			Request:       string(ctx.Request().Raw()),
-			RecordKind:    kind,
-			EvidenceGrade: grade,
-			DedupKey:      fmt.Sprintf("cors-passive|%s|%s|%s", ctx.Request().Method(), urlx.Host, urlx.Path),
+			Host:    urlx.Host,
+			URL:     urlx.String(),
+			Request: string(ctx.Request().Raw()),
 			ExtractedResults: append([]string{
 				fmt.Sprintf("ACAO: %s", acao),
 				fmt.Sprintf("ACAC: %s", acac),
 			}, issues...),
 			Info: output.Info{
 				Description: strings.Join(issues, "; "),
-				Severity:    sev,
-				Confidence:  confidence,
 			},
 		},
 	}, nil

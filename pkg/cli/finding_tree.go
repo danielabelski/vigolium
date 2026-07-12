@@ -9,6 +9,7 @@ import (
 
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/database"
+	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/terminal"
 )
 
@@ -44,6 +45,19 @@ func treeBranch(isLast bool) (connector, childBar string) {
 // (source-audit findings) group under their repo name / source file.
 func displayFindingTree(db *database.DB, ctx context.Context, findings []*database.Finding, total int64) error {
 	printFindingsSummary(db, ctx, len(findings), total)
+
+	// Single-location findings can have their shown URL upgraded to the
+	// reproducible attack URL parsed from the finding's own request (active
+	// injection modules record the base request in matched_at but the real PoC
+	// URL only in the request line). The list query omits the request blob, so
+	// fetch it for just those findings in one batch before rendering.
+	needReq := make([]*database.Finding, 0, len(findings))
+	for _, f := range findings {
+		if findingCanUpgradeURL(f) {
+			needReq = append(needReq, f)
+		}
+	}
+	database.NewRepository(db).HydrateFindingRequests(ctx, needReq)
 
 	// One db-path root per source: a single root for a plain DB, or one per
 	// merged file under --glob-db so each finding's origin file is visible.
@@ -164,11 +178,7 @@ func groupPathFindings(findings []*database.Finding) []*findingPathGroup {
 			groupMap[key] = g
 			order = append(order, key)
 		}
-		locations := f.MatchedAt
-		if len(locations) == 0 {
-			locations = []string{findingURLValue(f)}
-		}
-		for _, loc := range locations {
+		for _, loc := range findingDisplayLocations(f) {
 			g.urls = append(g.urls, urlRef{url: loc, id: f.ID})
 		}
 	}
@@ -242,6 +252,76 @@ func schemeHost(u *url.URL) string {
 		scheme = "http"
 	}
 	return scheme + "://" + u.Host
+}
+
+// findingCanUpgradeURL reports whether a finding is eligible to have its shown
+// URL upgraded to the request's PoC URL: only single-location findings qualify
+// (grouped multi-URL findings keep every matched location). Shared by the tree's
+// request-hydration filter and findingDisplayLocations so the eligibility rule
+// has a single owner.
+func findingCanUpgradeURL(f *database.Finding) bool {
+	return len(f.MatchedAt) <= 1
+}
+
+// findingDisplayLocations returns the URLs to list under a finding in the tree.
+// For an eligible single-location finding it upgrades the shown URL to the
+// reproducible attack URL parsed from the finding's own request line, when that
+// request targets the same endpoint (host+path) with a payload-bearing
+// query/fragment: active injection modules (XSS, …) record the base request in
+// matched_at but the real proof-of-concept URL only in the request. Grouped
+// multi-URL findings — and any request that points at a different endpoint — are
+// returned unchanged so the tree never redirects the reader off the matched
+// location.
+func findingDisplayLocations(f *database.Finding) []string {
+	if !findingCanUpgradeURL(f) {
+		return f.MatchedAt
+	}
+	locations := f.MatchedAt
+	if len(locations) == 0 {
+		locations = []string{findingURLValue(f)}
+	}
+	if poc := pocURLFromRequest(f.Request, locations[0]); poc != "" {
+		return []string{poc}
+	}
+	return locations
+}
+
+// pocURLFromRequest extracts the reproducible attack URL from a finding's stored
+// raw request, but only when it targets the same endpoint as baseLoc (same host
+// and path) — so a payload-bearing query/fragment is surfaced while a request
+// pointing at an unrelated resource is ignored. Returns "" when there is nothing
+// to upgrade: no request, unparseable, a different endpoint, or identical to base.
+func pocURLFromRequest(rawRequest, baseLoc string) string {
+	if rawRequest == "" || baseLoc == "" {
+		return ""
+	}
+	baseU, err := url.Parse(baseLoc)
+	if err != nil || baseU.Host == "" {
+		return ""
+	}
+	// httpmsg owns request-line parsing; GetPath returns the request-target
+	// (path+query, or the absolute URL for absolute-form requests).
+	target, _ := httpmsg.GetPath([]byte(rawRequest))
+	if target == "" {
+		return ""
+	}
+	ref, err := url.Parse(target)
+	if err != nil {
+		return ""
+	}
+	// ResolveReference handles both an origin-form target (resolved against the
+	// base scheme+host) and an absolute-form target (returned as-is).
+	pocU := baseU.ResolveReference(ref)
+	// Never redirect the reader off the matched endpoint: host + path must match;
+	// only the payload-bearing query/fragment may differ.
+	if !strings.EqualFold(pocU.Host, baseU.Host) || pocU.Path != baseU.Path {
+		return ""
+	}
+	poc := pocU.String()
+	if poc == baseLoc {
+		return ""
+	}
+	return poc
 }
 
 // findingPathPrefix returns the first path segment of a finding's location

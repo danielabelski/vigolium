@@ -22,6 +22,14 @@ type CarriedSession struct {
 	// UserAgent is the browser User-Agent to pin on downstream requests. Empty
 	// means "leave the configured User-Agent alone".
 	UserAgent string
+	// AuthorizationHeader is a token-based session credential (e.g. "Bearer <jwt>")
+	// harvested from the crawl's authenticated traffic. Token-based SPAs (Juice
+	// Shop, most JWT apps) keep the session in localStorage and send it as an
+	// Authorization header rather than a cookie, so carrying only cookies leaves the
+	// scan unauthenticated. Applied only when the outgoing request has no
+	// Authorization of its own, and before the operator's -H headers so an explicit
+	// -H Authorization still wins. Empty means "carry no token".
+	AuthorizationHeader string
 }
 
 // NormalizeHost lowercases a host and strips any port, returning the bare

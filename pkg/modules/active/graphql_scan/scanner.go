@@ -360,19 +360,6 @@ func isBlockedResponse(resp *httputil.ResponseChain) bool {
 	return infra.IsBlockedResponse(resp)
 }
 
-// sendGraphQLGET sends a GraphQL query via GET with a query parameter.
-func (m *Module) sendGraphQLGET(
-	ctx *httpmsg.HttpRequestResponse,
-	httpClient *http.Requester,
-	path, query string,
-) (string, error) {
-	r, err := m.send(ctx, httpClient, "GET", graphQLGETPath(path, query), "", "")
-	if err != nil {
-		return "", err
-	}
-	return r.body, nil
-}
-
 func graphQLGETPath(path, query string) string {
 	separator := "?"
 	if strings.Contains(path, "?") {

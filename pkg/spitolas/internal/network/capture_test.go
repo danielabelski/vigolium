@@ -62,6 +62,83 @@ func createTestEntry(url string) *TrafficEntry {
 	}
 }
 
+// TestWriteEntryParamValueVariantsKept verifies that up to maxParamVariants
+// DISTINCT query-value variants of one endpoint shape survive dedup, that further
+// variants collapse back onto the shape, and that exact repeats are still dropped.
+func TestWriteEntryParamValueVariantsKept(t *testing.T) {
+	mock := &mockWriter{}
+	capture := &Capture{
+		writer:           mock,
+		logged:           make(map[string]struct{}),
+		seenHashes:       make(map[string]bool),
+		shapeVariants:    make(map[string]int),
+		maxParamVariants: 3,
+		noColor:          true,
+	}
+
+	// Five distinct category values of the same shape (/catalog?category=…).
+	for _, v := range []string{"Books", "Gin", "Juice", "Accessories", "Accompaniments"} {
+		capture.writeEntry(createTestEntry("https://example.com/catalog?category=" + v))
+	}
+
+	// Only the first 3 distinct variants are kept; the rest collapse onto the shape.
+	if mock.getWriteCount() != 3 {
+		t.Errorf("Expected 3 variants written (cap=3), got %d", mock.getWriteCount())
+	}
+	if capture.duplicateCount != 2 {
+		t.Errorf("Expected 2 over-cap variants dropped, got %d", capture.duplicateCount)
+	}
+
+	// An exact repeat of an already-written variant is still a duplicate.
+	before := mock.getWriteCount()
+	capture.writeEntry(createTestEntry("https://example.com/catalog?category=Books"))
+	if mock.getWriteCount() != before {
+		t.Errorf("Exact-repeat variant should be deduped, write count changed to %d", mock.getWriteCount())
+	}
+}
+
+// TestWriteEntryParamVariantsDisabled verifies maxParamVariants<=1 reproduces the
+// original value-blind behavior: all value-variants of a shape collapse to one.
+func TestWriteEntryParamVariantsDisabled(t *testing.T) {
+	mock := &mockWriter{}
+	capture := &Capture{
+		writer:           mock,
+		logged:           make(map[string]struct{}),
+		seenHashes:       make(map[string]bool),
+		shapeVariants:    make(map[string]int),
+		maxParamVariants: 1,
+		noColor:          true,
+	}
+	for _, v := range []string{"1", "2", "3", "4"} {
+		capture.writeEntry(createTestEntry("https://example.com/catalog/product?productId=" + v))
+	}
+	if mock.getWriteCount() != 1 {
+		t.Errorf("Expected value-blind collapse to 1 record, got %d", mock.getWriteCount())
+	}
+}
+
+// TestWriteEntryDistinctShapesUnaffectedByVariantCap verifies the per-shape cap is
+// scoped per shape: different param-name sets and path-only URLs are independent.
+func TestWriteEntryDistinctShapesUnaffectedByVariantCap(t *testing.T) {
+	mock := &mockWriter{}
+	capture := &Capture{
+		writer:           mock,
+		logged:           make(map[string]struct{}),
+		seenHashes:       make(map[string]bool),
+		shapeVariants:    make(map[string]int),
+		maxParamVariants: 2,
+		noColor:          true,
+	}
+	// Two shapes (category vs searchTerm) + one path-only URL: all independent.
+	capture.writeEntry(createTestEntry("https://example.com/catalog?category=Books"))
+	capture.writeEntry(createTestEntry("https://example.com/catalog?category=Gin"))
+	capture.writeEntry(createTestEntry("https://example.com/catalog?searchTerm=a"))
+	capture.writeEntry(createTestEntry("https://example.com/about"))
+	if mock.getWriteCount() != 4 {
+		t.Errorf("Expected 4 records across distinct shapes, got %d", mock.getWriteCount())
+	}
+}
+
 // TestWriteEntryBasicDedup tests basic deduplication: same hash written once, duplicates skipped.
 func TestWriteEntryBasicDedup(t *testing.T) {
 	mock := &mockWriter{}

@@ -59,8 +59,8 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "an HTML SPA fallback must not be flagged as exposed config")
 }
 
-// TestScanPerRequest_NoFP_TruncatedHTMLReflector reproduces the roche
-// trace.rawaf-test catch-all: every path returns 200 text/html echoing the
+// TestScanPerRequest_NoFP_TruncatedHTMLReflector reproduces the acme
+// trace.acme.com catch-all: every path returns 200 text/html echoing the
 // request, but a gzip/Content-Length:0 transport quirk left only a truncated
 // *tail* of the body — so the leading "<!DOCTYPE"/"<html" the anti-markers key
 // on is gone, yet weak markers ("{", `":`) survive in the tail. The content-type

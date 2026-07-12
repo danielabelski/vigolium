@@ -129,8 +129,20 @@ func ClassifyPathContext(pathSegments []string, segmentValue string) (string, in
 	for i, seg := range pathSegments {
 		if seg == segmentValue && i > 0 {
 			prev := strings.ToLower(pathSegments[i-1])
-			if _, ok := ResourceNouns[prev]; ok {
-				return prev, 2
+			// Match the preceding segment as a resource noun, tolerating the common
+			// case where the path uses the SINGULAR form (/basket/6, /user/1,
+			// /order/5) while ResourceNouns lists the plural — so singular-style IDOR
+			// endpoints aren't dropped by the "bare integer" guard in ClassifyParam.
+			// The downstream probe/compare/determinism gates still guard FPs.
+			// Motivating miss: Juice Shop GET /rest/basket/6.
+			candidates := []string{prev, prev + "s"} // exact, or simple "+s" plural
+			if strings.HasSuffix(prev, "y") {
+				candidates = append(candidates, prev[:len(prev)-1]+"ies") // category → categories
+			}
+			for _, c := range candidates {
+				if _, ok := ResourceNouns[c]; ok {
+					return prev, 2
+				}
 			}
 		}
 	}

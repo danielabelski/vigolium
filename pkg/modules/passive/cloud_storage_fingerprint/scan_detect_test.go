@@ -30,9 +30,11 @@ func makeCtx(path, headers, body string) *httpmsg.HttpRequestResponse {
 	return httpmsg.NewHttpRequestResponse(req, resp)
 }
 
-// TestScanPerRequest_S3Headers drives a response carrying AWS S3 fingerprint
-// headers, which should detect the AWS S3 provider.
-func TestScanPerRequest_S3Headers(t *testing.T) {
+// TestScanPerRequest_S3HeadersOnly verifies that a response carrying only AWS S3
+// provider/Server headers — with no request host or body URL naming a bucket —
+// yields no finding. Header presence merely means content is served through
+// S3/CloudFront, which is ubiquitous noise, so it must not raise on its own.
+func TestScanPerRequest_S3HeadersOnly(t *testing.T) {
 	t.Parallel()
 	m := New()
 	headers := "Server: AmazonS3\r\nx-amz-request-id: 1A2B3C4D5E6F\r\nContent-Type: text/plain"
@@ -40,9 +42,31 @@ func TestScanPerRequest_S3Headers(t *testing.T) {
 
 	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
 	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+// TestScanPerRequest_S3HostReports drives a request whose host is a raw S3 bucket
+// endpoint, which discloses the bucket and should report — with the Server header
+// carried along as corroboration.
+func TestScanPerRequest_S3HostReports(t *testing.T) {
+	t.Parallel()
+	m := New()
+	rawReq := []byte("GET /object.txt HTTP/1.1\r\nHost: my-bucket.s3.amazonaws.com\r\n\r\n")
+	req := httpmsg.NewHttpRequestWithService(
+		httpmsg.NewServiceSecure("my-bucket.s3.amazonaws.com", 443, true),
+		rawReq,
+	)
+	resp := httpmsg.NewHttpResponse([]byte("HTTP/1.1 200 OK\r\nServer: AmazonS3\r\nContent-Type: text/plain\r\n\r\ndata"))
+	ctx := httpmsg.NewHttpRequestResponse(req, resp)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
 	require.NotEmpty(t, results)
 	assert.Equal(t, ModuleID, results[0].ModuleID)
 	assert.Contains(t, results[0].Info.Name, "Cloud Storage Detected")
+	assert.Contains(t, results[0].ExtractedResults, "Host: my-bucket.s3.amazonaws.com")
+	// The Server header rides along as corroboration once a bucket is disclosed.
+	assert.Contains(t, results[0].ExtractedResults, "Server: AmazonS3")
 }
 
 // TestScanPerRequest_AzureBlobURLInBody drives a body containing an Azure Blob

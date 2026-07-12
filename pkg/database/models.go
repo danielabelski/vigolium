@@ -61,6 +61,7 @@ const (
 	FindingSourceExtension         = "extension"
 	FindingSourceAudit             = "audit"
 	FindingSourceImport            = "import"
+	FindingSourceSpidering         = "spidering"
 )
 
 // Record-kind constants distinguish reportable vulnerabilities from retained

@@ -161,13 +161,6 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	}, nil
 }
 
-// classifyDescription returns a non-empty reason string if `s` looks
-// suspicious, "" otherwise.
-func classifyDescription(s string) string {
-	reason, _ := assessDescription(s)
-	return reason
-}
-
 // assessDescription separates direct imperative payloads from obfuscation-only
 // signals. Hidden characters are useful review context but do not alone prove a
 // malicious instruction.

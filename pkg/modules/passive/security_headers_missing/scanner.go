@@ -23,8 +23,20 @@ var requiredHeaders = []securityHeader{
 		desc: "Prevents MIME type sniffing attacks. Should be set to 'nosniff'.",
 	},
 	{
+		name: "X-Frame-Options",
+		desc: "Prevents clickjacking attacks by controlling iframe embedding. Should be 'DENY' or 'SAMEORIGIN'.",
+	},
+	{
+		name: "Strict-Transport-Security",
+		desc: "Enforces HTTPS connections. Prevents SSL stripping attacks.",
+	},
+	{
 		name: "Content-Security-Policy",
 		desc: "Prevents XSS, data injection, and other code injection attacks by controlling resource loading.",
+	},
+	{
+		name: "Permissions-Policy",
+		desc: "Controls browser features and APIs available to the page (formerly Feature-Policy).",
 	},
 }
 
@@ -69,15 +81,6 @@ func New() *Module {
 	return m
 }
 
-// CanProcess prevents an unsuitable JSON/error/static response from claiming
-// the host before a representative HTML document arrives.
-func (m *Module) CanProcess(ctx *httpmsg.HttpRequestResponse) bool {
-	if ctx == nil || ctx.Response() == nil || ctx.Request() == nil || ctx.Response().StatusCode() < 200 || ctx.Response().StatusCode() >= 300 {
-		return false
-	}
-	return strings.Contains(strings.ToLower(ctx.Response().Header("Content-Type")), "text/html")
-}
-
 // ScanPerHost checks response headers for missing/weak security headers and
 // cacheable sensitive content once per host.
 func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {
@@ -111,9 +114,6 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 		if val == "" {
 			issues = append(issues, fmt.Sprintf("%s: %s", h.name, h.desc))
 		}
-	}
-	if urlx, err := ctx.URL(); err == nil && strings.EqualFold(urlx.Scheme, "https") && resp.Header("Strict-Transport-Security") == "" {
-		issues = append(issues, "Strict-Transport-Security: header is missing on HTTPS response.")
 	}
 
 	// If CSP contains frame-ancestors, X-Frame-Options is redundant — remove it
@@ -152,9 +152,6 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 			URL:              urlx.String(),
 			Request:          string(ctx.Request().Raw()),
 			ExtractedResults: issues,
-			RecordKind:       output.RecordKindObservation,
-			EvidenceGrade:    output.EvidenceGradeObservation,
-			DedupKey:         "browser-policy-posture|" + host,
 			Info: output.Info{
 				Description: fmt.Sprintf("%d security header / caching issue(s)", len(issues)),
 			},
@@ -166,9 +163,7 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 func appendReferrerPolicyIssue(issues []string, resp *httpmsg.HttpResponse) []string {
 	policy := strings.TrimSpace(resp.Header("Referrer-Policy"))
 	if policy == "" {
-		// Modern browsers default to strict-origin-when-cross-origin. Absence alone
-		// is no longer an actionable weakness.
-		return issues
+		return append(issues, "Referrer-Policy: header is missing; the browser will use its default policy, which may leak URL information to other origins.")
 	}
 	// Referrer-Policy may carry a comma-separated fallback list; the last value
 	// the browser understands is the effective one.
@@ -188,15 +183,10 @@ func appendCacheableIssue(issues []string, ctx *httpmsg.HttpRequestResponse, res
 		return issues
 	}
 
-	// Gate: response must be sensitive — sets a likely session/auth cookie or
-	// renders a password field. Preference and analytics cookies are not enough.
+	// Gate: response must be "sensitive" — sets a cookie or renders a password field.
 	hasCookie := false
 	for _, h := range resp.Headers() {
 		if strings.EqualFold(h.Name, "Set-Cookie") {
-			policy, ok := modkit.ParseSetCookiePolicy(h.Value)
-			if !ok || !modkit.LikelySessionCookie(policy.Name) {
-				continue
-			}
 			hasCookie = true
 			break
 		}

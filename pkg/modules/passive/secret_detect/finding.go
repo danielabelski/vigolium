@@ -48,8 +48,15 @@ func GradeMatch(mt secretscan.Match, ev EvidenceContext) (*output.ResultEvent, b
 	// non-credentials — a mis-attributed reCAPTCHA site key or a code/markup
 	// fragment (see IsValueShapeNoise). The high-confidence rules are anchored
 	// tightly enough to trust their captures verbatim, so they skip this guard.
-	if !trusted && IsValueShapeNoise(mt.RuleName, mt.Secret) {
-		return nil, false
+	if !trusted {
+		// Value-shape noise (mis-attributed reCAPTCHA key, code/markup fragment,
+		// resource slug, generic-family code identifier) is judged from the string
+		// alone; position noise (an element-identifier attribute value, or a
+		// weak-password token used as an identifier name) needs the surrounding body.
+		if IsValueShapeNoise(mt.RuleID, mt.RuleName, mt.Secret) ||
+			IsElementPositionNoise(ev.Body, mt.Secret, mt.Start, mt.End, mt.RuleID) {
+			return nil, false
+		}
 	}
 
 	// The native detector performs no live verification, so validated is always

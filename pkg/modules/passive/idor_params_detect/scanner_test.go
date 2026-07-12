@@ -71,8 +71,7 @@ func TestScanPerRequest_HighSignalParamPlusInt(t *testing.T) {
 	assert.Contains(t, r.ExtractedResults, "user_id=12345")
 	assert.Contains(t, r.Info.Tags, "idor")
 	assert.Contains(t, r.Info.Tags, "bola")
-	assert.Equal(t, output.RecordKindObservation, r.RecordKind)
-	assert.Equal(t, output.EvidenceGradeObservation, r.EvidenceGrade)
+	assert.Equal(t, output.RecordKindFinding, r.EffectiveRecordKind())
 
 	meta := r.Metadata
 	assert.Equal(t, "sequential-int", meta["id_type"])
@@ -220,8 +219,7 @@ func TestScanPerRequest_ExcessiveDataExposure(t *testing.T) {
 		if r.Info.Name == "Potential Excessive Data Exposure" {
 			foundExcessive = true
 			assert.Equal(t, severity.Low, r.Info.Severity)
-			assert.Equal(t, output.RecordKindCandidate, r.RecordKind)
-			assert.Equal(t, output.EvidenceGradeCandidate, r.EvidenceGrade)
+			assert.Equal(t, output.RecordKindFinding, r.EffectiveRecordKind())
 			assert.Contains(t, r.Info.Tags, "bopla")
 			assert.Contains(t, r.Info.Tags, "excessive-data")
 			// Should detect password_hash and is_admin
@@ -231,7 +229,7 @@ func TestScanPerRequest_ExcessiveDataExposure(t *testing.T) {
 	assert.True(t, foundExcessive, "expected an Excessive Data Exposure finding")
 }
 
-func TestScanPerRequest_NameOnlyExcessiveDataIsObservation(t *testing.T) {
+func TestScanPerRequest_NameOnlyExcessiveDataIsFinding(t *testing.T) {
 	m := New()
 	jsonBody := `{"password_hash":null,"is_admin":false,"secret_key":"REDACTED"}`
 	ctx := makeHTTPCtx("/api/user", "", "application/json", jsonBody)
@@ -240,8 +238,7 @@ func TestScanPerRequest_NameOnlyExcessiveDataIsObservation(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, "Security-Relevant API Field Names", results[0].Info.Name)
-	assert.Equal(t, output.RecordKindObservation, results[0].RecordKind)
-	assert.Equal(t, output.EvidenceGradeObservation, results[0].EvidenceGrade)
+	assert.Equal(t, output.RecordKindFinding, results[0].EffectiveRecordKind())
 }
 
 func TestScanPerRequest_SensitiveKeyTextInsideStringIgnored(t *testing.T) {

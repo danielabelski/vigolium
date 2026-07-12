@@ -139,6 +139,13 @@ func (m *Module) ScanPerInsertionPoint(
 			continue
 		}
 
+		// Record the exact injected SAML value (the re-encoded assertion carrying the
+		// external-entity DTD) so the async OAST finding's Request panel reconstructs
+		// the request that planted the XXE probe, rather than showing the original
+		// benign SAML assertion. Correlation is keyed on the origin request's hash,
+		// so the modified request is otherwise not retained.
+		oast.RecordPayload(oastHost, payload)
+
 		if err := m.sendPayload(ctx, ip, httpClient, payload); err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 				return nil, nil

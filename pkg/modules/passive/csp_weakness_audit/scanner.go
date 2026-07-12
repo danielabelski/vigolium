@@ -45,14 +45,6 @@ func New() *Module {
 	return m
 }
 
-func (m *Module) CanProcess(ctx *httpmsg.HttpRequestResponse) bool {
-	if ctx == nil || ctx.Request() == nil || ctx.Response() == nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(ctx.Response().Header("Content-Type")), "text/html") &&
-		strings.TrimSpace(ctx.Response().Header("Content-Security-Policy")) != ""
-}
-
 // ScanPerHost checks CSP header for weaknesses once per host.
 func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {
 	service := ctx.Service()
@@ -96,12 +88,6 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 
 	var results []*output.ResultEvent
 	for _, w := range weaknesses {
-		kind := output.RecordKindCandidate
-		grade := output.EvidenceGradeCandidate
-		if w.severity == severity.Info {
-			kind = output.RecordKindObservation
-			grade = output.EvidenceGradeObservation
-		}
 		results = append(results, &output.ResultEvent{
 			ModuleID: ModuleID,
 			Host:     host,
@@ -111,9 +97,6 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 				fmt.Sprintf("Weakness: %s", w.name),
 				fmt.Sprintf("Directive: %s", w.directive),
 			},
-			RecordKind:    kind,
-			EvidenceGrade: grade,
-			DedupKey:      fmt.Sprintf("csp-policy|%s|%s", host, w.directive),
 			Info: output.Info{
 				Name:        fmt.Sprintf("CSP Weakness: %s", w.name),
 				Description: w.desc,

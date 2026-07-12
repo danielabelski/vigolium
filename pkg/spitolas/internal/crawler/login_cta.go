@@ -19,14 +19,32 @@ import (
 // SPASettleTimeout (WaitNetworkIdle returns at that bound even on a long-poll/SSE
 // app), so it can never stall the crawl.
 func (c *Crawler) settleSPA(ctx context.Context, page *browser.Page) {
-	if page == nil || c.config == nil || c.config.SPASettleTimeout <= 0 {
+	if page == nil || c.config == nil {
 		return
 	}
 	if ctx.Err() != nil {
 		return
 	}
-	page.WaitNetworkIdle(c.config.DOMStableTime, c.config.SPASettleTimeout)
+	if c.config.SPASettleTimeout > 0 {
+		page.WaitNetworkIdle(c.config.DOMStableTime, c.config.SPASettleTimeout)
+	}
+	// Network-idle is not the same as render-complete: a client-rendered page
+	// (React/Vue/Angular) mounts its real DOM — including anchors like
+	// /catalog?category=… — from an inline script that runs AFTER the framework
+	// bundle finishes loading, i.e. right around when the network goes idle. Wait
+	// for the DOM itself to stop mutating so that render commit is in the snapshot
+	// the extractor reads, otherwise those anchors are never seen as candidates.
+	// Bounded so a perpetually-animating page can't stall the crawl.
+	if c.config.WaitDOMQuiescence && ctx.Err() == nil {
+		page.WaitDOMStableBounded(c.config.DOMStableTime, domQuiescenceDiff, c.config.DOMQuiescenceMax)
+	}
 }
+
+// domQuiescenceDiff is the DOM-change tolerance for the render-commit settle: the
+// fraction of nodes allowed to differ between successive snapshots for the DOM to
+// count as stable. A small non-zero value ignores trivial churn (a cursor blink,
+// a relative-time label ticking) while still waiting out a real render commit.
+const domQuiescenceDiff = 0.05
 
 // consentDismissScript clicks cookie-consent "accept" controls in the live DOM,
 // piercing shadow roots (web-component consent widgets render inside them). It

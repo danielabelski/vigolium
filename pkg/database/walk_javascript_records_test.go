@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -67,7 +68,7 @@ func TestWalkJavaScriptRecords(t *testing.T) {
 	// A callback error stops the walk and propagates.
 	sentinel := fmt.Errorf("stop")
 	if err := repo.WalkJavaScriptRecords(ctx, DefaultProjectUUID, "app.example.com", 100,
-		func(string, string, []byte) error { return sentinel }); err != sentinel {
+		func(string, string, []byte) error { return sentinel }); !errors.Is(err, sentinel) {
 		t.Fatalf("callback error not propagated: %v", err)
 	}
 

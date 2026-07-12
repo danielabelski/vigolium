@@ -397,7 +397,7 @@ func TestRunActiveWithTimeout_FastCompletes(t *testing.T) {
 
 	got, completed := e.runActiveWithTimeout(context.Background(),
 		func(context.Context) ([]*output.ResultEvent, error) { return want, nil },
-		&fakeActiveModule{id: "fast"}, item, func() {})
+		&fakeActiveModule{id: "fast"}, item, func() {}, 0)
 
 	if !completed {
 		t.Fatal("expected completed=true for a fast module")
@@ -417,7 +417,7 @@ func TestRunActiveWithTimeout_SlowTimesOut(t *testing.T) {
 			time.Sleep(2 * time.Second)
 			return []*output.ResultEvent{{}}, nil
 		},
-		&fakeActiveModule{id: "slow"}, item, func() {})
+		&fakeActiveModule{id: "slow"}, item, func() {}, 0)
 
 	if completed {
 		t.Fatal("expected completed=false when the module exceeds its timeout")
@@ -442,7 +442,7 @@ func TestRunActiveWithTimeout_TimeoutHinterRaisesBound(t *testing.T) {
 			time.Sleep(80 * time.Millisecond)
 			return want, nil
 		},
-		&fakeActiveHinterModule{fakeActiveModule{id: "hinted"}, time.Second}, item, func() {})
+		&fakeActiveHinterModule{fakeActiveModule{id: "hinted"}, time.Second}, item, func() {}, 0)
 
 	if !completed {
 		t.Fatal("expected completed=true: TimeoutHint should raise the bound above the default")
@@ -458,7 +458,7 @@ func TestRunActiveWithTimeout_ModuleErrorMarksCompleted(t *testing.T) {
 
 	got, completed := e.runActiveWithTimeout(context.Background(),
 		func(context.Context) ([]*output.ResultEvent, error) { return nil, fmt.Errorf("boom") },
-		&fakeActiveModule{id: "errs"}, item, func() {})
+		&fakeActiveModule{id: "errs"}, item, func() {}, 0)
 
 	// A module that returns an error still "completed" (it ran to conclusion);
 	// the caller skips processResults because there are no results.
@@ -485,7 +485,7 @@ func TestRunActiveWithTimeout_CanceledCtxReturnsPromptly(t *testing.T) {
 			time.Sleep(2 * time.Second) // leaked goroutine drains into the buffered chan
 			return []*output.ResultEvent{{}}, nil
 		},
-		&fakeActiveModule{id: "blocked"}, item, func() {})
+		&fakeActiveModule{id: "blocked"}, item, func() {}, 0)
 
 	if completed {
 		t.Fatal("expected completed=false when the phase context is canceled")
@@ -510,7 +510,7 @@ func TestRunActiveWithTimeout_TimeoutIsCounted(t *testing.T) {
 			time.Sleep(2 * time.Second)
 			return nil, nil
 		},
-		&fakeActiveModule{id: "slowcount"}, item, func() {})
+		&fakeActiveModule{id: "slowcount"}, item, func() {}, 0)
 
 	if completed {
 		t.Fatal("expected completed=false on timeout")
@@ -539,7 +539,7 @@ func TestRunActiveWithTimeout_ParentCancelNotCounted(t *testing.T) {
 			time.Sleep(2 * time.Second)
 			return []*output.ResultEvent{{}}, nil
 		},
-		&fakeActiveModule{id: "interrupted"}, item, func() {})
+		&fakeActiveModule{id: "interrupted"}, item, func() {}, 0)
 
 	if completed {
 		t.Fatal("expected completed=false on parent cancellation")
@@ -564,13 +564,13 @@ func TestRunActiveWithTimeout_PooledTimerReuse(t *testing.T) {
 		return []*output.ResultEvent{{}}, nil
 	}
 
-	if _, ok := e.runActiveWithTimeout(context.Background(), fast, &fakeActiveModule{id: "r1"}, item, func() {}); !ok {
+	if _, ok := e.runActiveWithTimeout(context.Background(), fast, &fakeActiveModule{id: "r1"}, item, func() {}, 0); !ok {
 		t.Fatal("first fast call should complete")
 	}
-	if _, ok := e.runActiveWithTimeout(context.Background(), slow, &fakeActiveModule{id: "r2"}, item, func() {}); ok {
+	if _, ok := e.runActiveWithTimeout(context.Background(), slow, &fakeActiveModule{id: "r2"}, item, func() {}, 0); ok {
 		t.Fatal("slow call should time out")
 	}
-	got, ok := e.runActiveWithTimeout(context.Background(), fast, &fakeActiveModule{id: "r3"}, item, func() {})
+	got, ok := e.runActiveWithTimeout(context.Background(), fast, &fakeActiveModule{id: "r3"}, item, func() {}, 0)
 	if !ok {
 		t.Fatal("final fast call should complete — a pooled timer must not carry a stale fire")
 	}
@@ -597,7 +597,7 @@ func TestRunActiveWithTimeout_SlotHeldUntilWorkUnwinds(t *testing.T) {
 			return []*output.ResultEvent{{}}, nil
 		},
 		&fakeActiveModule{id: "held"}, item,
-		func() { released.Store(true) })
+		func() { released.Store(true) }, 0)
 
 	if completed {
 		t.Fatal("expected completed=false: the module overran its timeout")

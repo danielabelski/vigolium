@@ -951,7 +951,7 @@ func (d *DeparosDiscoverySource) discoverTarget(parentCtx context.Context, targe
 	}
 
 	if len(referenced) > 0 {
-		terminal.Notice("jstangle", fmt.Sprintf(
+		terminal.NoticeArrow("jstangle", fmt.Sprintf(
 			"Preserved %d application-referenced (JS/form) requests from discovery of "+
 				"%s under provenance-specific labels — exempt from the fuzz-noise "+
 				"dedup/status cleanup so their real methods, bodies and 401/403/404 "+
@@ -1123,10 +1123,9 @@ func (d *DeparosDiscoverySource) seedSpideredJS(ctx context.Context, siteMap *de
 			zap.String("target", target), zap.Error(walkErr))
 	}
 	if seeded > 0 {
-		terminal.Notice("jstangle", fmt.Sprintf(
-			"Seeded %d browser-spidered JavaScript file(s) for %s into JSTangle analysis — "+
-				"endpoints in bundles the crawl never fetched will be recovered and replayed",
-			seeded, target))
+		terminal.NoticeArrow("jstangle", fmt.Sprintf(
+			"Recovering endpoints from %d browser-spidered JS bundle(s) the crawl never fetched — %s",
+			seeded, terminal.Gray(target)))
 	}
 }
 

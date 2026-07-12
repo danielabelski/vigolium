@@ -446,6 +446,7 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 	requesterOpts.Verbose = globalVerbose
 	requesterOpts.Debug = globalDebug
 	requesterOpts.MaxPerHost = globalMaxPerHost
+	requesterOpts.NoWafPacing = globalNoWafPacing
 
 	if err := network.Init(requesterOpts); err != nil {
 		zap.L().Warn("Failed to initialize network for ingestion requester", zap.Error(err))

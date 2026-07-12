@@ -136,8 +136,8 @@ func TestScanPerRequest_DetectsClassicASPInclude(t *testing.T) {
 	require.NotEmpty(t, res, "expected a finding for an exposed classic ASP DB include")
 }
 
-// TestScanPerRequest_NoFP_ReflectedPasswordCatchAll reproduces the roche
-// trace.rawaf-test echo server: every path returns 200 text/html reflecting the
+// TestScanPerRequest_NoFP_ReflectedPasswordCatchAll reproduces the acme
+// trace.acme.com echo server: every path returns 200 text/html reflecting the
 // request (whose body carries "password"). The .inc probes require the full
 // ADODB + Connection + password co-occurrence — which a request-echo page never
 // carries — so a lone reflected "password" cannot forge a Critical finding.

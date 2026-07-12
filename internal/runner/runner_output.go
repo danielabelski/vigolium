@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	hostlimit "github.com/vigolium/vigolium/pkg/core/ratelimit"
 	corestats "github.com/vigolium/vigolium/pkg/core/stats"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/http"
@@ -91,9 +92,53 @@ func (r *Runner) attachWAFBlockNotifier(requester *http.Requester) {
 		return
 	}
 	requester.SetBlockNotifier(func(n http.BlockNotice) {
-		line := FormatBlockNoticeLine(n)
-		r.writeSessionLog(line)
-		fmt.Fprint(os.Stderr, line)
+		r.emitNoticeLine(FormatBlockNoticeLine(n))
+	})
+}
+
+// emitNoticeLine writes a preformatted operator notice to both the session log and
+// stderr — the shared tail of the WAF block/pacing notifiers.
+func (r *Runner) emitNoticeLine(line string) {
+	r.writeSessionLog(line)
+	fmt.Fprint(os.Stderr, line)
+}
+
+// FormatEdgePaceLine renders the one-line notice shown when a host is fingerprinted
+// behind a CDN/WAF edge and its active-scan concurrency is proactively paced to keep
+// a burst from arming a rate-based WAF. It spells out the concurrency drop so the
+// operator understands the scan will run slower against that host. Companion to
+// FormatBlockNoticeLine — a caution, not a failure: the scan continues, just gentler.
+func FormatEdgePaceLine(n hostlimit.PreArmNotice) string {
+	vendor := n.Vendor
+	if vendor == "" {
+		vendor = "WAF/CDN"
+	}
+	detail := fmt.Sprintf("pacing per-host concurrency %d→%d to avoid tripping a rate-based WAF — scanning this host will be slower (disable with --no-waf-pacing)",
+		n.From, n.Start)
+	return fmt.Sprintf("%s %s %s %s %s %s\n",
+		terminal.Yellow(terminal.SymbolSnow),
+		terminal.BoldYellow("[waf-pacing-armed]"),
+		terminal.HiBlue(n.Host),
+		terminal.Muted("→"),
+		terminal.Yellow(fmt.Sprintf("%s edge", vendor)),
+		terminal.Muted(detail))
+}
+
+// attachWAFPacingNotifier wires a one-time-per-host notice onto the scan's host
+// limiter for proactive CDN/WAF pacing. The first time any phase's traffic to a host
+// reveals a CDN/WAF edge (e.g. CloudFront/Cloudflare headers on a clean 200), the host
+// limiter drops that host's per-host concurrency so the later active phase paces from
+// its first request instead of bursting the edge into a rate-based block. The notice
+// hangs off the limiter — the single shared object every requester feeds — so it fires
+// exactly once per host no matter which requester (heuristics, auth prep, discovery)
+// first tripped the pre-arm. The throttle itself is applied regardless; this only
+// surfaces the operator warning. No-op in silent mode or without a limiter.
+func (r *Runner) attachWAFPacingNotifier(limiter *hostlimit.HostRateLimiter) {
+	if r.options.Silent || limiter == nil {
+		return
+	}
+	limiter.SetPreArmNotifier(func(n hostlimit.PreArmNotice) {
+		r.emitNoticeLine(FormatEdgePaceLine(n))
 	})
 }
 

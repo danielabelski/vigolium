@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
-	"github.com/vigolium/vigolium/pkg/output"
 )
 
 // makeHTTPCtx builds an HTML request/response pair with the given extra header
@@ -56,15 +55,6 @@ func TestScanPerHost_MissingHeaders(t *testing.T) {
 	require.NotEmpty(t, results)
 	assert.Contains(t, results[0].Info.Description, "issue(s)")
 	assert.NotEmpty(t, results[0].ExtractedResults)
-	assert.Equal(t, output.RecordKindObservation, results[0].RecordKind)
-}
-
-func TestScanPerHost_MissingReferrerPolicyUsesModernDefault(t *testing.T) {
-	t.Parallel()
-	headers := strings.Replace(allHeaders, "Referrer-Policy: no-referrer\r\n", "", 1)
-	results, err := New().ScanPerHost(makeHTTPCtx(headers, ""), &modkit.ScanContext{})
-	require.NoError(t, err)
-	assert.Empty(t, results)
 }
 
 // TestScanPerHost_AllHeadersPresent verifies that a response carrying every
@@ -128,14 +118,6 @@ func TestScanPerHost_NonSensitiveCacheable(t *testing.T) {
 	headers := strings.Replace(allHeaders, "Cache-Control: no-store\r\n", "Cache-Control: public\r\n", 1)
 	ctx := makeHTTPCtx(headers, "<html><body>hello</body></html>")
 	results, err := m.ScanPerHost(ctx, &modkit.ScanContext{})
-	require.NoError(t, err)
-	assert.Empty(t, results)
-}
-
-func TestScanPerHost_PreferenceCookieDoesNotMakeResponseSensitive(t *testing.T) {
-	t.Parallel()
-	headers := strings.Replace(allHeaders, "Cache-Control: no-store\r\n", "Cache-Control: public\r\nSet-Cookie: theme=dark; Path=/\r\n", 1)
-	results, err := New().ScanPerHost(makeHTTPCtx(headers, "<html><body>hello</body></html>"), &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }

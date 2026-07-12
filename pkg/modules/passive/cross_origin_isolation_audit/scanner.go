@@ -35,14 +35,6 @@ func New() *Module {
 	return m
 }
 
-func (m *Module) CanProcess(ctx *httpmsg.HttpRequestResponse) bool {
-	if ctx == nil || ctx.Request() == nil || ctx.Response() == nil || !isAuthenticated(ctx) {
-		return false
-	}
-	ct := strings.ToLower(ctx.Response().Header("Content-Type"))
-	return strings.Contains(ct, "text/html") || strings.Contains(ct, "application/json")
-}
-
 // ScanPerHost flags authenticated responses missing COOP/CORP. It runs once per
 // host and only on an authenticated, document-like response so it doesn't fire on
 // static assets or unauthenticated pages.
@@ -91,12 +83,9 @@ func (m *Module) ScanPerHost(ctx *httpmsg.HttpRequestResponse, scanCtx *modkit.S
 		Host:             urlx.Host,
 		URL:              urlx.String(),
 		ExtractedResults: append([]string{"missing cross-origin isolation headers on an authenticated response"}, missing...),
-		RecordKind:       output.RecordKindObservation,
-		EvidenceGrade:    output.EvidenceGradeObservation,
-		DedupKey:         "cross-origin-isolation-posture|" + urlx.Host,
 		Info: output.Info{
 			Name:        "Cross-Origin Isolation Headers Missing",
-			Description: "This authenticated response omits " + strings.Join(missing, " and ") + ". Cross-origin isolation is application-dependent, so this is retained as posture unless a concrete XS-Leak oracle is demonstrated.",
+			Description: "This authenticated response omits " + strings.Join(missing, " and ") + ". These headers block cross-site leak (XS-Leaks) oracles (window-reference probing, embedding, error/timing/cache side channels). Set COOP: same-origin and CORP: same-origin on authenticated responses.",
 			Severity:    ModuleSeverity,
 			Confidence:  ModuleConfidence,
 			Tags:        ModuleTags,

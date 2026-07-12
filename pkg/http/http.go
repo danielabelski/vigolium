@@ -77,6 +77,39 @@ type Requester struct {
 	// its mutex). Always non-nil after NewRequester; inert until SetBlockNotifier
 	// installs a sink.
 	blockNotifier *blockNotifier
+	// respObserver forwards server-error responses (5xx) to an installed sink so a
+	// consumer (the executor) can corroborate a leaked database error surfaced by
+	// ANY module's probe, not just the module that sent it. Pointer field so
+	// WithContext's shallow copy shares one instance. Always non-nil after
+	// NewRequester; inert until SetResponseObserver installs a sink.
+	respObserver *responseObserver
+	// edgePacer pre-arms the host limiter's pacing the first time a host is seen
+	// behind a CDN/WAF edge, so the active phase paces from its first request
+	// instead of bursting into the edge and arming a rate-based WAF (see
+	// maybePaceEdge). Pointer field so WithContext's shallow copy shares one
+	// instance (and its once-per-host dedup). Always non-nil after NewRequester.
+	edgePacer *edgePacer
+}
+
+// edgePacer fingerprints the CDN/WAF edge fronting a host from ordinary (non-block)
+// responses and, the first time a host is seen, pre-arms the host limiter's pacing so
+// the active phase never bursts into the edge and arms a rate-based WAF. Each host is
+// claimed on its first response, so the header fingerprint runs at most once per host
+// — a non-edge host never re-runs it for the rest of the scan. The seen set is a
+// sync.Map for lock-free reads on the already-claimed hot path (every response to a
+// WAF-fronted host). The operator notice is emitted by the limiter's own
+// SetPreArmNotifier, fired once per host across every requester that shares the
+// limiter, so this only owns the per-requester dedup.
+type edgePacer struct {
+	seen sync.Map // key: lowercased host → struct{}; present once fingerprinted
+}
+
+// claim records key as fingerprinted, returning true only for the caller that first
+// claimed it (lock-free via LoadOrStore), so each host is fingerprinted exactly once
+// under concurrency.
+func (p *edgePacer) claim(key string) bool {
+	_, loaded := p.seen.LoadOrStore(key, struct{}{})
+	return !loaded
 }
 
 // BlockNotice describes a WAF/CDN block observed on scan traffic. It is passed
@@ -98,42 +131,30 @@ type blockNotifier struct {
 }
 
 // report classifies resp and, on the first confirmed block for host, invokes the
-// sink. It is a no-op without a sink, so the per-response cost on the hot path is
-// a single nil check until SetBlockNotifier is called. A host is only marked
-// "seen" once a block is actually confirmed, so an ordinary application 403 does
-// not suppress a later genuine WAF block on the same host.
+// sink. It is the ergonomic wrapper around reportBlock — classify once, then dedup —
+// used by tests and any caller that hasn't already classified the response.
 func (n *blockNotifier) report(host string, resp *httpUtils.ResponseChain) {
 	if n == nil || n.sink == nil || host == "" || resp == nil {
 		return
 	}
-	httpResp := resp.Response()
-	if httpResp == nil {
-		return
-	}
-	// Cheap status pre-gate before reading the body / taking the lock.
-	if !waf.IsBlockStatusCode(httpResp.StatusCode) {
+	n.reportBlock(host, classifyWAFBlock(resp), responseChainStatus(resp))
+}
+
+// reportBlock invokes the sink exactly once per host for a precomputed WAF/CDN block
+// classification (nil = not a block → no-op). It is a no-op without a sink, so the
+// per-response cost is a single nil check until SetBlockNotifier is called. A host is
+// only marked "seen" once a block is confirmed, so an ordinary application 403 does
+// not suppress a later genuine WAF block on the same host. Callers that already
+// classified the response (the hot path shares one result with the limiter feedback)
+// call this directly; report is the classify-then-dedup convenience wrapper.
+func (n *blockNotifier) reportBlock(host string, block *waf.BlockResult, status int) {
+	if n == nil || n.sink == nil || host == "" || block == nil {
 		return
 	}
 
+	// Claim the host under lock so concurrent workers on the same host emit exactly
+	// one warning; the sink runs outside the lock.
 	key := strings.ToLower(host)
-	n.mu.Lock()
-	_, already := n.seen[key]
-	n.mu.Unlock()
-	if already {
-		return
-	}
-
-	var body []byte
-	if b := resp.Body(); b != nil {
-		body = b.Bytes()
-	}
-	block := waf.ClassifyParts(httpResp.StatusCode, httpResp.Header, body)
-	if block == nil {
-		return
-	}
-
-	// Confirmed block: claim the host under lock so concurrent workers on the
-	// same host emit exactly one warning.
 	n.mu.Lock()
 	if _, dup := n.seen[key]; dup {
 		n.mu.Unlock()
@@ -145,7 +166,7 @@ func (n *blockNotifier) report(host string, resp *httpUtils.ResponseChain) {
 	n.sink(BlockNotice{
 		Host:    host,
 		WAFType: block.WAFType,
-		Status:  httpResp.StatusCode,
+		Status:  status,
 	})
 }
 
@@ -190,6 +211,69 @@ func (r *Requester) SetCarriedSessions(sessions map[string]httpmsg.CarriedSessio
 		normalized[key] = sess
 	}
 	r.carried.set(normalized)
+}
+
+// ObservedResponse is the payload handed to a response observer for a server-error
+// response. RequestRaw and Body are the observer's to read synchronously; a sink
+// that retains them must copy (the underlying buffers are reused after Execute).
+type ObservedResponse struct {
+	Host        string
+	URL         string
+	ContentType string
+	Status      int
+	RequestRaw  []byte
+	Body        []byte
+}
+
+// responseObserver forwards 5xx responses to an installed sink. A 5xx is the
+// classic surface on which an application leaks a database error in response to a
+// malformed probe, so gating on it keeps the per-response cost a single status
+// comparison until an error actually occurs.
+type responseObserver struct {
+	sink func(ObservedResponse)
+}
+
+// report hands a server-error response to the sink. Gated on status >= 500 so the
+// common 2xx/3xx/4xx hot path pays only one integer comparison. The Body is the
+// already-buffered response body (no extra I/O); the sink runs synchronously on the
+// request goroutine, so it must be cheap and must copy anything it retains.
+func (o *responseObserver) report(host, urlStr string, reqRaw []byte, resp *httpUtils.ResponseChain, status int) {
+	if o == nil || o.sink == nil || status < 500 || resp == nil {
+		return
+	}
+	httpResp := resp.Response()
+	if httpResp == nil {
+		return
+	}
+	var body []byte
+	if b := resp.Body(); b != nil {
+		body = b.Bytes()
+	}
+	if len(body) == 0 {
+		return
+	}
+	o.sink(ObservedResponse{
+		Host:        host,
+		URL:         urlStr,
+		ContentType: httpResp.Header.Get("Content-Type"),
+		Status:      status,
+		RequestRaw:  reqRaw,
+		Body:        body,
+	})
+}
+
+// SetResponseObserver installs a sink invoked for every server-error (5xx) response
+// on this requester's traffic, so the executor can corroborate a leaked database
+// error from ANY module's probe rather than only the module that sent it. The sink
+// runs synchronously on the request goroutine — it must be
+// cheap and non-blocking, and must copy any request/response bytes it retains. Call
+// during scan setup; a nil sink clears the observer. The installed sink is shared by
+// every WithContext clone of this requester.
+func (r *Requester) SetResponseObserver(sink func(ObservedResponse)) {
+	if r == nil || r.respObserver == nil {
+		return
+	}
+	r.respObserver.sink = sink
 }
 
 // SetBlockNotifier installs a sink invoked once per host the first time a
@@ -390,6 +474,8 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 		customHeaders:    parseHeaders(options.Headers),
 		carried:          &carriedSessionStore{},
 		blockNotifier:    &blockNotifier{seen: make(map[string]struct{})},
+		respObserver:     &responseObserver{},
+		edgePacer:        &edgePacer{},
 	}
 
 	if options.ClusterRequests {
@@ -426,6 +512,12 @@ func (r *Requester) applyCarriedSession(req *retryablehttp.Request) {
 	}
 	if sess.CookieHeader != "" {
 		req.Header.Set("Cookie", httpmsg.MergeCookieHeaders(req.Header.Get("Cookie"), sess.CookieHeader))
+	}
+	// Fill a harvested token-session credential only when the request carries no
+	// Authorization of its own — so a replayed authenticated request keeps its own
+	// token, and (since this runs before -H) an explicit -H Authorization still wins.
+	if sess.AuthorizationHeader != "" && req.Header.Get("Authorization") == "" {
+		req.Header.Set("Authorization", sess.AuthorizationHeader)
 	}
 }
 
@@ -576,29 +668,109 @@ func (r *Requester) executeDirectly(ctx context.Context, input *httpmsg.HttpRequ
 		}
 		// Feed transport failures (timeout/reset/refused) to the adaptive limiter
 		// so it can back the host off; a no-op in static mode.
-		r.reportHostFeedback(host, 0, err)
+		r.reportHostFeedback(host, 0, err, false)
 		return nil, 0, err
 	}
 
 	if r.services.HostErrors != nil {
 		r.services.HostErrors.MarkSuccess(input.ID())
 	}
-	r.reportHostFeedback(host, responseChainStatus(resp), nil)
-	// Warn once per host when the edge (WAF/CDN) is filtering traffic. Cheap
-	// nil-check hot path until a notifier sink is installed.
-	r.blockNotifier.report(host, resp)
+	// Classify a WAF/CDN block once (cheap status pre-gate; only reads the body on a
+	// block-status response) and feed that single result to both consumers: the
+	// adaptive limiter (arms/backs-off WAF-auto-arm throttling) and the once-per-host
+	// operator warning. Sharing the result avoids re-running ClassifyParts per block.
+	status := responseChainStatus(resp)
+	block := classifyWAFBlock(resp)
+	r.reportHostFeedback(host, status, nil, block != nil)
+	r.blockNotifier.reportBlock(host, block, status)
+	// Proactively pace a host the first time it is seen behind a CDN/WAF edge, so a
+	// later phase's burst never arms a rate-based WAF. Runs on every phase's traffic
+	// through this shared requester (heuristics/discovery hit each host before the
+	// active phase), so the pre-arm lands ahead of the active-module fan-out.
+	r.maybePaceEdge(host, resp, block != nil)
+	// Forward server errors to the corroboration observer. Gate on 5xx here (not
+	// just inside report) so the URL string is materialized only for server errors,
+	// never on the 2xx/3xx/4xx hot path. No-op without an installed sink.
+	if r.respObserver.sink != nil && status >= 500 {
+		urlStr := ""
+		if u, err := input.URL(); err == nil && u != nil {
+			urlStr = u.String()
+		}
+		r.respObserver.report(host, urlStr, input.Request().Raw(), resp, status)
+	}
 	return resp, int(time.Since(start).Seconds()), nil
+}
+
+// classifyWAFBlock returns the WAF/CDN block classification for resp, or nil if it is
+// not a block. It short-circuits on a cheap status pre-gate (waf.IsBlockStatusCode)
+// so the common 2xx/3xx hot path never reads the body or runs the classifier; only a
+// block-status response pays the ClassifyParts cost. Uses the same accessors as the
+// notifier (never FullResponse). This is the single classification both the limiter
+// feedback and the operator warning share.
+func classifyWAFBlock(resp *httpUtils.ResponseChain) *waf.BlockResult {
+	if resp == nil {
+		return nil
+	}
+	httpResp := resp.Response()
+	if httpResp == nil || !waf.IsBlockStatusCode(httpResp.StatusCode) {
+		return nil
+	}
+	var body []byte
+	if b := resp.Body(); b != nil {
+		body = b.Bytes()
+	}
+	return waf.ClassifyParts(httpResp.StatusCode, httpResp.Header, body)
 }
 
 // reportHostFeedback forwards a per-request outcome to the adaptive host limiter.
 // No-op without a limiter/host; in static mode Feedback itself is a no-op. It runs
 // only on the executeDirectly path, so a clusterer cache hit (no network request)
-// correctly produces no feedback.
-func (r *Requester) reportHostFeedback(host string, statusCode int, err error) {
+// correctly produces no feedback. wafBlocked marks a classified WAF/CDN block, which
+// arms WAF-auto-arm throttling and always counts as host distress.
+func (r *Requester) reportHostFeedback(host string, statusCode int, err error, wafBlocked bool) {
 	if host == "" || r.services.HostLimiter == nil {
 		return
 	}
-	r.services.HostLimiter.Feedback(host, statusCode, err)
+	r.services.HostLimiter.Feedback(host, statusCode, err, wafBlocked)
+}
+
+// maybePaceEdge pre-arms the host limiter's pacing the first time host is seen behind
+// a CDN/WAF edge, so a later phase paces that host from its first request instead of
+// bursting into the edge and arming a rate-based WAF. It runs at most once per host:
+// an edge-fronted host is claimed and short-circuits thereafter; a block response
+// (blocked=true) claims the host too — reactive arming (Feedback + blockNotifier)
+// already handles it, so we stop re-fingerprinting and fire no pacing notice. Cheap
+// on the hot path: a nil/static-mode check, then a map lookup, then a handful of
+// header checks only until the host is claimed.
+func (r *Requester) maybePaceEdge(host string, resp *httpUtils.ResponseChain, blocked bool) {
+	if r.edgePacer == nil || host == "" || resp == nil {
+		return
+	}
+	if r.services.HostLimiter == nil || !r.services.HostLimiter.PreArmable() {
+		return
+	}
+	// Claim the host on its first response (lock-free once claimed): every later
+	// response for it short-circuits here, so a non-edge host never re-runs the header
+	// fingerprint for the rest of the scan. Edge headers ride every response, so the
+	// first one is representative — no need to re-check.
+	if !r.edgePacer.claim(strings.ToLower(host)) {
+		return
+	}
+	// A block response is already arming this host reactively (Feedback + the block
+	// notifier); the claim above stops us re-fingerprinting, and no pacing notice is due.
+	if blocked {
+		return
+	}
+	httpResp := resp.Response()
+	if httpResp == nil {
+		return
+	}
+	// The limiter arms the host once and fires the operator notice via its own
+	// SetPreArmNotifier, so the notice is emitted exactly once per host even when a
+	// different requester (auth prep, a second phase) first tripped the pre-arm.
+	if vendor := waf.EdgeFront(httpResp.Header); vendor != "" {
+		r.services.HostLimiter.PreArm(host, vendor)
+	}
 }
 
 // responseChainStatus returns the HTTP status code from a response chain, or 0

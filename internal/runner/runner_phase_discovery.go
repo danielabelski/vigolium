@@ -20,9 +20,62 @@ import (
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/spitolas"
 	"github.com/vigolium/vigolium/pkg/terminal"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
 	"go.uber.org/zap"
 )
+
+// spiderDOMXssModuleID labels DOM-XSS findings synthesized by the spider's browser
+// probe (not a registered scanner module — the finding's Info is self-describing).
+const spiderDOMXssModuleID = "spider-dom-xss"
+
+// emitSpiderDOMXssFindings persists the crawl's browser-confirmed DOM-XSS findings.
+// Each was proven by observing an injection canary execute in a real browser, so it
+// is a firm finding — attributed to a spider-scoped module id with a self-describing
+// Info block (it is not produced by a registered scanner module).
+func (r *Runner) emitSpiderDOMXssFindings(ctx context.Context, scanUUID string, findings []spitolas.DOMXssFinding) {
+	if r.repository == nil {
+		return
+	}
+	// The crawl typically consumes the whole spidering-phase deadline, so ctx is
+	// often already expired here. These findings are browser-confirmed and must be
+	// persisted regardless — save under a fresh short-lived context.
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+	}
+	for _, f := range findings {
+		host := httpmsg.HostnameFromURL(f.URL)
+		event := &output.ResultEvent{
+			ModuleID:         spiderDOMXssModuleID,
+			ModuleType:       database.ModuleTypeActive,
+			FindingSource:    database.FindingSourceSpidering,
+			RecordKind:       output.RecordKindFinding,
+			EvidenceGrade:    output.EvidenceGradeImpact,
+			Host:             host,
+			URL:              f.URL,
+			Matched:          f.URL,
+			FuzzingParameter: f.Param,
+			ExtractedResults: []string{
+				"Parameter: " + f.Param,
+				"Payload: " + f.Payload,
+				"Sink: " + f.Evidence,
+			},
+			Info: output.Info{
+				Name:        "DOM-based XSS (Browser-Confirmed)",
+				Description: "A reflected client-route parameter flows into a DOM HTML sink (e.g. innerHTML / Angular bypassSecurityTrustHtml) without sanitization. A headless browser navigated the route with an injection canary and observed it execute (img onerror), so arbitrary JavaScript runs in a victim's browser via a crafted link. Fix: contextually encode URL-derived data on output, avoid dangerous DOM sinks, and enforce a strict Content-Security-Policy.",
+				Severity:    severity.Medium,
+				Confidence:  severity.Certain,
+				Tags:        []string{"xss", "dom-xss", "browser", "spidering"},
+			},
+			ModuleShort: "Browser-confirmed DOM-based XSS on a reflected client route",
+		}
+		if err := r.repository.SaveFinding(ctx, event, nil, scanUUID, r.options.ProjectUUID); err != nil {
+			zap.L().Warn("Spidering: failed to persist DOM-XSS finding", zap.String("url", f.URL), zap.Error(err))
+		}
+	}
+}
 
 func (r *Runner) runDiscoveryPhase(ctx context.Context, infra *phaseInfra) error {
 	phaseStart := time.Now()
@@ -771,7 +824,7 @@ func (r *Runner) runSpideringPhase(ctx context.Context, infra *phaseInfra) error
 		totalActions += result.ActionsExecuted
 		totalRecords += result.RecordsSaved
 
-		if carrySession && len(result.HarvestedCookies) > 0 {
+		if carrySession && (len(result.HarvestedCookies) > 0 || result.HarvestedAuthorization != "") {
 			// Scope the session to the host the crawl actually settled on: the
 			// adopted/landing host when the start URL relocated off-host, else the
 			// target host.
@@ -781,13 +834,28 @@ func (r *Runner) runSpideringPhase(ctx context.Context, infra *phaseInfra) error
 					sessionHost = adopted
 				}
 			}
-			if cookieHeader := httpmsg.FlattenCookiesForHost(sessionHost, result.HarvestedCookies); cookieHeader != "" {
+			cookieHeader := httpmsg.FlattenCookiesForHost(sessionHost, result.HarvestedCookies)
+			// Carry the session when the crawl earned EITHER cookies (cookie-auth
+			// apps + WAF clearance) OR a token (token-auth SPAs send Authorization,
+			// not a cookie — carrying only cookies would leave the scan unauthenticated).
+			if cookieHeader != "" || result.HarvestedAuthorization != "" {
 				sess := httpmsg.CarriedSession{CookieHeader: cookieHeader}
 				if carryUA {
 					sess.UserAgent = result.BrowserUserAgent
 				}
+				if result.HarvestedAuthorization != "" {
+					sess.AuthorizationHeader = "Bearer " + result.HarvestedAuthorization
+				}
 				harvested[sessionHost] = sess
 			}
+		}
+
+		// Persist any browser-confirmed DOM-XSS the crawl found on reflected client routes.
+		if len(result.DOMXssFindings) > 0 {
+			r.emitSpiderDOMXssFindings(ctx, infra.scanUUID, result.DOMXssFindings)
+			r.printPhaseDetail(fmt.Sprintf("%s confirmed %s DOM-based XSS on reflected client route(s) during the crawl.",
+				terminal.Orange(terminal.SymbolArrow),
+				terminal.Orange(fmt.Sprintf("%d", len(result.DOMXssFindings)))))
 		}
 
 		zap.L().Info("Spidering completed for target",

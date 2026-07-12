@@ -292,6 +292,7 @@ func setupScanHTTPStack() (*http.Requester, *services.Services, func(), error) {
 	opts.Debug = globalDebug
 	opts.DumpTraffic = globalDumpTraffic
 	opts.MaxPerHost = globalMaxPerHost
+	opts.NoWafPacing = globalNoWafPacing
 	opts.MaxHostError = globalMaxHostError
 	if globalNoClustering {
 		opts.ClusterRequests = false
@@ -665,6 +666,7 @@ func buildPhaseOptions(target string) (*types.Options, error) {
 	opts.Timeout = globalTimeout
 	opts.Concurrency = globalConcurrency
 	opts.MaxPerHost = globalMaxPerHost
+	opts.NoWafPacing = globalNoWafPacing
 	opts.MaxHostError = globalMaxHostError
 	opts.Verbose = globalVerbose
 	opts.Silent = globalSilent
@@ -891,7 +893,6 @@ func runRunnerScan(rr *httpmsg.HttpRequestResponse, target string) (err error) {
 	maybeGenerateReports(db, opts)
 	finishFSExport(db, opts)
 	if !opts.Silent {
-		fmt.Fprintf(os.Stderr, "\n%s %s\n", terminal.Aqua(terminal.SymbolSparkle), terminal.BoldAqua("Native scan completed"))
 		hosts := summaryScopeHosts(context.Background(), repo, settings, opts.Targets, opts.ProjectUUID, opts.ScanUUID)
 		printScanCompletionSummary(repo, opts.ProjectUUID, hosts, time.Since(scanStart))
 	}

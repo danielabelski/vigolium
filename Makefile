@@ -1,4 +1,8 @@
 .PHONY: build build-embedded build-all snapshot release public public-release github-release prepare-public-scripts clean test test-unit test-integration test-spitolas-browser test-e2e test-e2e-api test-e2e-agent test-e2e-postgres test-canary sanity-check smoke-autopilot-auth test-e2e-vampi test-e2e-dvwa test-e2e-juiceshop test-e2e-browser-fallback test-e2e-piolium test-benchmark test-benchmark-whitebox test-benchmark-blackbox test-benchmark-all test-benchmark-crapi test-benchmark-vuln-java test-benchmark-vuln-nginx test-benchmark-coverage test-agent-benchmark test-agent-parsing test-agent-quality test-agent-handoff test-agent-benchmark-e2e benchmark-agent-generate test-coverage coverage-gate coverage-combined test-coverage-check test-race test-ci test-xbow test-xbow-ssti test-xbow-xss test-xbow-sqli test-xbow-lfi test-xbow-cmdi test-xbow-ssrf test-xbow-xxe xbow-build lint verify-generated fmt tidy deps deps-chrome deps-chrome-update install install-gotestsum swagger help postgres-up postgres-down postgres-logs postgres-status crapi-up crapi-down crapi-logs crapi-status juiceshop-up juiceshop-down juiceshop-logs juiceshop-status vampi-up vampi-down vampi-logs vampi-status vulnerable-java-up vulnerable-java-down vulnerable-java-logs vulnerable-java-status vulnerable-nginx-up vulnerable-nginx-down vulnerable-nginx-logs vulnerable-nginx-status apps-up apps-down docker docker-build docker-build-prod docker-run docker-push docker-buildx-setup docker-publish update-jstangle ensure-jstangle sync-audit update-audit ensure-audit ensure-audit-dist restage-host-audit build-audit update-ui ssh-testbed-keygen ssh-testbed-up ssh-testbed-down ssh-testbed-status ssh-testbed-logs generate-metadata prepare-release-scripts cdn-sync bump-version npm-build npm-pack npm-publish
+# Phony targets defined in their own sections below (declared here so a stray
+# same-named file can never shadow them).
+.PHONY: all build-linux build-darwin build-windows deps-chrome-cft sync-platform \
+	test-canary-postgres test-pg-full test-e2e-autonomous test-e2e-scorecard
 
 # Go parameters
 GOCMD=go
@@ -236,6 +240,30 @@ test-e2e-dvwa: install-gotestsum
 test-e2e-juiceshop: install-gotestsum
 	@echo "$(PREFIX) Running Juice Shop E2E tests..."
 	$(TESTCMD) $(TESTFLAGS) -tags=canary -run TestJuiceShop ./test/e2e/
+
+# Run autonomous full-chain scan canary tests: point the scanner at a live app's
+# base URL only and let it discover the surface (content discovery + browser
+# spidering) and assess it (dynamic-assessment) with the full module set, then
+# assert it found routes it was never told about AND findings on them. Requires
+# Docker; the Juice Shop SPA case also needs a Chromium runtime (skips gracefully
+# without one).
+test-e2e-autonomous: install-gotestsum
+	@echo "$(PREFIX) Running autonomous full-chain scan canary tests..."
+	$(TESTCMD) $(TESTFLAGS) -tags=canary -timeout 30m -run TestAutonomousScan ./test/e2e/
+
+# Run the ground-truth coverage scorecards: seed each app's source-verified
+# vulnerable surface (DVWA/VAmPI/Juice Shop/vulnerable-java), run the full module
+# set, and report CATCH/MISS per known vuln vs the catalog extracted from the
+# app's own source (reverse-engineered endpoints for vulnerable-java). Includes
+# authenticated cases: Juice Shop (Bearer token) and crAPI (a multi-session
+# --auth-file bundle) that reach the protected surface and catch the numeric-ID
+# BOLA/IDOR via idor-detection (single identity) and authz-compare (second
+# identity). Requires Docker; the crAPI case also needs its stack up
+# (`make crapi-up`) and skips cleanly otherwise (VIGOLIUM_CRAPI_URL overrides).
+test-e2e-scorecard: install-gotestsum
+	@echo "$(PREFIX) Running ground-truth coverage scorecard canary tests..."
+	@echo "$(PREFIX) (verbose: each scan logs its replicable 'vigolium scan ...' command + per-vuln CATCH/MISS)"
+	$(GOTEST) -v -tags=canary -timeout 40m -run TestCoverageScorecard ./test/e2e/
 
 # Run browser fallback E2E tests (Docker multi-arch, verifies system chromium fallback)
 test-e2e-browser-fallback: install-gotestsum
@@ -597,7 +625,8 @@ vulnerable-nginx-status:
 	docker compose -f $(VULN_NGINX_DIR)/docker-compose.yaml ps
 
 # jstangle binary management
-.PHONY: update-jstangle ensure-jstangle verify-jstangle-fresh build-jstangle-current build-jstangle-all
+# update-jstangle and ensure-jstangle are already declared .PHONY at the top.
+.PHONY: verify-jstangle-fresh build-jstangle-current
 JSTANGLE_SRC_DIR=platform/jstangle/bin
 JSTANGLE_DST_DIR=internal/resources/deparos/jstangle
 
@@ -607,7 +636,7 @@ JSTANGLE_RES_DST_DIR=internal/resources/deparos/jstangle
 JSTANGLE_RES_BINS=jstangle-darwin-amd64 jstangle-darwin-arm64 jstangle-linux-amd64 jstangle-linux-arm64 jstangle-windows-amd64.exe
 
 # Build every release helper from source and copy binaries.
-build-jstangle-all update-jstangle:
+update-jstangle:
 	@echo "$(PREFIX) Building jstangle from source..."
 	cd platform/jstangle && bun install --linker isolated --ignore-scripts && bun run build:bin
 	@echo "$(PREFIX) Copying jstangle binaries to $(JSTANGLE_DST_DIR)..."
@@ -1250,10 +1279,13 @@ help:
 	@echo "    make test-e2e-api     Run API E2E tests only (server endpoints)"
 	@echo "    make test-e2e-agent   Run Agent API E2E tests only (agent endpoints)"
 	@echo "    make test-e2e-postgres  Run PostgreSQL E2E tests (requires make postgres-up)"
+	@echo "    make test-pg-full     Full PG validation cycle: e2e + canary (auto up/down)"
 	@echo "    make test-canary      Run canary tests: DVWA, VAmPI, Juice Shop (Docker)"
 	@echo "    make test-e2e-vampi   Run VAmPI canary tests only (SQLi)"
 	@echo "    make test-e2e-dvwa    Run DVWA canary tests only (XSS, SQLi, LFI)"
 	@echo "    make test-e2e-juiceshop  Run Juice Shop canary tests only"
+	@echo "    make test-e2e-autonomous  Autonomous full-chain scan canary (Docker)"
+	@echo "    make test-e2e-scorecard   Ground-truth coverage scorecard canary (Docker)"
 	@echo "    make test-e2e-browser-fallback  Browser fallback test (Docker multi-arch)"
 	@echo "    make test-e2e-piolium  Piolium audit e2e (requires pi + piolium installed)"
 	@echo "    make smoke-autopilot-auth  Smoke: agent autopilot --credentials against juice-shop"
@@ -1283,9 +1315,11 @@ help:
 	@echo "    make tidy             Tidy go.mod dependencies"
 	@echo "    make deps             Download dependencies + ensure jstangle binaries"
 	@echo "    make deps-chrome      Download Chromium browser archives from versions.go"
+	@echo "    make deps-chrome-cft  Download only Chrome for Testing (PLATFORM=linux64)"
 	@echo "    make deps-chrome-update  Update browser version+URL (NAME= PLATFORM= VERSION= URL=)"
 	@echo "    make swagger          Sync Swagger spec to embedded copy"
 	@echo "    make update-ui        Copy fresh UI builds into public/ (report template + dashboard)"
+	@echo "    make sync-platform    Sync platform sub-repos to their standalone repos"
 	@echo ""
 	@echo "\033[33m  VULNERABLE APPS (Docker)\033[0m"
 	@echo "    make apps-up          Start all vulnerable apps"

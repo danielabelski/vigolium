@@ -40,7 +40,7 @@ func TestIframeFetchScriptFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	script := fmt.Sprintf(iframeFetchScript, string(payload))
+	script := fmt.Sprintf(inPageFetchScript, string(payload))
 
 	if strings.Contains(script, "%!") {
 		t.Fatalf("script formatting produced an error artifact:\n%s", script)

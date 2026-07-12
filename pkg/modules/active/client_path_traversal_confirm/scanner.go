@@ -73,6 +73,7 @@ type CapturedRequest struct {
 
 type Module struct {
 	modkit.BaseActiveModule
+	modkit.RequestScopeContextStubs // no-op ScanPer{InsertionPoint,Host}Context
 
 	budget *Budget
 
@@ -116,17 +117,6 @@ func (m *Module) RequiredTechs() []string { return []string{TechTagCSPTCandidate
 
 func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, httpClient *vhttp.Requester, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {
 	return m.ScanPerRequestContext(context.Background(), ctx, httpClient, scanCtx)
-}
-
-// ScanPerInsertionPointContext / ScanPerHostContext are no-ops: the module is
-// ScanScopeRequest only, but implementing the full ContextualActiveModule trio
-// lets the executor thread cancellation into ScanPerRequestContext.
-func (m *Module) ScanPerInsertionPointContext(_ context.Context, _ *httpmsg.HttpRequestResponse, _ httpmsg.InsertionPoint, _ *vhttp.Requester, _ *modkit.ScanContext) ([]*output.ResultEvent, error) {
-	return nil, nil
-}
-
-func (m *Module) ScanPerHostContext(_ context.Context, _ *httpmsg.HttpRequestResponse, _ *vhttp.Requester, _ *modkit.ScanContext) ([]*output.ResultEvent, error) {
-	return nil, nil
 }
 
 func (m *Module) ScanPerRequestContext(runCtx context.Context, ctx *httpmsg.HttpRequestResponse, _ *vhttp.Requester, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {

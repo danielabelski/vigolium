@@ -19,6 +19,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/active/mcp_server_probe"
 	"github.com/vigolium/vigolium/pkg/modules/passive/mcp_endpoint_detect"
+	"github.com/vigolium/vigolium/pkg/output"
 )
 
 // startMCPServer creates a fake MCP server that speaks the full MCP protocol:
@@ -209,7 +210,7 @@ func startMCPServerInitOnly(t *testing.T) *httptest.Server {
 
 		body, _ := io.ReadAll(r.Body)
 		var req struct {
-			Method string `json:"method"`
+			Method string      `json:"method"`
 			ID     json.Number `json:"id"`
 		}
 		_ = json.Unmarshal(body, &req)
@@ -312,9 +313,14 @@ func TestMCPServerProbe_FullPipeline(t *testing.T) {
 		t.Logf("  %s", e)
 	}
 
-	// Should reach High severity (tools callable without auth)
-	assert.Equal(t, "high", strings.ToLower(result.Info.Severity.String()),
-		"severity should be High when tools are callable")
+	// Credential-free tool invocation is reported as a Medium "Candidate": public
+	// callable tools may be intentional, so it is not escalated to High unless a
+	// tool actually leaks secret material (a separate MCP Tool Output Leaks Secret
+	// finding). See mcp_server_probe.ScanPerHost severity logic.
+	assert.Equal(t, "medium", strings.ToLower(result.Info.Severity.String()),
+		"credential-free callable tools should be a Medium candidate, not High")
+	assert.Equal(t, output.RecordKindCandidate, result.RecordKind,
+		"credential-free callable tools should be a Candidate record")
 
 	// Should have extracted endpoint info
 	hasEndpoint := false

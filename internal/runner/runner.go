@@ -177,6 +177,12 @@ func BuildSharedInfra(opts *types.Options, settings *config.Settings, repo *data
 		Adaptive:       adaptive,
 		MinPerHost:     minPerHost,
 		CeilingPerHost: ceilingPerHost,
+		// Throttle a host only once it starts returning WAF/CDN blocks; a non-WAF
+		// scan is unaffected. The constructor drops this when Adaptive is on.
+		WafAutoArm: true,
+		// --no-waf-pacing turns off only the proactive edge pre-arm; reactive
+		// WAF-block back-off stays on.
+		DisablePreArm: opts.NoWafPacing,
 	})
 	svc.HostLimiter = hostLimiter
 	infra.HostLimiter = hostLimiter

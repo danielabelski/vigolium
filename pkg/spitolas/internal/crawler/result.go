@@ -25,6 +25,16 @@ type Result struct {
 	// inherit the cleared session. Empty when harvesting was unavailable.
 	HarvestedCookies []*http.Cookie
 	BrowserUserAgent string
+
+	// HarvestedAuthorization is a JWT/Bearer token read from the app's client
+	// storage after a confirmed default-credential login (bare, no "Bearer "
+	// prefix). Token-based SPAs send it as an Authorization header rather than a
+	// cookie, so it is carried forward separately. Empty when no login succeeded.
+	HarvestedAuthorization string
+
+	// DOMXssFindings holds browser-confirmed DOM-based XSS on reflected client
+	// routes discovered during the crawl. The runner emits these as findings.
+	DOMXssFindings []DOMXssFinding
 }
 
 // Summary returns a text summary of the crawl.

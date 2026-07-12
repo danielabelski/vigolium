@@ -52,6 +52,7 @@ Vigolium's own source code, not to these independently obtained tools.
 | Project or source | Function in Vigolium |
 | --- | --- |
 | [MongoDB Kingfisher](https://github.com/mongodb/kingfisher) (Apache-2.0) | Source of the native secret-detection rules embedded in `pkg/secretscan/catalog.json`. The rule patterns are normalized from the kingfisher Rust-regex ruleset to RE2 syntax; live-validation blocks are removed. Regenerated via `make update-secret-rules`. |
+| [PortSwigger js-miner](https://github.com/PortSwigger/js-miner) (Apache-2.0) | Regex shape for the vigolium-authored generic credential-assignment rule in `pkg/secretscan/supplemental.go`, derived from js-miner's `SECRETS_REGEX` (keyword-in-identifier + quoted value). No code is copied; the pattern is reimplemented in RE2. |
 | [Bo0oM/fuzz.txt](https://github.com/Bo0oM/fuzz.txt) | Likely source for `internal/resources/wordlists/fuzz.txt`, used for malformed path and discovery fuzzing. Verify provenance before release. |
 | [wallarm/jwt-secrets](https://github.com/wallarm/jwt-secrets) | Likely source family for `internal/resources/wordlists/jwt.secrets.list`, used for weak JWT secret detection. Verify provenance before release. |
 | `dir-short.txt`, `dir-long.txt`, `file-short.txt`, `file-long.txt` | Embedded content-discovery wordlists used by Deparos. Source provenance is not documented in-tree and should be verified before release. |

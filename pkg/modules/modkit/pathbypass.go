@@ -243,6 +243,28 @@ func pathSegmentCount(p string) int {
 	return n
 }
 
+// RandomSameDepthPath returns a guaranteed-nonexistent absolute path whose segment
+// count equals p's, each segment a fresh random canary token. It is the base for a
+// path-mangling "shape catch-all" control: re-applying a module's payload (a
+// collapsing traversal, a prefix/suffix decoration) to this base lands at the same
+// relative depth as the real probe — and, for an upward `../`-family traversal,
+// collapses to the same ancestor/root — so a response that matches the real probe
+// proves the leading segments were irrelevant and the host is serving one body for
+// the mangled SHAPE rather than exposing a resource the clean URL gated. A root or
+// empty p yields a single random segment. Complements the clean-path guards
+// (RandomDirCatchAll, RootPageCatchAll), which cannot see a shape-keyed catch-all.
+func RandomSameDepthPath(p string) string {
+	n := pathSegmentCount(p)
+	if n < 1 {
+		n = 1
+	}
+	segs := make([]string, n)
+	for i := range segs {
+		segs[i] = "vigolium-nx-" + FreshCanary()
+	}
+	return "/" + strings.Join(segs, "/")
+}
+
 // pathParentDir returns the directory portion of p (its parent path), or "" when p
 // is the root or a single segment (no meaningful launch directory). Query and
 // fragment are dropped.

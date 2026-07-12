@@ -110,9 +110,6 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 			Request:          string(ctx.Request().Raw()),
 			FuzzingParameter: param.Name(),
 			ExtractedResults: []string{fmt.Sprintf("%s=%s", param.Name(), param.Value())},
-			RecordKind:       output.RecordKindObservation,
-			EvidenceGrade:    output.EvidenceGradeObservation,
-			DedupKey:         fmt.Sprintf("idor-candidate|%s|%s|%s|%s", urlx.Host, normalizedPath, param.Name(), param.Type().String()),
 			Info: output.Info{
 				Name:        "Potential IDOR Parameter",
 				Description: desc,
@@ -177,14 +174,10 @@ func (m *Module) detectExcessiveData(body, host, urlStr string, ctx *httpmsg.Htt
 	sensitiveFields := sortedMapKeys(seen)
 	substantiveFields := sortedMapKeys(substantive)
 
-	kind := output.RecordKindObservation
-	grade := output.EvidenceGradeObservation
 	sev := severity.Info
 	name := "Security-Relevant API Field Names"
 	description := fmt.Sprintf("API response contains security-relevant field names (%s), but their values are empty, false, redacted, example-like, or otherwise non-substantive.", strings.Join(sensitiveFields, ", "))
 	if len(substantiveFields) > 0 {
-		kind = output.RecordKindCandidate
-		grade = output.EvidenceGradeCandidate
 		sev = severity.Low
 		name = "Potential Excessive Data Exposure"
 		description = fmt.Sprintf("API response contains substantive values under security-relevant fields (%s). Cross-role or cross-identity authorization was not compared, so this is a BOPLA review candidate rather than confirmed unauthorized disclosure.", strings.Join(substantiveFields, ", "))
@@ -204,8 +197,6 @@ func (m *Module) detectExcessiveData(body, host, urlStr string, ctx *httpmsg.Htt
 	return []*output.ResultEvent{
 		{
 			ModuleID:         ModuleID,
-			RecordKind:       kind,
-			EvidenceGrade:    grade,
 			Host:             host,
 			URL:              urlStr,
 			Matched:          urlStr,

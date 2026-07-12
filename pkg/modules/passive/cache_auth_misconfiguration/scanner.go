@@ -15,18 +15,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
-// cacheIndicatorHeaders are response headers proving a shared HTTP cache (CDN or
-// reverse proxy) is actually in the request path. Origin "Cache-Control: public"
-// alone does NOT prove a cache stores and replays the response — and virtually
-// all CDNs strip Set-Cookie from cached responses by default — so we require at
-// least one of these before flagging.
-var cacheIndicatorHeaders = map[string]bool{
-	"age": true, "x-cache": true, "x-cache-status": true,
-	"x-cache-hits": true, "cf-cache-status": true, "x-varnish": true,
-	"x-proxy-cache": true, "akamai-cache-status": true, "x-cacheable": true,
-	"x-cdn-cache": true, "fastly-cache": true,
-}
-
 // nonSensitiveCookieExact is the set of well-known cookie names that do not
 // carry user-identifying data — load-balancer affinity, analytics/marketing,
 // and consent cookies. Leaking these cross-user is not a session compromise, so

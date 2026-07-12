@@ -501,6 +501,39 @@ func statusBucket(code int) string {
 	}
 }
 
+// statusClassOrder is the canonical display order + color for HTTP status-class
+// buckets, shared by the traffic listing and the scan-completion summary so both
+// render 2xx/3xx/4xx/5xx the same way.
+var statusClassOrder = []struct {
+	key   string
+	color func(string) string
+}{
+	{"2xx", terminal.Green}, {"3xx", terminal.Cyan}, {"4xx", terminal.Yellow},
+	{"5xx", terminal.Red}, {"1xx", terminal.Gray}, {"none", terminal.Gray},
+}
+
+// bucketStatusCounts folds raw status_code→count pairs into class buckets
+// (2xx/3xx/4xx/5xx/1xx/none) keyed by statusBucket.
+func bucketStatusCounts(byCode map[int]int64) map[string]int64 {
+	buckets := make(map[string]int64, len(statusClassOrder))
+	for code, n := range byCode {
+		buckets[statusBucket(code)] += n
+	}
+	return buckets
+}
+
+// formatStatusClassLine renders status-class buckets in canonical order as a
+// single colored "2xx:40 3xx:5 …" string, empty when every bucket is zero.
+func formatStatusClassLine(buckets map[string]int64) string {
+	var parts []string
+	for _, b := range statusClassOrder {
+		if n := buckets[b.key]; n > 0 {
+			parts = append(parts, b.color(fmt.Sprintf("%s:%d", b.key, n)))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 // printTrafficSummary prints the "Showing X-Y of Z records" line plus a
 // status-class / method / content-type breakdown, mirroring printFindingsSummary.
 // Counts are DB-wide (project scope, filter-independent like the finding summary)
@@ -527,21 +560,8 @@ func printTrafficSummary(ctx context.Context, db *database.DB, records []*databa
 			c, _ := strconv.Atoi(code)
 			buckets[statusBucket(c)] += n
 		}
-		order := []struct {
-			key   string
-			color func(string) string
-		}{
-			{"2xx", terminal.Green}, {"3xx", terminal.Cyan}, {"4xx", terminal.Yellow},
-			{"5xx", terminal.Red}, {"1xx", terminal.Gray}, {"none", terminal.Gray},
-		}
-		var parts []string
-		for _, b := range order {
-			if n := buckets[b.key]; n > 0 {
-				parts = append(parts, b.color(fmt.Sprintf("%s:%d", b.key, n)))
-			}
-		}
-		if len(parts) > 0 {
-			fmt.Printf("  %s Status:   %s\n", terminal.Cyan(terminal.SymbolSparkle), strings.Join(parts, " "))
+		if line := formatStatusClassLine(buckets); line != "" {
+			fmt.Printf("  %s Status:   %s\n", terminal.Cyan(terminal.SymbolSparkle), line)
 		}
 	}
 

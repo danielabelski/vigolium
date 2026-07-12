@@ -138,6 +138,17 @@ func runDoctorCmd(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	} else {
 		printDoctorReport(updated)
+		// The compact --fix report collapses passing checks to one line each;
+		// point the user at --verbose when they want the full per-check detail.
+		if !globalVerbose {
+			fmt.Printf("  %s %s%s%s\n",
+				terminal.Yellow(terminal.SymbolTip),
+				terminal.White("re-run with "),
+				terminal.BoldCyan("vigolium doctor --fix --verbose"),
+				terminal.White(" to see full per-check details"),
+			)
+			fmt.Println()
+		}
 	}
 	return nil
 }
@@ -229,8 +240,23 @@ func printDoctorFocused(r *diagnostics.Report, only []string) {
 	}
 }
 
-// printDoctorReport renders the grouped human-readable report. Details are
-// always shown (verbose-by-default) — there's no `--brief` toggle today.
+// detailsVisible reports whether the verbose `▸` detail lines should render for
+// a check with the given status. Plain `vigolium doctor` stays fully verbose;
+// `vigolium doctor --fix` runs compact — OK checks collapse to their single
+// status row (the status message already carries the key facts) — unless
+// `--verbose` is passed to expand them again.
+func detailsVisible(status diagnostics.Status) bool {
+	if doctorFix && !globalVerbose {
+		return status != diagnostics.StatusOK
+	}
+	return true
+}
+
+// printDoctorReport renders the grouped human-readable report. Plain
+// `vigolium doctor` shows every check's `▸` detail lines (verbose-by-default).
+// `vigolium doctor --fix` renders compact — OK checks collapse to their single
+// status row so the twice-rendered fix output stays short — while `--verbose`
+// restores the full detail lines. The gating lives in detailsVisible().
 //
 // The layout intentionally mirrors how users invoke the scanner:
 //   - "Core" surfaces the only true blocker (database).
@@ -247,12 +273,12 @@ func printDoctorReport(r *diagnostics.Report) {
 	printDoctorSection("Core", "")
 	if r.Database != nil {
 		printCheck("Database", r.Database.Status, r.Database.Message)
-		printDetails(true, r.Database.Details)
+		printDetails(detailsVisible(r.Database.Status), r.Database.Details)
 		printTip(r.Database.Tip)
 	}
 	if r.Initialized != nil {
 		printCheck("Initialized", r.Initialized.Status, r.Initialized.Message)
-		printDetails(true, r.Initialized.Details)
+		printDetails(detailsVisible(r.Initialized.Status), r.Initialized.Details)
 		printTip(r.Initialized.Tip)
 	}
 
@@ -261,18 +287,18 @@ func printDoctorReport(r *diagnostics.Report) {
 	if t := r.Tools["chromium"]; t != nil {
 		printCheck("Chromium", t.Status, toolMessage(t))
 		printDoctorPurpose(doctorDetailIndent, "powers headless rendering for the spidering phase")
-		printDetails(true, t.Details)
+		printDetails(detailsVisible(t.Status), t.Details)
 		printTip(t.Tip)
 	}
 	if r.NucleiTemplates != nil {
 		printCheck("Nuclei Templates", r.NucleiTemplates.Status, r.NucleiTemplates.Message)
 		printDoctorPurpose(doctorDetailIndent, "drives the KnownIssueScan phase")
-		printDetails(true, r.NucleiTemplates.Details)
+		printDetails(detailsVisible(r.NucleiTemplates.Status), r.NucleiTemplates.Details)
 		printTip(r.NucleiTemplates.Tip)
 	}
 	if c := embeddedBinaryCheck(r, "jstangle"); c != nil {
 		printCheck("Embedded jstangle", c.Status, c.Message)
-		printDetails(true, c.Details)
+		printDetails(detailsVisible(c.Status), c.Details)
 		printTip(c.Tip)
 	}
 
@@ -282,22 +308,22 @@ func printDoctorReport(r *diagnostics.Report) {
 	printDoctorSubsection("Olium-based modes (autopilot + swarm)")
 	if r.Agent != nil {
 		printSubCheck("Olium agent", r.Agent.Status, formatAgentMessage(r.Agent))
-		printSubDetails(true, r.Agent.Details)
+		printSubDetails(detailsVisible(r.Agent.Status), r.Agent.Details)
 		printSubTip(r.Agent.Tip)
 	}
 	if r.SessionsDir != nil {
 		printSubCheck("Sessions Dir", r.SessionsDir.Status, r.SessionsDir.Message)
-		printSubDetails(true, r.SessionsDir.Details)
+		printSubDetails(detailsVisible(r.SessionsDir.Status), r.SessionsDir.Details)
 		printSubTip(r.SessionsDir.Tip)
 	}
 	if r.TemplatesDir != nil {
 		printSubCheck("Templates Dir", r.TemplatesDir.Status, r.TemplatesDir.Message)
-		printSubDetails(true, r.TemplatesDir.Details)
+		printSubDetails(detailsVisible(r.TemplatesDir.Status), r.TemplatesDir.Details)
 		printSubTip(r.TemplatesDir.Tip)
 	}
 	if r.Browser != nil {
 		printSubCheck("Agent Browser", r.Browser.Status, r.Browser.Message)
-		printSubDetails(true, r.Browser.Details)
+		printSubDetails(detailsVisible(r.Browser.Status), r.Browser.Details)
 		printSubTip(r.Browser.Tip)
 	}
 
@@ -472,7 +498,7 @@ func printInfoTools(r *diagnostics.Report) {
 	for _, name := range names {
 		t := r.Tools[name]
 		printSubCheck(name, t.Status, toolMessage(t))
-		printSubDetails(true, t.Details)
+		printSubDetails(detailsVisible(t.Status), t.Details)
 		printSubTip(t.Tip)
 	}
 }

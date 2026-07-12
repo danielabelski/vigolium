@@ -111,6 +111,29 @@ func TestScanPerRequest_SQLError(t *testing.T) {
 	assert.True(t, found, "expected SQL Error finding")
 }
 
+// Juice Shop / Express+Sequelize on SQLite leaks the driver error code and the
+// Sequelize exception class as a JSON body, none of which the pre-Node signature
+// set matched. The full SELECT ... FROM in the "sql" field is the corroborator.
+func TestScanPerRequest_SequelizeSQLiteError(t *testing.T) {
+	m := New()
+	body := `{"error":{"message":"SQLITE_ERROR: unrecognized token: \"0192023a7bbd73250516f069df18b500\"","name":"SequelizeDatabaseError","sql":"SELECT * FROM Users WHERE email = 'admin'' AND password = '...' AND deletedAt IS NULL"}}`
+	ctx := makeHTTPStatusCtx("/rest/user/login", "application/json", body, 500, "Internal Server Error")
+	scanCtx := &modkit.ScanContext{}
+
+	results, err := m.ScanPerRequest(ctx, scanCtx)
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+
+	found := false
+	for _, r := range results {
+		if r.Info.Name == "SQL Error in Error Response" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected SQL Error finding for Sequelize/SQLite error leak")
+}
+
 func TestScanPerRequest_ASPError(t *testing.T) {
 	m := New()
 	ctx := makeHTTPStatusCtx("/page", "text/html", `<html>Server Error in Application --- End of inner exception stack trace ---</html>`, 500, "Internal Server Error")

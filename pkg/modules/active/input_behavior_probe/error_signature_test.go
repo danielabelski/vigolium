@@ -16,6 +16,9 @@ func TestBodyLeaksServerError(t *testing.T) {
 		"NoMethodError: undefined method `foo' for nil",
 		"Whoops, looks like something went wrong.",
 		"System.NullReferenceException: Object reference not set",
+		// Node.js SQLite + Sequelize leak (Juice Shop login SQLi): the driver code
+		// and the ORM exception class, as emitted in the JSON error body.
+		`{"error":{"message":"SQLITE_ERROR: unrecognized token: \"abc\"","name":"SequelizeDatabaseError","sql":"SELECT * FROM Users WHERE email = 'x''"}}`,
 	}
 	for _, b := range leaks {
 		if !bodyLeaksServerError(b) {

@@ -1081,6 +1081,12 @@ func (e *Engine) AddObservedPath(path string) {
 	// extracted-request channel (resolveRequestURL preserves RawQuery).
 	e.preserveQueryParamAsRequest(path)
 
+	// A high-confidence API endpoint mined from the app's own JS (e.g.
+	// "/rest/basket", "/api/BasketItems") must be FETCHED as a request, not merely
+	// seed the directory-discovery pool — sanitizeObservedPath treats it as a
+	// directory hint, so the exact endpoint would otherwise never be requested.
+	e.preserveAPIPathAsRequest(path)
+
 	path = sanitizeObservedPath(path)
 	if path == "" {
 		return
@@ -1096,6 +1102,62 @@ func (e *Engine) preserveQueryParamAsRequest(path string) {
 	if linkfinder.PathHasQuery(path) {
 		e.AddExtractedRequest(&jstangle.ExtractedRequest{URL: path, Method: "GET"})
 	}
+}
+
+// apiEndpointSegments mark a server API endpoint (REST/GraphQL/RPC) as opposed to a
+// static asset or an SPA client route. A path from the app's own JavaScript carrying
+// one of these is a high-confidence endpoint worth fetching directly.
+var apiEndpointSegments = []string{"/api/", "/rest/", "/graphql", "/gql/", "/rpc/"}
+
+// preserveAPIPathAsRequest promotes a query-less, API-looking path mined from the
+// application's own JavaScript (e.g. "/rest/basket", "/api/BasketItems") to a direct
+// GET request, so a high-confidence endpoint is FETCHED and becomes a scannable
+// record instead of only seeding the directory-discovery pool. Angular/webpack
+// bundles build these URLs by string concatenation, which JSTangle's AST pass often
+// cannot resolve into a request fact; linkfinder recovers the literal path and this
+// promotes the API-looking ones. Query-bearing paths are already queued verbatim by
+// preserveQueryParamAsRequest; the extracted-request dedup set coalesces duplicates.
+func (e *Engine) preserveAPIPathAsRequest(path string) {
+	if linkfinder.PathHasQuery(path) {
+		return
+	}
+	if !looksLikeAPIEndpointPath(path) {
+		return
+	}
+	e.AddExtractedRequest(&jstangle.ExtractedRequest{URL: path, Method: "GET"})
+}
+
+// looksLikeAPIEndpointPath reports whether a root-relative path names a server API
+// endpoint by carrying a REST/GraphQL/RPC segment or a "/v<N>/" version segment.
+func looksLikeAPIEndpointPath(path string) bool {
+	if path == "" || path[0] != '/' {
+		return false
+	}
+	lower := strings.ToLower(path)
+	for _, seg := range apiEndpointSegments {
+		if strings.Contains(lower, seg) {
+			return true
+		}
+	}
+	return hasVersionSegment(lower)
+}
+
+// hasVersionSegment reports whether path contains a "/v<N>/" API-version segment
+// (e.g. "/v1/users", "/v2/orders"), a common REST versioning convention.
+func hasVersionSegment(path string) bool {
+	for i := 0; i+2 < len(path); i++ {
+		if path[i] != '/' || path[i+1] != 'v' {
+			continue
+		}
+		j := i + 2
+		for j < len(path) && path[j] >= '0' && path[j] <= '9' {
+			j++
+		}
+		if j > i+2 && j < len(path) && path[j] == '/' {
+			return true
+		}
+	}
+	return false
 }
 
 // AddObservedPathTrusted records URL path from trusted sources (URLs, spider links, JS paths).

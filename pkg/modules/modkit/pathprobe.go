@@ -728,7 +728,7 @@ func splitProbePath(probePath string) (parent, segment string) {
 // Root-level paths are probed at the web root rather than skipped: a path-reflecting
 // shell defeats the root soft-404 fingerprint (the reflected slug + a per-request
 // token vary the body per path), so a root-level slug-equal marker self-matches the
-// reflected request path with no endpoint behind it (the branding.roche.com
+// reflected request path with no endpoint behind it (the branding.acme.com
 // /healthchecks-ui, /redoc false positives). Requiring an EXACT 200 canary reflection
 // keeps this false-negative-safe: a genuine root-level endpoint (/redoc, /h2-console)
 // whose random web-root siblings 404 is never dropped. Runs with NoRedirects (a 30x

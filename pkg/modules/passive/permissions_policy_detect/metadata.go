@@ -9,13 +9,13 @@ const (
 )
 
 var (
-	ModuleDesc = `**What it means:** Permissions-Policy grants a sensitive browser feature to all origins, or legacy Feature-Policy remains. Absence alone is ignored because need depends on feature and iframe use. This is an observation.
+	ModuleDesc = `**What it means:** This HTML response omits the Permissions-Policy header or grants sensitive browser features (camera, microphone, geolocation, payment) to all origins via a wildcard. An informational hardening gap, not a directly exploitable flaw.
 
-**How it's exploited:** With XSS or untrusted iframes, a permissive policy can let attacker code reach privileged browser APIs.
+**How it's exploited:** If the site also has cross-site scripting or embeds untrusted iframes, the missing or permissive policy lets injected code reach privileged APIs a restrictive policy would block. The legacy Feature-Policy header is also flagged as superseded.
 
 **Fix:** Send a Permissions-Policy header that disables or scopes sensitive features (camera=(), microphone=(), geolocation=(self)) and replace any legacy Feature-Policy header.`
 
-	ModuleConfirmation = "Observed when an explicit policy is overly permissive or legacy; missing policy alone is ignored"
+	ModuleConfirmation = "Confirmed when Permissions-Policy header is missing or contains overly permissive directives"
 	ModuleSeverity     = severity.Info
 	ModuleConfidence   = severity.Certain
 	ModuleTags         = []string{"header-security", "misconfiguration", "light"}

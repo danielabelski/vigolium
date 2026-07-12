@@ -98,6 +98,26 @@ type Crawler struct {
 	primedFramesMu sync.Mutex
 	primedFrames   map[string]bool
 
+	// submittedForms dedups GET-form submit priming across the whole crawl so the
+	// same synthesized submit URL (e.g. a search box present on every catalog page
+	// → /catalog?searchTerm=a) is fetched once, not once per state. submittedPostForms
+	// is the POST-form counterpart, keyed by (action + field-name) signature so the
+	// same JS-driven form (e.g. a stock-check present on every product page) is only
+	// triggered once. Both guarded by submittedFormsMu; both capped by
+	// config.SubmitFormMaxVariants (shared budget).
+	submittedFormsMu   sync.Mutex
+	submittedForms     map[string]bool
+	submittedPostForms map[string]bool
+
+	// primedLinks dedups parameterized-anchor priming across the whole crawl (each
+	// URL fetched once) and primedLinkShapes caps how many distinct value-variants
+	// of one endpoint shape are primed (mirrors the capture's MaxParamValueVariants
+	// so priming never fetches more than the capture would keep). Guarded by
+	// primedLinksMu.
+	primedLinksMu    sync.Mutex
+	primedLinks      map[string]bool
+	primedLinkShapes map[string]int
+
 	// loginCTAPrimed marks that the one-shot login-CTA drive has already run, so a
 	// crawl that revisits the landing does not re-enter the auth flow repeatedly.
 	loginCTAPrimed bool
@@ -111,6 +131,10 @@ type Crawler struct {
 	mu      sync.Mutex
 	stats   Stats
 	running bool
+	// harvestedAuth is a JWT/Bearer token read from the app's client storage after
+	// a confirmed default-credential login, carried forward so token-based SPAs are
+	// scanned authenticated (guarded by mu). Empty when no login succeeded.
+	harvestedAuth string
 }
 
 // Stats holds crawl statistics.
@@ -325,6 +349,9 @@ func (c *Crawler) Run(ctx context.Context) (*Result, error) {
 
 	// Create traffic capture with the configured writer
 	capture := network.New(c.writer, c.config.NoColor, c.config.Silent, c.config.Verbose, c.config.IncludeResponseBody, c.config.IncludeResponseHeaders, c.config.URL.Hostname(), "spider")
+	// Keep several distinct query-value variants per endpoint shape (category/
+	// filter/tab/search links) instead of collapsing them to one representative.
+	capture.SetMaxParamValueVariants(c.config.MaxParamValueVariants)
 	defer func() { _ = capture.Close() }()
 
 	// Start capture at BROWSER level (captures ALL pages).
@@ -621,6 +648,23 @@ func (c *Crawler) initializeIndexState(ctx context.Context) error {
 		zap.L().Debug("Form filling enabled, detecting forms")
 		c.fillFormsIfPresent(page, "")
 	}
+
+	// Submit GET forms (search/filter boxes) so their result URLs — e.g.
+	// /catalog?searchTerm=a — are requested and captured. The interaction crawl
+	// only submits a form when its submit control happens to be clicked, which the
+	// bounded action budget frequently never selects; this makes it deterministic.
+	// The forms were just filled above, so submitGetForms skips its own fill.
+	c.submitGetForms(ctx, page, true)
+
+	// Trigger POST forms (a JS-driven stock check → /catalog/product/stock, a
+	// newsletter subscribe, etc.) so their endpoints are exercised and captured.
+	// GET-form synthesis above already re-filled the forms, so skip a repeat fill.
+	c.submitPostForms(ctx, page, true)
+
+	// Fetch same-origin parameterized <a href> links (e.g. React-rendered
+	// /catalog?category=Books filter links) so they are captured even when the
+	// interaction budget never clicks them.
+	c.primeAnchorLinks(ctx, page)
 
 	// If the landing itself is a login form, try common credentials (deep
 	// intensity only, confirmed-login-gated) so the crawl can proceed
@@ -1720,6 +1764,21 @@ func (c *Crawler) inspectNewState(ctx context.Context, page *browser.Page, event
 	// NOTE: Frame extraction is already handled by c.extractor.Extract() which
 	// recursively processes frames with correct framePath. No separate call needed.
 
+	// Submit any GET forms this newly reached state introduced (a per-route search
+	// or filter box), deduped across the crawl so a form present on every page is
+	// only fetched once. This state's forms weren't pre-filled, so submitGetForms
+	// fills them.
+	c.submitGetForms(ctx, page, false)
+
+	// Trigger any POST forms this state introduced (a per-route stock/quote/action
+	// form), deduped across the crawl. submitGetForms above just filled the page's
+	// forms, so skip a repeat fill.
+	c.submitPostForms(ctx, page, true)
+
+	// Fetch any parameterized <a href> links this state introduced (client-rendered
+	// category/filter/pagination links), deduped + per-shape capped across the crawl.
+	c.primeAnchorLinks(ctx, page)
+
 	return added
 }
 
@@ -2433,6 +2492,15 @@ func (c *Crawler) buildResult() *Result {
 			res.HarvestedCookies = cookies
 		}
 	}
+	// Carry a token-auth session credential harvested during a confirmed login spray.
+	c.mu.Lock()
+	res.HarvestedAuthorization = c.harvestedAuth
+	c.mu.Unlock()
+
+	// Confirm DOM-based XSS on reflected client routes the crawl visited. Runs last
+	// (it navigates the browser) and only after a cheap no-navigation prefilter finds
+	// a reflected parameter, so it never spins up navigations blindly.
+	res.DOMXssFindings = c.probeDOMXSS()
 
 	return res
 }

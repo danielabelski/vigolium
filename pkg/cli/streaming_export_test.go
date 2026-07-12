@@ -159,7 +159,7 @@ func TestGenerateReportFromDBHTMLKeepsResponseBody(t *testing.T) {
 
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "report.html")
-	require.NoError(t, generateReportFromDB(ctx, db, outPath, false, "", "", htmlRF))
+	require.NoError(t, generateReportFromDB(ctx, db, outPath, false, "", "", htmlRF, nil))
 
 	data, err := os.ReadFile(outPath)
 	require.NoError(t, err)

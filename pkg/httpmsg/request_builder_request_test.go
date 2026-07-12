@@ -2276,3 +2276,71 @@ func TestAppendToPath(t *testing.T) {
 		})
 	}
 }
+
+// TestGetURLFromService_AbsoluteForm verifies that an absolute-form request
+// target (proxy-style "GET http://host/path HTTP/1.1", emitted by some Burp/
+// proxy exports) is parsed directly instead of being doubled into an invalid
+// URL. Regression: prepending scheme://host in front of an already-absolute
+// target produced "invalid port \":8899http:\"" and silently dropped the whole
+// request from the scan.
+func TestGetURLFromService_AbsoluteForm(t *testing.T) {
+	svc, err := NewService("localhost", 8899, "http")
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		raw      string
+		wantHost string
+		wantPath string
+	}{
+		{
+			name:     "absolute-form http with non-default port",
+			raw:      "GET http://localhost:8899/vulnerabilities/sqli/?id=1&Submit=Submit HTTP/1.1\r\nHost: localhost:8899\r\n\r\n",
+			wantHost: "localhost:8899",
+			wantPath: "/vulnerabilities/sqli/",
+		},
+		{
+			name:     "origin-form still builds from service (regression guard)",
+			raw:      "GET /vulnerabilities/sqli/?id=1 HTTP/1.1\r\nHost: localhost:8899\r\n\r\n",
+			wantHost: "localhost:8899",
+			wantPath: "/vulnerabilities/sqli/",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := GetURLFromService([]byte(tt.raw), svc)
+			if err != nil {
+				t.Fatalf("GetURLFromService() error = %v", err)
+			}
+			if u.Host != tt.wantHost {
+				t.Errorf("Host = %q, want %q", u.Host, tt.wantHost)
+			}
+			if u.Path != tt.wantPath {
+				t.Errorf("Path = %q, want %q", u.Path, tt.wantPath)
+			}
+			if got := u.Query().Get("id"); got != "1" {
+				t.Errorf("query id = %q, want 1", got)
+			}
+		})
+	}
+}
+
+func TestIsAbsoluteFormTarget(t *testing.T) {
+	cases := map[string]bool{
+		"http://h/p":  true,
+		"https://h/p": true,
+		"HTTP://h/p":  true, // scheme is case-insensitive
+		"HtTpS://h":   true,
+		"/path":       false,
+		"/http://x":   false,
+		"":            false,
+		"ftp://h/p":   false,
+	}
+	for in, want := range cases {
+		if got := isAbsoluteFormTarget(in); got != want {
+			t.Errorf("isAbsoluteFormTarget(%q) = %v, want %v", in, got, want)
+		}
+	}
+}

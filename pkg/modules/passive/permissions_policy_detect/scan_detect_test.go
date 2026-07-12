@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
-	"github.com/vigolium/vigolium/pkg/output"
 )
 
 // makeHTTPCtx builds a request/response pair from the given response headers
@@ -43,11 +42,10 @@ func TestScanPerHost_WildcardCamera(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, results)
 	assert.NotEmpty(t, results[0].ExtractedResults)
-	assert.Equal(t, output.RecordKindObservation, results[0].RecordKind)
 }
 
 // TestScanPerHost_MissingHeader drives an HTML response with no
-// Permissions-Policy/Feature-Policy headers. Absence alone is not actionable.
+// Permissions-Policy/Feature-Policy headers, which is itself flagged.
 func TestScanPerHost_MissingHeader(t *testing.T) {
 	t.Parallel()
 	m := New()
@@ -55,7 +53,7 @@ func TestScanPerHost_MissingHeader(t *testing.T) {
 
 	results, err := m.ScanPerHost(ctx, &modkit.ScanContext{})
 	require.NoError(t, err)
-	assert.Empty(t, results)
+	require.NotEmpty(t, results)
 }
 
 // TestScanPerHost_NonHTML verifies non-HTML responses are skipped.

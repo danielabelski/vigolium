@@ -118,6 +118,24 @@ type SpiderResult struct {
 	// harvested nothing (e.g. the browser wedged before teardown).
 	HarvestedCookies []*http.Cookie
 	BrowserUserAgent string
+
+	// HarvestedAuthorization is a bare JWT/Bearer token read from the app's client
+	// storage after a confirmed default-credential login, carried forward so
+	// token-auth SPAs are scanned authenticated. Empty when no login succeeded.
+	HarvestedAuthorization string
+
+	// DOMXssFindings holds browser-confirmed DOM-based XSS on reflected client
+	// routes (SPA hash routes / query params) discovered during the crawl.
+	DOMXssFindings []DOMXssFinding
+}
+
+// DOMXssFinding is a browser-confirmed DOM-based XSS on a client route: an
+// execution canary placed in a reflected query parameter ran in the page.
+type DOMXssFinding struct {
+	URL      string // exact route + injected param that executed the canary
+	Param    string // the injected query parameter name
+	Payload  string // the canary payload (decoded)
+	Evidence string // the sink element as rendered
 }
 
 // buildCrawlerConfig maps a public SpiderConfig onto the internal crawler config,
@@ -154,6 +172,10 @@ func buildCrawlerConfig(cfg SpiderConfig) (*config.Config, error) {
 	}
 	crawlerCfg.UseCDPDetection = !cfg.NoCDP
 	crawlerCfg.FormFillEnabled = !cfg.NoForms
+	// GET- and POST-form submission ride on form filling: with --no-forms the crawler
+	// neither fills nor submits.
+	crawlerCfg.SubmitGetForms = !cfg.NoForms
+	crawlerCfg.SubmitPostForms = !cfg.NoForms
 	crawlerCfg.LoginCredentialAttempts = cfg.LoginCredentialAttempts
 	crawlerCfg.LoginCredentialFullList = cfg.LoginCredentialFullList
 	if cfg.ProxyURL != "" {
@@ -191,6 +213,19 @@ func buildCrawlerConfig(cfg SpiderConfig) (*config.Config, error) {
 // spiderResultFromCrawl converts an internal crawl Result into the public
 // SpiderResult. recordsSaved is supplied by the caller because the writer is
 // per-run (RunSpider) or shared (SpiderSession, which reports a per-seed delta).
+// mapDOMXssFindings converts the internal crawler DOM-XSS findings to the public
+// spider type so callers never depend on internal/crawler.
+func mapDOMXssFindings(in []crawler.DOMXssFinding) []DOMXssFinding {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]DOMXssFinding, 0, len(in))
+	for _, f := range in {
+		out = append(out, DOMXssFinding{URL: f.URL, Param: f.Param, Payload: f.Payload, Evidence: f.Evidence})
+	}
+	return out
+}
+
 func spiderResultFromCrawl(result *crawler.Result, recordsSaved int) *SpiderResult {
 	// Start-redirect handling is decided inside the crawler (it alone has the
 	// rendered landing page to classify login vs. relocated app); surface its
@@ -213,8 +248,10 @@ func spiderResultFromCrawl(result *crawler.Result, recordsSaved int) *SpiderResu
 		LoginCredsSucceeded: result.Stats.LoginCredsSucceeded,
 		LoginCredsURL:       result.Stats.LoginCredsURL,
 
-		HarvestedCookies: result.HarvestedCookies,
-		BrowserUserAgent: result.BrowserUserAgent,
+		HarvestedCookies:       result.HarvestedCookies,
+		BrowserUserAgent:       result.BrowserUserAgent,
+		HarvestedAuthorization: result.HarvestedAuthorization,
+		DOMXssFindings:         mapDOMXssFindings(result.DOMXssFindings),
 	}
 }
 

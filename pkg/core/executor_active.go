@@ -48,7 +48,7 @@ func (e *Executor) runActivePerHost(ctx context.Context, reqClient *http.Request
 					}
 					return mod.ScanPerHost(item, reqClient, e.scanCtx)
 				},
-				mod, item, releaseSlot)
+				mod, item, releaseSlot, 0)
 			if completed && len(results) > 0 {
 				e.processResults(ctx, results, mod, item)
 			}
@@ -60,6 +60,11 @@ func (e *Executor) runActivePerRequest(ctx context.Context, reqClient *http.Requ
 	if len(e.perRequestActive) == 0 {
 		return
 	}
+
+	// A ScanPerRequest module loops over every insertion point in one call, so its
+	// timeout is scaled by the point count (see runActiveWithTimeout). Compute it
+	// once per item — the count is shared across all per-request modules.
+	workUnits := e.itemInsertionPointCount(item)
 
 	for _, module := range e.perRequestActive {
 		if !filter.allows(module.ID()) {
@@ -82,12 +87,28 @@ func (e *Executor) runActivePerRequest(ctx context.Context, reqClient *http.Requ
 					}
 					return mod.ScanPerRequest(item, reqClient, e.scanCtx)
 				},
-				mod, item, releaseSlot)
+				mod, item, releaseSlot, workUnits)
 			if completed && len(results) > 0 {
 				e.processResults(ctx, results, mod, item)
 			}
 		})
 	}
+}
+
+// itemInsertionPointCount returns the number of insertion points a whole-request
+// module will cover for item, used to scale that module's per-module timeout. It
+// goes through the shared insertion-point provider, which hits/populates the same
+// ipCache the per-insertion-point stage uses, so the request is parsed at most once.
+// Returns 0 when the request is empty or unparseable, leaving the base timeout unscaled.
+func (e *Executor) itemInsertionPointCount(item *httpmsg.HttpRequestResponse) int {
+	if item == nil || item.Request() == nil || len(item.Request().Raw()) == 0 {
+		return 0
+	}
+	pts, err := e.scanCtx.GetInsertionPoints(item.Request().Raw(), item.Request().ID(), true)
+	if err != nil {
+		return 0
+	}
+	return len(pts)
 }
 
 func (e *Executor) runActivePerInsertionPoint(ctx context.Context, reqClient *http.Requester, item *httpmsg.HttpRequestResponse, filter *moduleFilter, elig *requestEligibility, g *conc.WaitGroup) {
@@ -159,7 +180,7 @@ func (e *Executor) runActivePerInsertionPoint(ctx context.Context, reqClient *ht
 						}
 						return mod.ScanPerInsertionPoint(item, pt, reqClient, e.scanCtx)
 					},
-					mod, item, releaseSlot)
+					mod, item, releaseSlot, 0)
 				if completed && len(results) > 0 {
 					e.processResults(ctx, results, mod, item)
 				}

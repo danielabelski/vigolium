@@ -260,7 +260,7 @@ func (m *Module) confirmHit(
 	// health / data endpoint (/api/server/version, /api/health, /_cluster/health,
 	// ...) returns JSON, plain text, or XML — never a themed HTML *document*. A
 	// reflecting or catch-all host that answers arbitrary paths with its text/html
-	// shell (the roche trace.rawaf-test echo server) would otherwise let a
+	// shell (the acme trace.acme.com echo server) would otherwise let a
 	// version-shaped substring in that shell satisfy a version regex — e.g. a
 	// reflected client IP "220.245.126.98" left as "0.245.126.98" by a
 	// gzip/Content-Length:0 body-truncation quirk matching SonarQube's

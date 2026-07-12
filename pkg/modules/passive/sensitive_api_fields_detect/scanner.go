@@ -109,14 +109,10 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		return nil, nil
 	}
 
-	kind := output.RecordKindObservation
-	grade := output.EvidenceGradeObservation
 	sev := severity.Info
 	name := "Security-Relevant API Field Names"
 	desc := "JSON response contains security-relevant field names, but only null, empty, boolean, public-identifier, redacted, or example-like values were observed: " + strings.Join(found, ", ")
 	if len(substantive) > 0 {
-		kind = output.RecordKindCandidate
-		grade = output.EvidenceGradeCandidate
 		sev = severity.Low
 		name = "Sensitive API Fields Detected"
 		desc = "JSON response contains substantive values under sensitive-looking fields: " + strings.Join(substantive, ", ") + ". Sensitivity and cross-role authorization were not validated."
@@ -125,8 +121,6 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	return []*output.ResultEvent{
 		{
 			ModuleID:         ModuleID,
-			RecordKind:       kind,
-			EvidenceGrade:    grade,
 			Host:             host,
 			URL:              urlx.String(),
 			Matched:          urlx.String(),

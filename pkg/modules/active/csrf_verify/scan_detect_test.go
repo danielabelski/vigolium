@@ -11,7 +11,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
-	"github.com/vigolium/vigolium/pkg/output"
 )
 
 const csrfSuccessBody = "<html><body>Item deleted successfully. Thank you.</body></html>"
@@ -45,10 +44,7 @@ func TestScanPerRequest_TokenIgnored(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, modtest.Requester(t), &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "a server that returns the same success page without a valid token must be flagged")
-	assert.Contains(t, res[0].Info.Name, "Potential CSRF Token Bypass")
-	assert.Equal(t, output.RecordKindCandidate, res[0].RecordKind)
-	assert.Equal(t, output.EvidenceGradeDifferential, res[0].EvidenceGrade)
-	assert.Contains(t, res[0].Request, "Origin: https://csrf-probe.invalid")
+	assert.Contains(t, res[0].Info.Name, "CSRF Token Not Validated")
 }
 
 // TestScanPerRequest_JSONBeaconNotFlagged reproduces a real false positive: a

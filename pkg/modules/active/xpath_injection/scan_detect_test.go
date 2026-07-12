@@ -443,7 +443,7 @@ func requestWithHeader(t *testing.T, rawURL, name, value string) *httpmsg.HttpRe
 
 // TestNoFalsePositive_StandardRequestHeader: a boolean-oracle-shaped endpoint keyed
 // on the Accept-Language header must NOT be flagged — a fixed browser header is never
-// an XPath sink. This is the evr-kr.roche.com /cdn-cgi Accept-Language false positive
+// an XPath sink. This is the evr-kr.acme.com /cdn-cgi Accept-Language false positive
 // (the header gate rejects it even before the CDN-path gate would).
 func TestNoFalsePositive_StandardRequestHeader(t *testing.T) {
 	t.Parallel()

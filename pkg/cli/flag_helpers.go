@@ -32,6 +32,7 @@ func registerHTTPClientFlags(flags *pflag.FlagSet) {
 	flags.IntVarP(&globalConcurrency, "concurrency", "c", 50, "Number of concurrent scan workers")
 	flags.IntVarP(&globalRateLimit, "rate-limit", "r", 100, "Global requests/second cap, enforced across native scanning and known-issue-scan when set (unset = per-host concurrency only)")
 	flags.IntVar(&globalMaxPerHost, "max-per-host", 50, "Maximum concurrent requests allowed per host")
+	flags.BoolVar(&globalNoWafPacing, "no-waf-pacing", false, "Disable proactive CDN/WAF-edge pacing (don't pre-throttle per-host concurrency when a CloudFront/Cloudflare/etc. edge is detected); reactive back-off after a WAF block still applies")
 	flags.IntVar(&globalMaxHostError, "max-host-error", 30, "Skip host after reaching this many consecutive errors")
 	flags.IntVar(&globalMaxFindingsPerModule, "max-findings-per-module", 10, "Stop reporting after N findings per module (0 = unlimited)")
 	flags.BoolVar(&globalNoClustering, "no-clustering", false, "Disable deduplication of identical concurrent HTTP requests")

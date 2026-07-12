@@ -122,7 +122,7 @@ func TestScanPerRequest_NoFP_SlugReflectingRoute(t *testing.T) {
 }
 
 // TestScanPerRequest_NoFP_RootLevelReflectingShell reproduces the
-// branding.roche.com/healthchecks-ui false positive: a brand/CMS single-page app
+// branding.acme.com/healthchecks-ui false positive: a brand/CMS single-page app
 // (Frontify-style) whose router renders one 200 shell for EVERY unknown route and
 // reflects the requested path into it as a {"view":"<slug>"} router-context blob,
 // while the site root 302-redirects to login. /healthchecks-ui returns the shell

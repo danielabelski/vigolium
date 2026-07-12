@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/textproto"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -427,48 +428,134 @@ func ParseRawRequest(raw string) (rr *HttpRequestResponse, err error) {
 	rr.request.raw = []byte(raw)
 
 	// Populate Service from host and URL scheme.
-	// Raw HTTP request lines use origin-form (no scheme), so absent an explicit
-	// signal we default to https — modern web is TLS by default, and downstream
-	// callers that need http explicitly should pass it via the URL field or
+	// Raw HTTP request lines use origin-form (no scheme), so we infer the scheme
+	// in priority order: an explicit scheme on the request line (absolute-form) >
+	// a well-known Host port (80/443) > a same-origin Origin/Referer header > the
+	// https default. The default is https because modern web is TLS by default;
+	// callers that need http explicitly can still pass it via the URL field or
 	// override the service with WithService.
 	if hostValue != "" {
-		port := 443
 		protocol := "https"
+		schemeKnown := false
+		portExplicit := false
+		port := 0
+
 		// Absolute-form request lines (e.g. CONNECT, proxy form) may carry a scheme.
 		switch urlx.Scheme {
 		case "http":
-			protocol = "http"
-			port = 80
+			protocol, schemeKnown = "http", true
 		case "https":
-			protocol = "https"
-			port = 443
+			protocol, schemeKnown = "https", true
 		}
-		// Extract port from Host header value (e.g. "127.0.0.1:3000")
+		// Extract port from Host header value (e.g. "127.0.0.1:3000").
 		if h, p, splitErr := net.SplitHostPort(hostValue); splitErr == nil {
 			hostValue = h
 			if parsed := parsePort(p); parsed > 0 {
-				port = parsed
-				// Infer scheme from well-known port only when no explicit scheme was present.
-				if urlx.Scheme == "" {
+				port, portExplicit = parsed, true
+				// Infer scheme from a well-known port only when none was explicit.
+				if !schemeKnown {
 					switch parsed {
 					case 80:
-						protocol = "http"
+						protocol, schemeKnown = "http", true
 					case 443:
-						protocol = "https"
+						protocol, schemeKnown = "https", true
 					}
 				}
 			}
 		}
-		// Also try from URL path (for absolute-form request lines like CONNECT)
-		urlPort := urlx.Port()
-		if urlPort != "" {
-			port = parsePort(urlPort)
+		// When neither the request line nor a well-known port pins the scheme,
+		// fall back to the scheme declared by a same-origin Origin/Referer header.
+		// Browser/proxy-captured requests to an http service on a non-standard port
+		// (e.g. "Host: localhost:3000" with "Referer: http://localhost:3000/")
+		// would otherwise be silently upgraded to https by the default below.
+		if !schemeKnown {
+			if s, _, ok := OriginRefererScheme(raw, hostValue); ok {
+				protocol = s
+			}
+		}
+		// Also try the port from the URL path (absolute-form lines like CONNECT).
+		if urlPort := urlx.Port(); urlPort != "" {
+			if parsed := parsePort(urlPort); parsed > 0 {
+				port, portExplicit = parsed, true
+			}
+		}
+		// Default the port from the resolved scheme when the Host carried none.
+		if !portExplicit {
+			if protocol == "http" {
+				port = 80
+			} else {
+				port = 443
+			}
 		}
 		service, _ := NewService(hostValue, port, protocol)
 		rr.request.service = service
 	}
 
 	return rr, nil
+}
+
+// OriginRefererScheme returns the URL scheme ("http" or "https") declared by the
+// request's Origin or Referer header, but only when that header names the same
+// host we are about to connect to. It lets raw requests captured from a
+// browser/proxy keep their real scheme when the request line is origin-form (no
+// scheme) and the port is non-standard — e.g. an http service on :3000. A
+// cross-origin Origin/Referer (a different host, as in a CORS request or an
+// external referrer) is ignored so it cannot mislead scheme inference; Origin is
+// preferred over Referer as it is the exact origin the browser attached. host
+// must be the bare hostname (no port). header names which header supplied the
+// scheme ("Origin"/"Referer"), which callers can surface to the user. Returns
+// ok=false when neither header yields a same-host http/https scheme.
+func OriginRefererScheme(raw, host string) (scheme, header string, ok bool) {
+	if host == "" {
+		return "", "", false
+	}
+	sc := bufio.NewScanner(strings.NewReader(raw))
+	sc.Buffer(make([]byte, 0, 8*1024), 1024*1024)
+	refererScheme := ""
+	first := true
+	for sc.Scan() {
+		line := sc.Text()
+		if first { // request line
+			first = false
+			continue
+		}
+		if line == "" { // blank line terminates the header block
+			break
+		}
+		name, value, cut := strings.Cut(line, ":")
+		if !cut {
+			continue
+		}
+		if strings.EqualFold(name, "Origin") {
+			if s := sameHostScheme(value, host); s != "" {
+				return s, "Origin", true
+			}
+		} else if refererScheme == "" && strings.EqualFold(name, "Referer") {
+			refererScheme = sameHostScheme(value, host)
+		}
+	}
+	if refererScheme != "" {
+		return refererScheme, "Referer", true
+	}
+	return "", "", false
+}
+
+// sameHostScheme parses an absolute URL (an Origin or Referer value) and returns
+// its scheme only when it is http/https and its hostname case-insensitively
+// equals host. Returns "" otherwise (parse failure, opaque origin, non-http(s)
+// scheme, or a cross-origin host).
+func sameHostScheme(rawURL, host string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	if !strings.EqualFold(u.Hostname(), host) {
+		return ""
+	}
+	return u.Scheme
 }
 
 // ParseRawRequestWithURL parses a raw HTTP request with explicit URL override.

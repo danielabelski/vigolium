@@ -34,6 +34,7 @@ var (
 	globalScanOnReceive           bool
 	globalFullNativeScanOnReceive bool
 	globalMaxPerHost              int
+	globalNoWafPacing             bool
 	globalMaxHostError            int
 	globalMaxFindingsPerModule    int
 	globalListModules             bool
@@ -257,6 +258,11 @@ Run 'vigolium <command> --help' for command-specific flags and examples, or 'vig
 func init() {
 	// Color the "Error:" prefix red for all cobra error messages
 	rootCmd.SetErrPrefix(terminal.ErrorPrefix())
+
+	// Suggest the closest registered flag on a mistyped one (e.g. --module →
+	// --modules). Set once on root; every subcommand inherits it via
+	// FlagErrorFunc()'s walk to the parent.
+	rootCmd.SetFlagErrorFunc(flagErrorFunc)
 
 	pf := rootCmd.PersistentFlags()
 

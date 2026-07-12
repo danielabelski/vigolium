@@ -7,6 +7,8 @@ package httpmsg
 //   - insertion_point_param.go: ParameterInsertionPoint (parameter-aware with encoding)
 //   - insertion_point_encoded.go: EncodedInsertionPoint (custom encoder support)
 
+import "sort"
+
 // InsertionPointType represents where payload injection occurs in an HTTP request.
 type InsertionPointType byte
 
@@ -182,9 +184,49 @@ func CreateAllInsertionPoints(request []byte, includeNested bool) ([]InsertionPo
 	// SSRF via Referer, SSTI via User-Agent, etc.). Synthetic headers are added when
 	// not already present. Modules filter via AllowedInsertionPointTypes().
 	headerIPs := createHeaderInsertionPoints(shared, info.Headers)
+	// Bound the header fan-out: a request with an unusually large header block would
+	// otherwise multiply every whole-request module's work without adding real
+	// coverage. The cap is generous enough never to trim a normal browser request.
+	if len(headerIPs) > maxHeaderInsertionPoints {
+		headerIPs = headerIPs[:maxHeaderInsertionPoints]
+	}
 	points = append(points, headerIPs...)
 
+	// Order by likelihood of carrying an application injection sink so whole-request
+	// modules (which loop over every point in a single call) test the high-value
+	// points first: query params, then body params, then cookies, then headers.
+	// This front-loading matters under a per-module timeout — an early-tested,
+	// already-confirmed finding survives even if the tail of the loop is cut short.
+	// The sort is stable, so each group keeps its original in-request order.
+	sort.SliceStable(points, func(i, j int) bool {
+		return insertionPointPriority(points[i].Type()) < insertionPointPriority(points[j].Type())
+	})
+
 	return points, nil
+}
+
+// maxHeaderInsertionPoints bounds how many request headers become insertion points
+// for a single request (see CreateAllInsertionPoints).
+const maxHeaderInsertionPoints = 64
+
+// insertionPointPriority ranks insertion-point types by how likely the position is
+// to reach an application injection sink, lowest first: query params (0), body
+// params (1), cookies (2), any other type — path/entire-body/custom — (3), then
+// request headers last (4). Whole-request modules test points in this order so the
+// highest-value ones run within any time budget.
+func insertionPointPriority(t InsertionPointType) int {
+	switch t {
+	case INS_PARAM_URL:
+		return 0
+	case INS_PARAM_BODY, INS_PARAM_JSON, INS_PARAM_XML, INS_PARAM_XML_ATTR, INS_PARAM_MULTIPART_ATTR, INS_PARAM_AMF:
+		return 1
+	case INS_PARAM_COOKIE:
+		return 2
+	case INS_HEADER:
+		return 4
+	default:
+		return 3
+	}
 }
 
 // InsertionPointRequiresContentLengthUpdate returns whether an insertion point type

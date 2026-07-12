@@ -104,7 +104,7 @@ func (m *Module) ScanPerHost(
 	// code like -32603/-32600 for unknowns — would trip a finding on every single
 	// wordlist entry. `unknownCode` is the error code this server uses for methods
 	// it doesn't implement; matching it means "not found", same as -32601.
-	unknownCode := errMethodNotFound
+	var unknownCode int
 	{
 		controlMethod := "vig-nonexistent-" + utils.RandomString(12)
 		body, _, err := client.PostRaw(mcpinfra.MarshalRequest(4999, controlMethod, map[string]any{}))

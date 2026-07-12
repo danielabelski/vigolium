@@ -42,14 +42,17 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	}
 
 	host := urlx.Host
-	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
-		return nil, nil
-	}
 
 	detected := make(map[cloudProvider][]string)
+	// discloses tracks providers backed by a bucket/account-disclosing indicator
+	// — the request host being a raw storage endpoint, or a storage URL in the
+	// body. Provider headers (x-amz-*, x-goog-*, x-ms-*) and the Server header
+	// only reveal that content is *served through* a cloud CDN/store (every
+	// static asset behind S3+CloudFront carries them) and never name a bucket, so
+	// they are kept as corroboration but never trigger a finding on their own.
+	discloses := make(map[cloudProvider]bool)
 
-	// Check response headers
+	// Check response headers (corroboration only — no bucket disclosure)
 	for _, hp := range headerPatterns {
 		val := ctx.Response().Header(hp.header)
 		if val != "" {
@@ -57,7 +60,7 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		}
 	}
 
-	// Check Server header
+	// Check Server header (corroboration only — no bucket disclosure)
 	serverHeader := ctx.Response().Header("Server")
 	if serverHeader != "" {
 		for _, sp := range serverPatterns {
@@ -67,26 +70,43 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		}
 	}
 
-	// Check if the request host itself is a cloud storage endpoint
+	// Check if the request host itself is a cloud storage endpoint (discloses the bucket host)
 	hostLower := strings.ToLower(host)
 	for _, hp := range hostPatterns {
 		if strings.Contains(hostLower, hp.suffix) {
 			detected[hp.provider] = append(detected[hp.provider], fmt.Sprintf("Host: %s", host))
+			discloses[hp.provider] = true
 		}
 	}
 
-	// Check body for cloud storage URL patterns
+	// Check body for cloud storage URL patterns (discloses bucket/account)
 	body := ctx.Response().BodyToString()
 	if len(body) > 0 && len(body) < 1<<20 {
 		for _, up := range urlPatterns {
 			matches := up.re.FindAllString(body, 5)
 			for _, match := range matches {
 				detected[up.provider] = append(detected[up.provider], fmt.Sprintf("URL in body: %s", match))
+				discloses[up.provider] = true
 			}
 		}
 	}
 
+	// Drop providers detected only via response headers/Server — those are pure
+	// tech fingerprints with no actionable bucket to probe.
+	for provider := range detected {
+		if !discloses[provider] {
+			delete(detected, provider)
+		}
+	}
 	if len(detected) == 0 {
+		return nil, nil
+	}
+
+	// Only now that there is something worth reporting do we consume the per-host
+	// dedup slot, so a header-only response can't silence a later response from
+	// the same host that actually names a bucket.
+	diskSet := m.ds.Get(scanCtx.DedupMgr())
+	if diskSet != nil && diskSet.IsSeen(host) {
 		return nil, nil
 	}
 

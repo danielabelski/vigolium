@@ -24,6 +24,15 @@ func AgentNotice(prefix, message string) {
 		Purple(SymbolBowtie), BoldCyan("["+prefix+"]"), message)
 }
 
+// NoticeArrow prints a prefixed console line to stderr like Notice but with the
+// flow glyph (▷) instead of the info diamond (◆). Used for notices about
+// requests/endpoints being carried forward into a later phase (e.g. jstangle
+// recovering or preserving endpoints for dynamic assessment).
+func NoticeArrow(prefix, message string) {
+	fmt.Fprintf(os.Stderr, "  %s %s %s\n",
+		Purple(SymbolArrow), BoldCyan("["+prefix+"]"), message)
+}
+
 // Global state for terminal capabilities
 var (
 	colorEnabled     = true

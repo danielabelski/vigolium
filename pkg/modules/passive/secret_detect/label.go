@@ -60,15 +60,22 @@ func isHexToken(s string) bool {
 // own; they are the low-signal tier that folds into one per-host bundle.
 const genericRuleIDPrefix = "kingfisher.generic."
 
+// vigoliumGenericRuleIDPrefix is the id namespace of the vigolium-authored generic
+// credential rules appended to the catalog (secretscan.supplementalRules) — the
+// js-miner-derived keyword-assignment matchers. Family-less like the kingfisher
+// generics, so they fold into the same per-host suspect bundle.
+const vigoliumGenericRuleIDPrefix = "vigolium.generic."
+
 // IsGenericSecretRule reports whether a secret-scan rule is a generic,
 // family-less matcher rather than a recognisable provider pattern. True for the
-// generic-namespace rules (see genericRuleIDPrefix) and for a rule that carries
-// no id/name at all (a nameless match has no family to attribute). It is the
-// gate for output.SuspectBundleTag: only these matches collapse into the
-// "Low-confidence secret-shaped matches" bundle, while a named provider family (a
-// Google / Storyblok / Slack rule) stays its own finding even at Suspect severity.
+// generic-namespace rules (see genericRuleIDPrefix / vigoliumGenericRuleIDPrefix)
+// and for a rule that carries no id/name at all (a nameless match has no family to
+// attribute). It is the gate for output.SuspectBundleTag: only these matches
+// collapse into the "Low-confidence secret-shaped matches" bundle, while a named
+// provider family (a Google / Storyblok / Slack rule) stays its own finding even at
+// Suspect severity.
 func IsGenericSecretRule(ruleID, ruleName string) bool {
-	if strings.HasPrefix(ruleID, genericRuleIDPrefix) {
+	if strings.HasPrefix(ruleID, genericRuleIDPrefix) || strings.HasPrefix(ruleID, vigoliumGenericRuleIDPrefix) {
 		return true
 	}
 	return strings.TrimSpace(ruleID) == "" && strings.TrimSpace(ruleName) == ""

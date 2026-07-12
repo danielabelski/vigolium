@@ -16,7 +16,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
-	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
@@ -169,12 +168,12 @@ func TestScanPerInsertionPoint_NoCredentialDowngrade(t *testing.T) {
 	require.NotEmpty(t, res, "a distinct neighbor object is still a lead, just a weaker one without credentials")
 	assert.Equal(t, severity.Medium, res[0].Info.Severity, "no credential crosses no authorization boundary — downgrade to Medium")
 	assert.Equal(t, severity.Tentative, res[0].Info.Confidence)
-	assert.Equal(t, output.RecordKindCandidate, res[0].RecordKind)
 }
 
-// A credential proves authentication, not object ownership. Without a second
-// identity or tenant it remains a candidate rather than a confirmed High.
-func TestScanPerInsertionPoint_CredentialedStillNeedsAuthorizationProof(t *testing.T) {
+// TestScanPerInsertionPoint_CredentialedStaysHigh verifies the converse: when the
+// original request carries a session Cookie, a neighbor object reachable past
+// that credential is a genuine authorization bypass and stays High.
+func TestScanPerInsertionPoint_CredentialedStaysHigh(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -190,9 +189,7 @@ func TestScanPerInsertionPoint_CredentialedStillNeedsAuthorizationProof(t *testi
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.NotEmpty(t, res)
-	assert.Equal(t, severity.Medium, res[0].Info.Severity)
-	assert.Equal(t, severity.Tentative, res[0].Info.Confidence)
-	assert.Equal(t, output.RecordKindCandidate, res[0].RecordKind)
+	assert.Equal(t, severity.High, res[0].Info.Severity, "a credentialed request crossing into another object is a real authorization bypass")
 }
 
 // authedResponse builds an HttpRequestResponse for rawURL carrying a Cookie

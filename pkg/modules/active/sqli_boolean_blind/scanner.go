@@ -1,6 +1,7 @@
 package sqli_boolean_blind
 
 import (
+	"context"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -37,7 +38,8 @@ func isExcludedHeader(ip httpmsg.InsertionPoint) bool {
 
 type Module struct {
 	modkit.BaseActiveModule
-	rhm dedup.Lazy[dedup.RequestHashManager]
+	modkit.RequestScopeContextStubs // no-op ScanPer{InsertionPoint,Host}Context
+	rhm                             dedup.Lazy[dedup.RequestHashManager]
 }
 
 func New() *Module {
@@ -60,6 +62,30 @@ func New() *Module {
 }
 
 func (m *Module) ScanPerRequest(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
+) ([]*output.ResultEvent, error) {
+	return m.scanPerRequest(context.Background(), ctx, httpClient, scanCtx)
+}
+
+// ScanPerRequestContext is the deadline-aware entry point. Insertion points are
+// scanned in priority order (query/body params before cookies before headers), and
+// the loop returns the findings confirmed so far the moment runCtx is cancelled —
+// so a request carrying many insertion points (a browser-captured request has
+// 20+) never loses an already-confirmed injection when the per-module watchdog
+// fires. See pkg/core executor callGuard/runActiveWithTimeout.
+func (m *Module) ScanPerRequestContext(
+	runCtx context.Context,
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
+) ([]*output.ResultEvent, error) {
+	return m.scanPerRequest(runCtx, ctx, httpClient, scanCtx)
+}
+
+func (m *Module) scanPerRequest(
+	runCtx context.Context,
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	scanCtx *modkit.ScanContext,
@@ -108,6 +134,13 @@ func (m *Module) ScanPerRequest(
 
 ipScan:
 	for _, ip := range points {
+		// Per-module deadline reached — return the findings already confirmed
+		// rather than letting the hard watchdog discard the whole result set. The
+		// vulnerable query/body params are tested first (points are priority
+		// ordered), so a confirmed injection survives even under a tight budget.
+		if runCtx.Err() != nil {
+			return results, nil
+		}
 		// Skip content-negotiation request headers (see negotiationHeaders).
 		if isExcludedHeader(ip) {
 			continue

@@ -231,7 +231,7 @@ func (m *Module) probeFile(
 
 	// Strip the reflected request from the body before marker matching: a host
 	// that echoes the requested path or the request body back into its response
-	// (the roche trace.rawaf-test echo server) would otherwise let an injected
+	// (the acme trace.acme.com echo server) would otherwise let an injected
 	// value satisfy a marker ("password" from the request's own JSON body). The
 	// original body is kept for anti-markers and stored evidence.
 	matchBody := modkit.StripReflectedProbePath(body, sf.path)

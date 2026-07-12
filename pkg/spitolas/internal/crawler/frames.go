@@ -2,8 +2,6 @@ package crawler
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/vigolium/vigolium/pkg/spitolas/internal/browser"
@@ -85,27 +83,6 @@ const iframeDiscoverScript = `(() => {
   return JSON.stringify(out);
 })()`
 
-// iframeFetchScript fetches a Go-supplied list of same-origin URLs from the page
-// so the browser's network capture records each one. The %s is replaced with a
-// JSON array of URLs. Bounded concurrency keeps it from flooding the target.
-const iframeFetchScript = `(async () => {
-  const targets = %s;
-  const opts = { credentials: 'include', redirect: 'follow' };
-  let idx = 0, ok = 0;
-  const worker = async () => {
-    while (idx < targets.length) {
-      const u = targets[idx++];
-      try {
-        const r = await fetch(u, opts);
-        try { await r.arrayBuffer(); } catch (e) {}  // drain so the load finishes
-        ok++;
-      } catch (e) {}
-    }
-  };
-  await Promise.all(Array.from({length: Math.min(6, targets.length)}, worker));
-  return ok;
-})()`
-
 // primeIframeAssets harvests the same-origin <iframe>/<frame> sources present in
 // the live DOM and fetches the ones not already primed this crawl, so the
 // network layer records them. It is best-effort: any failure (eval error,
@@ -140,43 +117,9 @@ func (c *Crawler) primeIframeAssets(ctx context.Context, page *browser.Page) {
 	if maxAssets <= 0 {
 		maxAssets = 200
 	}
+	// Phase 2: fetch the new frame URLs in-page so they are captured.
 	toFetch := c.selectUnprimedFrames(discovered, maxAssets)
-	if len(toFetch) == 0 {
-		return
-	}
-
-	payload, err := json.Marshal(toFetch)
-	if err != nil {
-		return
-	}
-	script := fmt.Sprintf(iframeFetchScript, string(payload))
-
-	// Phase 2: fetch the new frame URLs in-page so they are captured. Run on a
-	// goroutine so crawl-context cancellation returns promptly even if CDP is
-	// slow; the eval itself is bounded by iframePrimeTimeout.
-	done := make(chan struct{})
-	var primed interface{}
-	var evalErr error
-	go func() {
-		defer close(done)
-		primed, evalErr = page.EvalAwait(script, iframePrimeTimeout)
-	}()
-
-	select {
-	case <-ctx.Done():
-		zap.L().Debug("Iframe priming aborted by context")
-		return
-	case <-done:
-	}
-
-	if evalErr != nil {
-		zap.L().Debug("Iframe priming failed", zap.Error(evalErr))
-		return
-	}
-	zap.L().Debug("Iframe sources primed",
-		zap.Int("discovered", len(discovered)),
-		zap.Int("fetched", len(toFetch)),
-		zap.Any("ok", primed))
+	c.fetchURLsInPage(ctx, page, toFetch, "iframe")
 }
 
 // selectUnprimedFrames returns the URLs from in that have not been primed yet

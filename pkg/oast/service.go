@@ -1,9 +1,11 @@
 package oast
 
 import (
+	"bytes"
 	"context"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -384,6 +386,13 @@ func (s *Service) handleInteraction(interaction *server.Interaction) {
 	// of a payload's ~5-6 callbacks ever reaches here.
 	originUUID, origin := s.originRecord(pctx.RequestHash)
 
+	// Second annotation seam (the first being refineOASTCallback, which runs pre-emit
+	// on the HTTP leg): downgrade the DNS-only SSRF/smuggle leads whose parameter value
+	// is reflected in the origin response. Kept here rather than in refineOASTCallback
+	// because it needs the origin blobs, which are deliberately loaded only after the
+	// emit gate.
+	conf, desc = refineReflectedHarvestDNS(sev, conf, desc, interaction.Protocol, origin, pctx)
+
 	result := &output.ResultEvent{
 		ModuleID: pctx.ModuleID,
 		URL:      pctx.TargetURL,
@@ -642,8 +651,120 @@ func payloadRequest(raw []byte, pctx PayloadContext, proto string) string {
 		if out, err := httpmsg.AddOrReplaceHeader(raw, pctx.ParameterName, value); err == nil {
 			return string(out)
 		}
+	case pctx.ParameterName != "" && pctx.Payload != "":
+		// Query / body / cookie / JSON parameter injection. Re-apply the recorded
+		// payload at the named insertion point using the SAME builder the planting
+		// module used, so the Request panel shows the exact wire form the target
+		// received — the smuggle payload's literal CR/LF query-encoded (%0D%0A), the
+		// original crawl value replaced — instead of the untouched crawl request.
+		// Without this, a parameter-based OAST finding (e.g. SSRF protocol-smuggling
+		// on a refURL parameter) rendered the original request whose parameter still
+		// held its benign value, so the panel never showed what was injected.
+		if out := rebuildParamRequest(raw, pctx.ParameterName, pctx.Payload); out != "" {
+			return out
+		}
 	}
 	return string(raw)
+}
+
+// isParamInsertionPoint reports whether t is a named request/body/cookie parameter
+// insertion point — the classes whose value payloadRequest can re-inject and
+// paramValueReflected can look for reflected in the response.
+func isParamInsertionPoint(t httpmsg.InsertionPointType) bool {
+	switch t {
+	case httpmsg.INS_PARAM_URL, httpmsg.INS_PARAM_BODY, httpmsg.INS_PARAM_COOKIE,
+		httpmsg.INS_PARAM_JSON, httpmsg.INS_PARAM_XML, httpmsg.INS_PARAM_XML_ATTR,
+		httpmsg.INS_PARAM_MULTIPART_ATTR:
+		return true
+	default:
+		return false
+	}
+}
+
+// paramInsertionPointsByName returns the query/body/cookie parameter insertion
+// points of raw whose name case-insensitively matches name. Shared by
+// rebuildParamRequest and paramValueReflected so both target the same surface;
+// returns nil on a parse failure, empty input, or when nothing matches.
+func paramInsertionPointsByName(raw []byte, name string) []httpmsg.InsertionPoint {
+	if len(raw) == 0 || name == "" {
+		return nil
+	}
+	ips, err := httpmsg.CreateAllInsertionPoints(raw, false)
+	if err != nil {
+		return nil
+	}
+	var out []httpmsg.InsertionPoint
+	for _, ip := range ips {
+		if strings.EqualFold(ip.Name(), name) && isParamInsertionPoint(ip.Type()) {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// rebuildParamRequest re-applies payload at the named parameter insertion point of
+// raw and returns the reconstructed request, or "" when raw has no matching
+// query/body/cookie parameter (the caller then keeps the original request). It uses
+// the same InsertionPoint.BuildRequest path the planting module used, so the wire
+// encoding — including the query-encoding of a smuggling payload's literal CR/LF —
+// is byte-identical to the request that fired the callback.
+func rebuildParamRequest(raw []byte, name, payload string) string {
+	for _, ip := range paramInsertionPointsByName(raw, name) {
+		if built := ip.BuildRequest([]byte(payload)); len(built) > 0 {
+			return string(built)
+		}
+	}
+	return ""
+}
+
+// paramValueReflected reports whether the base value of the named parameter (as it
+// appeared in rawReq) is reflected in rawResp. A reflected URL parameter is the
+// dominant benign source of a DNS-only SSRF/smuggle OAST callback: the injected
+// http://<oast> value lands in the response and a URL-scanning / link-preview /
+// threat-intel pipeline parses it and resolves the host, producing a DNS callback
+// with no server-side fetch behind it. Both the raw and URL-decoded value forms are
+// checked so it fires whether the response echoes the value encoded or decoded;
+// values shorter than a threshold are ignored (too short to be a distinctive
+// reflection). Matched directly against the raw response bytes to avoid copying a
+// large response body.
+func paramValueReflected(rawReq, rawResp []byte, name string) bool {
+	if len(rawResp) == 0 {
+		return false
+	}
+	for _, ip := range paramInsertionPointsByName(rawReq, name) {
+		v := strings.TrimSpace(ip.BaseValue())
+		if len(v) < 8 { // too short to be a distinctive reflection
+			continue
+		}
+		if bytes.Contains(rawResp, []byte(v)) {
+			return true
+		}
+		if dec, err := url.QueryUnescape(v); err == nil && dec != v && len(dec) >= 8 && bytes.Contains(rawResp, []byte(dec)) {
+			return true
+		}
+	}
+	return false
+}
+
+// refineReflectedHarvestDNS is the reflected-URL harvest annotation for the
+// low-signal DNS-only SSRF/smuggle leads. When the injected URL parameter's value is
+// reflected in the origin response, the dominant explanation for a DNS-only callback
+// is a URL-scanning / link-preview / threat-intel pipeline that parsed the reflected
+// http://<oast> value and resolved its host — not a server-side fetch — so it drops
+// confidence to Tentative and appends that caveat. Scoped to Info/DNS findings
+// (generic blind SSRF + protocol-smuggling); the specific-fetcher classes
+// (XXE/SQLi/JWT/command injection) are rated above Info on the DNS leg and keep their
+// own handling. Returns (conf, desc) unchanged when the finding is out of scope, the
+// origin is missing, or nothing is reflected — it only ever annotates (severity and
+// the emission key are untouched).
+func refineReflectedHarvestDNS(sev severity.Severity, conf severity.Confidence, desc, protocol string, origin *database.HTTPRecord, pctx PayloadContext) (severity.Confidence, string) {
+	if sev != severity.Info || strings.ToLower(protocol) != "dns" || origin == nil {
+		return conf, desc
+	}
+	if !paramValueReflected(origin.RawRequest, origin.RawResponse, pctx.ParameterName) {
+		return conf, desc
+	}
+	return severity.Tentative, desc + " The parameter's value is reflected in the origin response, so this DNS lookup is most likely a URL-scanning / link-preview / threat-intel pipeline resolving the harvested reflected URL rather than a server-side fetch (harvested-reflected-URL false positive)."
 }
 
 // describeInjectedPayload renders a one-line "<payload> (<where>)" summary of the
@@ -681,10 +802,28 @@ func payloadOr(payload, fallback, suffix string) string {
 // payloads carry literally — most notably the SSRF protocol-smuggling templates.
 var oneLineReplacer = strings.NewReplacer("\r", `\r`, "\n", `\n`, "\t", `\t`)
 
+// maxAnchorPayloadLen caps how many runes of a recorded payload the injected_payload
+// anchor renders on its single line. The FULL payload is still used to reconstruct
+// the Request panel (payloadRequest / rebuildParamRequest); this only bounds the
+// one-line summary so a large recorded payload — e.g. a re-encoded SAML assertion
+// carrying an XXE DTD — cannot expand the anchor to kilobytes of base64.
+const maxAnchorPayloadLen = 300
+
 // oneLinePayload renders a recorded payload as a single, readable line in the
 // injected_payload anchor so it never injects raw newlines into plain-text output.
+// Payloads longer than maxAnchorPayloadLen runes are truncated (on a rune boundary,
+// so a multi-byte payload is never split mid-rune) with a byte-count suffix.
 func oneLinePayload(s string) string {
-	return oneLineReplacer.Replace(s)
+	out := oneLineReplacer.Replace(s)
+	// Byte length is always >= rune count, so a short payload (the common case — a
+	// bare URL) returns without the []rune allocation the truncation path needs.
+	if len(out) <= maxAnchorPayloadLen {
+		return out
+	}
+	if r := []rune(out); len(r) > maxAnchorPayloadLen {
+		return string(r[:maxAnchorPayloadLen]) + "…(" + strconv.Itoa(len(s)) + " bytes total)"
+	}
+	return out
 }
 
 // isHeaderInjection reports whether the payload was planted in a named request
@@ -821,6 +960,22 @@ func classifyInteraction(protocol string, pctx PayloadContext) (severity.Severit
 	if hostRoutingSSRF && (proto == "http" || proto == "https") {
 		return severity.Info, severity.Certain, "Blind SSRF / host-header reflection: an outbound HTTP request reached the OAST server for a value placed on the request line or a proxy-reflected host header (" + injectionDesc +
 			"). Reverse proxies commonly reflect these into a redirect Location / upstream URL that the proxy (or a redirect-following client) then fetches, so impact is usually low and this is often not a server-side SSRF — reported as informational."
+	}
+
+	// SSRF protocol-smuggling probes (CRLF / cross-protocol URL) that call back over
+	// DNS only. A DNS lookup can never evidence the smuggle: cross-protocol smuggling
+	// requires a TCP connection to the smuggled port (redis 6379 / smtp 25 /
+	// memcached 11211) carrying the CRLF-injected commands, and no OAST collector
+	// answers those ports — only the name-resolution step before any connection is
+	// ever captured. These payloads also target URL-like parameters that are commonly
+	// reflected into the response, where a URL-scanning / link-preview / threat-intel
+	// pipeline resolves the host with no server-side fetch behind it. So a DNS-only
+	// smuggle callback is an unconfirmed lead, not a confirmed smuggle. (An HTTP-leg
+	// callback still means an actual outbound fetch and keeps the generic-SSRF rating
+	// below.)
+	if proto == "dns" && strings.Contains(strings.ToLower(pctx.InjectionType), "smuggle") {
+		return severity.Info, severity.Tentative, "DNS-only OAST callback for an SSRF protocol-smuggling probe (" + injectionDesc +
+			"). DNS resolution alone cannot confirm cross-protocol smuggling, which requires a connection to the smuggled port (redis/smtp/memcached) that no OAST collector answers. The payload sits in a URL-like parameter, so the lookup is commonly a URL-scanning / preview / threat-intel pipeline resolving the reflected value rather than a server-side fetch — treat as an unconfirmed lead and confirm with an in-band signal or an HTTP-fetch callback."
 	}
 
 	switch proto {

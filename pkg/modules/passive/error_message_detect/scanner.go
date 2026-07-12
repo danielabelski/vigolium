@@ -35,6 +35,14 @@ var errorSignatures = []errorSignature{
 			regexp.MustCompile(`(?i)\bORA-[0-9]{5}\b`),
 			regexp.MustCompile(`(?i)(?:PSQLException|MySqlClient\.|Npgsql\.|SQLiteException|DB2 SQL error|Dynamic SQL Error)`),
 			regexp.MustCompile(`(?i)(?:Unclosed quotation mark|Unknown column|relation ["'][^"']+["'] does not exist)`),
+			// Node.js / ORM error leaks (Express+Sequelize, NestJS, Strapi, Ghost).
+			// These emit the driver error code and the Sequelize exception class
+			// verbatim rather than the classic MySQL/Oracle phrasings above.
+			regexp.MustCompile(`\bSQLITE_ERROR\b`),
+			regexp.MustCompile(`\bSequelize[A-Za-z]*Error\b`),
+			regexp.MustCompile(`\bsqlite3\.[A-Za-z]*Error\b`),
+			regexp.MustCompile(`(?i)\bunrecognized token:`),
+			regexp.MustCompile(`\bPG::[A-Za-z]+Error\b`),
 		},
 		corroborating: []*regexp.Regexp{
 			regexp.MustCompile(`(?i)\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN|query|column|table|relation)\b`),

@@ -116,3 +116,41 @@ func TestDefaultCompareOptions(t *testing.T) {
 	assert.Equal(t, 0.8, opts.SimilarityThreshold)
 	assert.NotEmpty(t, opts.UserSpecificFields)
 }
+
+// TestCompareResponses_JSONShapeStructuralIdentity verifies that two instances of
+// the same JSON resource type are structurally identical even when their body
+// lengths differ enough to fail the 0.8 length ratio — the Juice Shop basket-IDOR
+// case (basket with 3 items vs a basket with different content).
+func TestCompareResponses_JSONShapeStructuralIdentity(t *testing.T) {
+	opts := DefaultCompareOptions()
+
+	big := []byte(`{"status":"success","data":{"id":6,"coupon":null,"UserId":24,"Products":[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]}}`)
+	small := []byte(`{"status":"success","data":{"id":5,"coupon":null,"UserId":16,"Products":[{"id":9,"name":"z"}]}}`)
+	base := SummarizeResponse(200, "application/json", big)
+	probe := SummarizeResponse(200, "application/json", small)
+
+	comp := CompareResponses(base, probe, opts)
+	if comp.ContentIdentical {
+		t.Fatal("bodies differ; ContentIdentical must be false")
+	}
+	if comp.BodyLengthRatio >= opts.SimilarityThreshold {
+		t.Skip("bodies happened to be within the length threshold; test not exercising the shape branch")
+	}
+	if !comp.StructurallyIdentical {
+		shape, keys := jsonShapeSignature(big)
+		t.Errorf("same-shape JSON of different sizes must be StructurallyIdentical (shape=%q, keys=%d)", shape, keys)
+	}
+
+	// A different shape (empty/nonexistent basket, data:null) must NOT be identical.
+	empty := SummarizeResponse(200, "application/json", []byte(`{"status":"success","data":null}`))
+	if CompareResponses(base, empty, opts).StructurallyIdentical {
+		t.Error("a differently-shaped response (data:null) must not be structurally identical")
+	}
+
+	// A trivial shared shape (<3 keys) must not assert identity on its own.
+	e1 := SummarizeResponse(200, "application/json", []byte(`{"error":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`))
+	e2 := SummarizeResponse(200, "application/json", []byte(`{"error":"b"}`))
+	if CompareResponses(e1, e2, opts).StructurallyIdentical {
+		t.Error("a trivial 1-key shared shape must not assert structural identity")
+	}
+}

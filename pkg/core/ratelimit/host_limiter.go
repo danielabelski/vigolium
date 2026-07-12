@@ -66,6 +66,13 @@ type hostEntry struct {
 	healthy  atomic.Int64  // consecutive healthy completions since last change
 	lastDecr atomic.Int64  // unix nanos of last decrease (back-off cooldown)
 	mu       sync.Mutex    // serializes setLimit; never held on the acquire hot path
+
+	// armed gates AIMD adjustment for this host. newEntry stores h.adaptive into it:
+	// plain Adaptive hosts start armed (adjust from the first request); WAF-auto-arm
+	// hosts start unarmed — pinned at MaxPerHost, behaving exactly like the static
+	// limiter — until a confirmed WAF block on this host flips it true (in Feedback),
+	// at which point AIMD back-off/recovery engages.
+	armed atomic.Bool
 }
 
 func (e *hostEntry) touch() {
@@ -113,8 +120,61 @@ type HostRateLimiter struct {
 	minPerHost     int
 	ceilingPerHost int
 
+	// preArmDisabled turns off the proactive edge-fingerprint pacing (PreArm) while
+	// leaving reactive WAF-block back-off (Feedback) untouched. Set from
+	// HostRateLimiterConfig.DisablePreArm (the --no-waf-pacing flag).
+	preArmDisabled bool
+
+	// wafAutoArm enables targeted adaptive throttling that stays dormant until a
+	// confirmed WAF/CDN block. With it on (and adaptive off), every host uses the
+	// adaptive token pool pinned at MaxPerHost — identical concurrency to the static
+	// limiter — until a WAF block on that host arms it (via Feedback's wafBlocked
+	// flag), after which the host AIMD-backs-off like adaptive mode and recovers to
+	// MaxPerHost. A non-WAF scan therefore sees no change in behavior. Mutually
+	// exclusive with adaptive: NewHostRateLimiter normalizes it to
+	// cfg.WafAutoArm && !cfg.Adaptive, so plain Adaptive mode always wins.
+	wafAutoArm bool
+
+	// anyArmed is a global fast-path flag: false until the first host anywhere is
+	// armed by a WAF block. While false, Feedback skips the per-host shard lookup for
+	// every non-block response, keeping the common non-WAF hot path ~free even though
+	// wafAutoArm puts all hosts on the adaptive token pool. Monotonic (never reset):
+	// once any WAF block is seen the target is treated as WAF'd for the run.
+	anyArmed atomic.Bool
+
+	// preArmSink, when set, is invoked once per host the first time PreArm throttles
+	// it for a CDN/WAF edge, so a front-end can tell the operator that host's
+	// active-scan concurrency was reduced (the scan will pace it). It lives on the
+	// limiter — not a requester — because the limiter is the single shared object
+	// every requester feeds, so the notice fires exactly once per host no matter which
+	// requester tripped the pre-arm. Set once during setup before concurrency starts
+	// (same contract as the requester's block-notifier sink); read on the request
+	// goroutine that arms the host.
+	preArmSink func(PreArmNotice)
+
 	stopEvict chan struct{}
 	evictWg   conc.WaitGroup
+}
+
+// PreArmNotice describes a proactive pacing adjustment. The first time a host is
+// fingerprinted behind a CDN/WAF edge, PreArm drops its per-host concurrency from
+// From to Start (ramping back toward Ceiling on healthy traffic). It is passed to the
+// sink registered via SetPreArmNotifier, once per host.
+type PreArmNotice struct {
+	Host    string // host being paced
+	Vendor  string // fingerprinted edge vendor (e.g. "cloudfront"); "" if unknown
+	From    int    // per-host concurrency before the pre-arm (the ceiling/MaxPerHost)
+	Start   int    // reduced per-host concurrency the host is dropped to
+	Ceiling int    // limit the host ramps back toward on healthy traffic
+}
+
+// SetPreArmNotifier installs a sink invoked once per host the first time PreArm
+// throttles it for a CDN/WAF edge. It lets a front-end warn the operator that the
+// scan will pace (run slower against) that host. The sink runs on the request
+// goroutine, so it must be cheap and non-blocking. Call once during setup, before
+// scanning concurrency starts; a nil sink is a no-op.
+func (h *HostRateLimiter) SetPreArmNotifier(sink func(PreArmNotice)) {
+	h.preArmSink = sink
 }
 
 // HostRateLimiterConfig configures the HostRateLimiter.
@@ -137,6 +197,18 @@ type HostRateLimiterConfig struct {
 	// adaptive never exceeds the configured concurrency). Set above MaxPerHost to
 	// let healthy hosts ramp past it. Ignored when Adaptive is false.
 	CeilingPerHost int
+
+	// WafAutoArm enables WAF-triggered adaptive throttling: hosts run at the static
+	// MaxPerHost until a confirmed WAF/CDN block arms per-host AIMD back-off. Safe to
+	// leave on for every scan — a host that never trips a WAF behaves exactly like the
+	// static limiter. Bounds reuse MinPerHost/CeilingPerHost. Redundant under Adaptive.
+	WafAutoArm bool
+
+	// DisablePreArm turns off only the PROACTIVE pacing (PreArm on a CDN/WAF-edge
+	// fingerprint) while leaving the reactive WAF-block back-off intact. Wired from the
+	// `--no-waf-pacing` CLI flag for operators who would rather keep full opening
+	// concurrency and let the reactive path throttle after the first block.
+	DisablePreArm bool
 }
 
 // DefaultHostRateLimiterConfig returns sensible defaults.
@@ -186,6 +258,10 @@ func NewHostRateLimiter(cfg HostRateLimiterConfig) *HostRateLimiter {
 		adaptive:       cfg.Adaptive,
 		minPerHost:     minPerHost,
 		ceilingPerHost: ceilingPerHost,
+		// Mutually exclusive with Adaptive — plain Adaptive already arms every host,
+		// so WAF-auto-arm is only meaningful when Adaptive is off.
+		wafAutoArm:     cfg.WafAutoArm && !cfg.Adaptive,
+		preArmDisabled: cfg.DisablePreArm,
 		stopEvict:      make(chan struct{}),
 	}
 

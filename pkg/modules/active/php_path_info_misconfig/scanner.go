@@ -51,7 +51,7 @@ type notFoundFingerprint struct {
 // blanket catch-all check issues. Multiple rounds turn a single flaky
 // WAF/CDN/cache response into a majority vote, and — crucially — key the verdict
 // on status alone, so it survives the gzip/Content-Length:0 body-truncation quirk
-// that defeats a body-similarity compare (the roche trace.rawaf-test echo server,
+// that defeats a body-similarity compare (the acme trace.acme.com echo server,
 // which returned 200 for every path but a differently-truncated body each time).
 const catchAllRounds = 3
 

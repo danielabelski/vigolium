@@ -126,8 +126,8 @@ func TestScanPerRequest_NoFalsePositive_CatchAll(t *testing.T) {
 	assert.Empty(t, res, "a blanket 200 for any *.php path (catch-all) must not be reported as PATH_INFO misconfig")
 }
 
-// TestScanPerRequest_NoFP_UniversalReflector reproduces the roche
-// trace.rawaf-test catch-all: EVERY path (not just *.php) returns 200 with a
+// TestScanPerRequest_NoFP_UniversalReflector reproduces the acme
+// trace.acme.com catch-all: EVERY path (not just *.php) returns 200 with a
 // per-request echo body, and — mimicking the gzip/Content-Length:0 truncation
 // quirk — each response is a differently-sized fragment, so the 404-fingerprint
 // and body-similarity guards cannot fire. Only the status-only, multi-round

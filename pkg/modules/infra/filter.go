@@ -31,7 +31,7 @@ func IsValidForInjectionVulns(urlx *urlutil.URL, ctx *httpmsg.HttpRequestRespons
 // origin application. Cloudflare's `/cdn-cgi/` prefix hosts bot-challenge, RUM,
 // email-decode and trace endpoints whose bodies are opaque, per-request, encrypted
 // blobs; probing them for injection is meaningless and the non-deterministic
-// responses fool boolean/timing oracles (the evr-kr.roche.com /cdn-cgi/challenge-
+// responses fool boolean/timing oracles (the evr-kr.acme.com /cdn-cgi/challenge-
 // platform XPath false positive). No application injection sink ever lives here, so
 // injection modules skip these paths wholesale.
 func IsCDNInfraPath(path string) bool {

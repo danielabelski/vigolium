@@ -130,9 +130,6 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 					URL:              urlx.String(),
 					FuzzingParameter: key,
 					Request:          string(ctx.Request().Raw()),
-					RecordKind:       output.RecordKindObservation,
-					EvidenceGrade:    output.EvidenceGradeObservation,
-					DedupKey:         "open-redirect-candidate|" + urlx.Host + "|" + urlx.Path + "|" + key,
 				})
 			}
 		}

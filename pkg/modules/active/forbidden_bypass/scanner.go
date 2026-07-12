@@ -189,6 +189,15 @@ func bypassPath(urlx *urlutil.URL, ctx *httpmsg.HttpRequestResponse, httpClient 
 				resp.Close()
 				return results, nil
 			}
+			// Path-shape catch-all guard: confirmDistinctFromCatchAll probes a CLEAN
+			// random path and so misses a host that soft-serves one 200 only for the
+			// MANGLED path shape while 404-ing clean unknown paths. Re-apply this
+			// payload to a random base (see confirmDistinctFromShapeCatchAll); a
+			// matching 200 is generic to the shape, so try the next payload.
+			if !confirmDistinctFromShapeCatchAll(httpClient, ctx.Service(), ctx.Request().Raw(), payload, path, 200, body) {
+				resp.Close()
+				continue
+			}
 			// Clean-canonical control: re-verify the ORIGINAL clean path is STILL
 			// access-controlled. The 401/403 baseline was captured at crawl time;
 			// if it was transient (rate-limit / WAF / deploy) and the bare path is
@@ -794,6 +803,50 @@ func confirmDistinctFromCatchAll(
 	}
 	if modkit.BodiesSimilar(bypassBody, body) {
 		return false // same shell for an unprivileged random path → catch-all, drop
+	}
+	return true
+}
+
+// confirmDistinctFromShapeCatchAll reports whether a candidate path-bypass 200 is
+// tied to the targeted resource rather than a generic body the host serves for the
+// PAYLOAD'S PATH SHAPE regardless of which resource it decorates.
+// confirmDistinctFromCatchAll probes a CLEAN random path, so it misses a reverse
+// proxy / CDN / SPA that soft-serves a 200 ONLY for mangled paths (`/admin..;/`,
+// `/./admin`, `//admin`) while answering a clean unknown path with a normal 404 —
+// the acme/Salesforce false-positive shape, where `/<anything>..;/` returns one
+// base-independent error page. It re-applies the SAME payload transformation to a
+// same-depth random base (substituting the protected path inside the payload) and,
+// if that unprivileged same-shape control returns the SAME status AND an
+// indistinguishable body, the 200 is generic to the shape (not a bypass of the
+// resource) and it returns false (drop this payload). Fails OPEN (true) when a
+// same-shape control cannot be derived — the payload does not embed the path
+// verbatim (e.g. an upper-cased path) or the path is the bare root — or on any
+// transport error, so a real bypass is never suppressed.
+func confirmDistinctFromShapeCatchAll(
+	httpClient *http.Requester,
+	service *httpmsg.Service,
+	baseRaw []byte,
+	payload, origPath string,
+	bypassStatus int,
+	bypassBody string,
+) bool {
+	if strings.Trim(origPath, "/") == "" || !strings.Contains(payload, origPath) {
+		return true // no embedded path to randomize (root path / upper-cased) — don't suppress
+	}
+	shapePayload := strings.Replace(payload, origPath, modkit.RandomSameDepthPath(origPath), 1)
+	controlRaw, err := httpmsg.SetPath(baseRaw, shapePayload)
+	if err != nil {
+		return true // inconclusive — don't suppress
+	}
+	status, body, ok := modkit.ExecuteRaw(httpClient, service, controlRaw, http.Options{NoRedirects: true, NoClustering: true})
+	if !ok {
+		return true // inconclusive transient error — don't suppress
+	}
+	if status != bypassStatus {
+		return true // the same shape on a random base answers differently → resource-specific, keep
+	}
+	if modkit.BodiesSimilar(bypassBody, body) {
+		return false // same body for the shape on an unrelated base → shape catch-all, drop
 	}
 	return true
 }

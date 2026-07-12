@@ -16,7 +16,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
-	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
@@ -146,7 +145,6 @@ func TestScanPerInsertionPoint_NoCredentialTentative(t *testing.T) {
 	require.NotEmpty(t, res)
 	assert.Equal(t, severity.Medium, res[0].Info.Severity)
 	assert.Equal(t, severity.Tentative, res[0].Info.Confidence, "an unauthenticated predictable-id hit is a Tentative lead, not Firm")
-	assert.Equal(t, output.RecordKindCandidate, res[0].RecordKind)
 }
 
 // keycloakLoginBody is a trimmed Keycloak Sign-In form — the page the predicted

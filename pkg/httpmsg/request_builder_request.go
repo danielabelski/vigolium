@@ -150,6 +150,16 @@ func GetURLFromService(request []byte, httpService *Service) (*urlutil.URL, erro
 		return nil, fmt.Errorf("failed to extract path: %w", err)
 	}
 
+	// Absolute-form request target (RFC 9112 §3.2.2, the proxy-style
+	// "GET http://host/path HTTP/1.1" some Burp/proxy exports emit): the request
+	// line already carries the full URL, so parse it directly. Prepending
+	// scheme://host as below would double it into an invalid URL (e.g.
+	// "http://host:8899http://host:8899/path" → "invalid port"), which silently
+	// dropped the whole request from the scan.
+	if isAbsoluteFormTarget(path) {
+		return urlutil.ParseAbsoluteURL(path, false)
+	}
+
 	// If path is empty, default to "/"
 	if path == "" {
 		path = "/"
@@ -175,6 +185,14 @@ func GetURLFromService(request []byte, httpService *Service) (*urlutil.URL, erro
 
 	// Parse into urlutil.URL to populate all fields (including Params)
 	return urlutil.ParseAbsoluteURL(b.String(), false)
+}
+
+// isAbsoluteFormTarget reports whether a request-line target is in absolute form
+// (already a full http:// or https:// URL) rather than the usual origin form
+// ("/path?query"). Case-insensitive on the scheme.
+func isAbsoluteFormTarget(target string) bool {
+	return len(target) >= 7 && strings.EqualFold(target[:7], "http://") ||
+		len(target) >= 8 && strings.EqualFold(target[:8], "https://")
 }
 
 // GetHTTPVersion extracts the HTTP version from a request.

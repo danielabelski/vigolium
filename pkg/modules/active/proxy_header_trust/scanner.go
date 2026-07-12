@@ -540,10 +540,7 @@ func (m *Module) confirmForwardedProtoChange(
 		return false
 	}
 	negControl.Add("negative control: X-Forwarded-Proto: http (benign value)", control.rawRequest, control.fullResponse)
-	if control.status != baselineStatus {
-		return false
-	}
-	return true
+	return control.status == baselineStatus
 }
 
 // captureFetch issues a GET / optionally carrying one header, bypasses cached

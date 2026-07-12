@@ -195,7 +195,7 @@ func (m *Module) ScanPerInsertionPoint(
 	// A fixed browser request header (Accept-Language, User-Agent, Accept, ...) is
 	// attacker-settable but never an XPath sink — no application concatenates it into
 	// an XPath expression. On a CDN/challenge endpoint its value is reflected into a
-	// per-request opaque body that fools the boolean oracle (the evr-kr.roche.com
+	// per-request opaque body that fools the boolean oracle (the evr-kr.acme.com
 	// Accept-Language /cdn-cgi false positive). Skip standard request headers.
 	if ip.Type() == httpmsg.INS_HEADER && infra.IsStandardRequestHeader(ip.Name()) {
 		return nil, nil

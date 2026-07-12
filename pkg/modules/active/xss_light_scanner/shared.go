@@ -42,6 +42,14 @@ func sendRawPayload(
 	return resp, nil
 }
 
+// isRedirect reports whether code is a 3xx redirect. A navigating browser follows
+// a redirect without ever rendering its body, so a reflection there can't execute —
+// the one status class both the detection send and the confirmation send skip.
+// 4xx/5xx pages, by contrast, ARE rendered and their scripts run, so they are not
+// skipped. Shared by sendAndValidateRawPayload (detection) and sendExec (confirm) so
+// the two can't drift.
+func isRedirect(code int) bool { return code >= 300 && code < 400 }
+
 // sendAndValidateRawPayload sends a literal payload string and validates the
 // response. Returns nil body if the response should be skipped (redirect,
 // empty, wrong content type). The string-based core of sendAndValidatePayload.
@@ -60,9 +68,8 @@ func sendAndValidateRawPayload(
 	}
 	defer resp.Close()
 
-	// Skip 3xx redirects
-	statusCode := resp.Response().StatusCode
-	if statusCode >= 300 && statusCode < 400 {
+	// Skip 3xx redirects (body not rendered by a browser).
+	if isRedirect(resp.Response().StatusCode) {
 		return nil, nil
 	}
 

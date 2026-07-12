@@ -313,6 +313,7 @@ func runLocalIngest(cmd *cobra.Command, _ []string) error {
 	opts.Debug = globalDebug
 	opts.DumpTraffic = globalDumpTraffic
 	opts.MaxPerHost = globalMaxPerHost
+	opts.NoWafPacing = globalNoWafPacing
 
 	if err := network.Init(opts); err != nil {
 		return fmt.Errorf("failed to initialize network: %w", err)
@@ -736,6 +737,7 @@ func runLocalIngestScan(settings *config.Settings, db *database.DB, repo *databa
 	opts.DumpTraffic = globalDumpTraffic
 	opts.JSONOutput = globalJSON
 	opts.MaxPerHost = globalMaxPerHost
+	opts.NoWafPacing = globalNoWafPacing
 	opts.MaxHostError = globalMaxHostError
 	opts.MaxFindingsPerModule = globalMaxFindingsPerModule
 	opts.ConfigPath = globalConfig

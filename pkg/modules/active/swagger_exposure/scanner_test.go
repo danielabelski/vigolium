@@ -121,7 +121,7 @@ func TestScanPerRequest_NoFP_SlugReflectingRoute(t *testing.T) {
 }
 
 // TestScanPerRequest_NoFP_RootLevelReflectingShell reproduces the ROOT-level slug
-// reflection the sub-directory test above does not cover — the branding.roche.com
+// reflection the sub-directory test above does not cover — the branding.acme.com
 // class. A path-reflecting SPA/CMS shell returns one 200 page for every unknown
 // route and echoes the requested slug into it, so /redoc and /swagger-ui/ return the
 // shell with "redoc"/"swagger-ui" reflected, self-matching those UI markers with no

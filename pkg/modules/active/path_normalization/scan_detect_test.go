@@ -26,6 +26,13 @@ import (
 // to a distinct internal resource (200 with a unique body). Every other path —
 // the baseline, root, and the non-existent probe — returns a uniform 404 page,
 // so the internal 200 fingerprint is clearly anomalous.
+//
+// Crucially, the internal resource is reached ONLY for traversal that lands in the
+// real "/app/" directory tree; a traversal from a nonexistent sibling directory
+// 404s. This is the realistic shape (the reached resource depends on which real
+// ancestor the traversal collapses into) and distinguishes a genuine bypass from a
+// host that serves ONE generic body for any traversal shape regardless of base —
+// the latter is a false positive, exercised separately below.
 func normalizationHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		raw := r.URL.RequestURI()
@@ -39,9 +46,16 @@ func normalizationHandler() http.HandlerFunc {
 			// Even repetitions: rejected by the proxy (public view).
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte("<html><head><title>Bad Request</title></head><body>400</body></html>"))
+		case !strings.HasPrefix(raw, "/app/"):
+			// Odd repetitions from a base outside the real "/app/" tree reach no
+			// resource — the reached resource is ancestor-specific, not a generic
+			// body served for the traversal shape.
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("<html><head><title>Not Found</title></head><body>404</body></html>"))
 		default:
-			// Odd repetitions: normalize through to an internal resource with a
-			// distinctive body/title so its fingerprint diverges from the refs.
+			// Odd repetitions within the real tree normalize through to an internal
+			// resource with a distinctive body/title so its fingerprint diverges
+			// from the refs.
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("<html><head><title>Internal Admin Console</title></head><body>" +
@@ -129,15 +143,25 @@ func differentialHandler() http.HandlerFunc {
 	internal := "INTERNAL ADMIN DASHBOARD " + strings.Repeat("privileged-internal-operation ", 80)
 	public := "<html><body>public landing page</body></html>"
 	return func(w http.ResponseWriter, r *http.Request) {
-		switch strings.Count(r.URL.RequestURI(), "..;/") {
+		raw := r.URL.RequestURI()
+		switch strings.Count(raw, "..;/") {
 		case 0:
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(public))
 		case 1:
+			// The internal resource is reached only when the traversal lands in the
+			// real "/app/" tree; a traversal from a nonexistent sibling directory
+			// returns the ordinary public page (not the internal resource), so the
+			// finding tracks an ancestor-specific resource rather than a generic body
+			// served for any traversal shape.
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(internal))
+			if strings.HasPrefix(raw, "/app/") {
+				_, _ = w.Write([]byte(internal))
+			} else {
+				_, _ = w.Write([]byte(public))
+			}
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte("bad request"))
@@ -346,6 +370,78 @@ func TestScanPerRequest_NoFalsePositiveResolvesToRoot(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "an upward traversal that normalizes to the public homepage must not be reported, even when the initial root reference was rate-limited")
+}
+
+// traversalShapeCatchAllHandler reproduces the reported false positive
+// (dialog1.acme.com, a Salesforce Lightning site behind a reverse proxy). An
+// upward `..%2f` traversal with no target suffix collapses to the site root, but
+// the proxy sees the raw traversal-shaped path and renders a GENERIC error page
+// ("This feature is not available in your country") for it — a body that is
+// BYTE-IDENTICAL for every base segment (`/111213..%2f..%2f`,
+// `/auraCmpDef..%2f..%2f`, `/DLG_Access_Login..%2f..%2f` all returned the same
+// 1365-byte page in the field). Meanwhile the clean base path serves a large,
+// distinct resource and the clean site root serves the real homepage, so the
+// clean-root reference guards never match the error page. No resource the clean
+// URL could not otherwise reach is exposed — the "reached resource" is the host's
+// generic reaction to the traversal shape.
+func traversalShapeCatchAllHandler() http.HandlerFunc {
+	// Base-INDEPENDENT generic error page served for any collapsed traversal.
+	errPage := "<html><head><title>Welcome</title></head><body>" +
+		"<span class=\"error-msg-box\">This feature is not available in your country.</span>" +
+		"</body></html>"
+	homepage := "<html><body>" + strings.Repeat("real public homepage content here ", 40) + "</body></html>"
+	cleanResource := "<html><body>" + strings.Repeat("large distinct aura component definition payload ", 200) + "</body></html>"
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw := r.URL.RequestURI()
+		switch k := strings.Count(raw, "..%2f"); {
+		case k >= 3:
+			// Over-traversed: overshoots the root, rejected as malformed.
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("bad request"))
+		case k == 2:
+			// Backed-off traversal collapses to root; the proxy renders a generic
+			// error page for the traversal-shaped path — identical for any base.
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(errPage))
+		case k == 1:
+			// A single `..%2f` leaves a literal weird segment that maps to nothing.
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("<html><body>404 not found</body></html>"))
+		case raw == "/":
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(homepage))
+		case raw == "/auraCmpDef":
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(cleanResource))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("<html><body>404 not found</body></html>"))
+		}
+	}
+}
+
+// TestScanPerRequest_NoFalsePositiveTraversalShapeCatchAll is the regression guard
+// for the reported dialog1.acme.com false positives: a host that serves ONE
+// generic error page for any collapsed upward traversal (identical regardless of
+// base segment) must NOT be flagged, even though the clean base resource and the
+// clean site root are both distinct 2xx pages that defeat the clean-path reference
+// guards. Only the same-depth random-base collapse control recognises that the
+// "reached resource" is independent of the leading segments. This finding was
+// emitted before the fix; it must be empty after.
+func TestScanPerRequest_NoFalsePositiveTraversalShapeCatchAll(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(traversalShapeCatchAllHandler())
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/auraCmpDef")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a host serving one base-independent generic error page for any collapsed traversal must not be flagged as a path-normalization bypass")
 }
 
 // TestScanPerRequest_NoFalsePositive ensures a host that returns a uniform

@@ -12,8 +12,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/output"
 )
 
-const evilOrigin = "https://evil.example.com"
-
 type Module struct {
 	modkit.BaseActiveModule
 	delegate *ws_cswsh.Module

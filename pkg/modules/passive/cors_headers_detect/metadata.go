@@ -9,13 +9,13 @@ const (
 )
 
 var (
-	ModuleDesc = `**What it means:** The response contains CORS posture worth active confirmation. Wildcard public access and wildcard-plus-credentials are observations; null or reflected cross-origin policies are candidates until protected data exposure is reproduced.
+	ModuleDesc = `**What it means:** The response returns a permissive CORS policy - a wildcard (*) or null Access-Control-Allow-Origin, or credentials enabled alongside either - relaxing the same-origin protections that stop other sites reading a response.
 
-**How it's exploited:** Exploitation requires a browser-valid attacker origin and useful response content. Browsers reject credentialed reads when ACAO is wildcard; null/reflected origins still require active reproduction against protected content.
+**How it's exploited:** A malicious page the victim visits sends cross-origin requests here and reads the responses. With credentials allowed, requests ride the victim's cookies, exposing private data and anti-CSRF tokens. The null and wildcard-with-credentials cases are worst, trusting any caller.
 
 **Fix:** Reflect only an explicit allow-list of trusted origins, never pair a wildcard or null origin with Access-Control-Allow-Credentials, and omit CORS headers where not needed.`
 
-	ModuleConfirmation = "Observed when a response contains permissive CORS headers; active route-aware probing is required for a confirmed protected-data exposure"
+	ModuleConfirmation = "Confirmed when response contains permissive CORS headers such as wildcard origin or credentials enabled"
 	ModuleSeverity     = severity.Low
 	ModuleConfidence   = severity.Firm
 	ModuleTags         = []string{"misconfiguration", "header-security", "light"}

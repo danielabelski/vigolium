@@ -23,6 +23,45 @@ type HTMLReportMeta struct {
 	ScanTarget      string
 	GeneratedAt     string
 	ReportSharedURL string
+	// OnTrim, when set, receives the body-capping summary after the report is
+	// written instead of the generator printing its own inline "Note:" line. Lets
+	// a caller fold a short trim summary into its own export listing. Only the
+	// HTML format trims; nil keeps the default inline note.
+	OnTrim func(ReportTrimInfo)
+}
+
+// ReportTrimInfo summarizes the body-capping the HTML report applied, so a
+// caller can surface it in its own summary instead of the inline note.
+type ReportTrimInfo struct {
+	BodiesTruncated int
+	BodiesDropped   int
+	BytesOmitted    int64
+}
+
+// Trimmed reports whether any body was shortened or dropped.
+func (t ReportTrimInfo) Trimmed() bool {
+	return t.BodiesTruncated > 0 || t.BodiesDropped > 0
+}
+
+// Summary renders a compact one-line description of what was trimmed (no
+// surrounding parentheses), e.g. "trimmed 12, omitted 3 bodies · 8.0 MB". Empty
+// when nothing was trimmed.
+func (t ReportTrimInfo) Summary() string {
+	if !t.Trimmed() {
+		return ""
+	}
+	var parts []string
+	if t.BodiesTruncated > 0 {
+		parts = append(parts, fmt.Sprintf("trimmed %d", t.BodiesTruncated))
+	}
+	if t.BodiesDropped > 0 {
+		parts = append(parts, fmt.Sprintf("omitted %d", t.BodiesDropped))
+	}
+	s := strings.Join(parts, ", ") + " bodies"
+	if t.BytesOmitted > 0 {
+		s += " · " + humanizeReportBytes(t.BytesOmitted)
+	}
+	return s
 }
 
 // HTMLReportData is the template data passed to template.html.
@@ -124,7 +163,7 @@ func GenerateHTMLReport(items []any, outputPath string, meta HTMLReportMeta) err
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	logReportTrim(stats)
+	emitReportTrim(stats, meta.OnTrim)
 	return nil
 }
 
@@ -195,7 +234,7 @@ func GenerateHTMLReportStreaming(produce ReportItemProducer, outputPath string, 
 	if err != nil {
 		return err
 	}
-	logReportTrim(aw.stats)
+	emitReportTrim(aw.stats, meta.OnTrim)
 	return nil
 }
 
@@ -246,7 +285,7 @@ func generateHTMLReportLegacy(items []any, outputPath string, meta HTMLReportMet
 	}); err != nil {
 		return err
 	}
-	logReportTrim(stats)
+	emitReportTrim(stats, meta.OnTrim)
 	return nil
 }
 
@@ -344,6 +383,21 @@ func writeReportItems(w byteWriter, items []any, stats *reportTrimStats) error {
 	}
 	*stats = aw.stats
 	return nil
+}
+
+// emitReportTrim routes the body-capping summary to the caller's OnTrim callback
+// when one is set, otherwise falls back to the default inline note. Called at the
+// end of each HTML generator so both delivery paths live in one place.
+func emitReportTrim(stats reportTrimStats, onTrim func(ReportTrimInfo)) {
+	if onTrim != nil {
+		onTrim(ReportTrimInfo{
+			BodiesTruncated: stats.bodiesTruncated,
+			BodiesDropped:   stats.bodiesDropped,
+			BytesOmitted:    stats.bytesOmitted,
+		})
+		return
+	}
+	logReportTrim(stats)
 }
 
 // logReportTrim emits a single operator-facing note when bodies were trimmed, so

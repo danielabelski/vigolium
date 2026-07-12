@@ -644,6 +644,27 @@ func (p *Page) WaitDOMStable(d time.Duration, diff float64) error {
 	return p.rodPage.Timeout(p.config.PageLoadTimeout).WaitDOMStable(d, diff)
 }
 
+// WaitDOMStableBounded waits until the DOM stops mutating — successive snapshots
+// taken window apart differ by at most diff (0..1 fraction of changed nodes) —
+// but bounded by max so a page whose DOM never fully settles (carousels, live
+// clocks, spinners) returns at max instead of blocking for the full page-load
+// timeout. Used to let a client-render commit (a framework mounting real
+// content/anchors after its bundle loads) land before the DOM is snapshotted.
+// Best-effort: a rod timeout/error/panic is swallowed and the caller proceeds
+// with whatever is currently rendered.
+func (p *Page) WaitDOMStableBounded(window time.Duration, diff float64, max time.Duration) {
+	if max <= 0 {
+		return
+	}
+	if window <= 0 {
+		window = 300 * time.Millisecond
+	}
+	_ = safeRod("WaitDOMStableBounded", func() error {
+		_ = p.rodPage.Timeout(max).WaitDOMStable(window, diff)
+		return nil
+	})
+}
+
 // HasElement checks if an element exists.
 func (p *Page) HasElement(selector string) bool {
 	found := false

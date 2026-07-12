@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -52,6 +53,8 @@ var commonLoginUserCreds = [][2]string{
 	{"root", "root"},
 	{"test", "test"},
 	{"guest", "guest"},
+	{"demo", "demo"},
+	{"user", "user"},
 }
 
 // commonLoginEmailCreds is the full documented default list tried at deep
@@ -61,6 +64,8 @@ var commonLoginEmailCreds = [][2]string{
 	{"admin@admin.com", "admin"},
 	{"admin@example.com", "admin"},
 	{"test@test.com", "test"},
+	{"demo@demo.com", "demo"},
+	{"user@example.com", "user"},
 }
 
 // loginFormInfo is the result of probing a page for a local login form.
@@ -243,6 +248,10 @@ func (c *Crawler) attemptLoginCredentials(ctx context.Context, page *browser.Pag
 		c.mu.Lock()
 		c.stats.LoginCredsSucceeded++
 		c.mu.Unlock()
+		// Harvest a token-based session credential (JWT in localStorage/sessionStorage)
+		// so token-auth SPAs — which send Authorization: Bearer, not a cookie — are
+		// scanned authenticated. Cookie-based apps carry via HarvestedCookies instead.
+		c.harvestAuthToken(page)
 		zap.L().Warn("Spidering: default credentials accepted — continuing crawl authenticated",
 			zap.String("url", loginURL), zap.String("username", matchedUser))
 	} else {
@@ -373,6 +382,57 @@ func (c *Crawler) loginLooksSucceeded(page *browser.Page, urlBefore string) bool
 	}
 	return false
 }
+
+// jwtShape validates that s is a three-segment base64url JWT, the shape a
+// token-auth SPA stores after login. Guards the harvest against carrying an
+// arbitrary storage value (a feature flag, a cart id) as a bearer credential.
+var jwtShape = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
+
+// harvestAuthToken reads a JWT-shaped session token from the page's local/session
+// storage after a confirmed login and records it (bare, no "Bearer " prefix) for
+// the runner to carry forward. Best-effort: any failure leaves harvestedAuth empty
+// and the scan simply stays cookie-only. Only stores a value that passes the JWT
+// shape check, so a non-token storage entry is never carried as a credential.
+func (c *Crawler) harvestAuthToken(page *browser.Page) {
+	raw, err := page.Eval(authTokenHarvestScript)
+	if err != nil {
+		zap.L().Debug("Login-cred: auth-token harvest eval failed", zap.Error(err))
+		return
+	}
+	tok, _ := raw.(string)
+	tok = strings.TrimSpace(tok)
+	if tok == "" || !jwtShape.MatchString(tok) {
+		return
+	}
+	c.mu.Lock()
+	c.harvestedAuth = tok
+	c.mu.Unlock()
+	zap.L().Info("Spidering: harvested bearer session token for carry-forward")
+}
+
+// authTokenHarvestScript scans local/session storage for a JWT-shaped value,
+// preferring token-named keys (token/jwt/access_token/authorization/bearer), and
+// returns it with any leading "Bearer " stripped. Returns "" when none is found.
+const authTokenHarvestScript = `(function(){
+  try {
+    var stores = [window.localStorage, window.sessionStorage];
+    var jwt = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+    var pref = /(token|jwt|auth|bearer|access|session)/i;
+    var best = "", bestPref = false;
+    for (var s = 0; s < stores.length; s++) {
+      var store = stores[s]; if (!store) continue;
+      for (var i = 0; i < store.length; i++) {
+        var k = store.key(i); var v = store.getItem(k);
+        if (!v) continue;
+        var val = String(v).replace(/^Bearer\s+/i, '').trim();
+        if (!jwt.test(val)) continue;
+        var p = pref.test(k);
+        if (best === "" || (p && !bestPref)) { best = val; bestPref = p; }
+      }
+    }
+    return best;
+  } catch (e) { return ""; }
+})()`
 
 // buildLoginCreds assembles the ordered credential list: any identity registered
 // earlier this crawl first (the best "log in and crawl deeper" shot, always

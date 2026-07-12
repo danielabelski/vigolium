@@ -15,7 +15,7 @@ import (
 )
 
 // csrfParamPattern matches common CSRF token parameter names.
-var csrfParamPattern = regexp.MustCompile(`(?i)(csrf|xsrf|\btoken\b|authenticity[._-]?token|__RequestVerificationToken|antiforgery|_token|nonce|csrfmiddlewaretoken)`)
+var csrfParamPattern = regexp.MustCompile(`(?i)(csrf|xsrf|token|authenticity.token|__RequestVerificationToken|antiforgery|_token|nonce|csrfmiddlewaretoken)`)
 
 // csrfHeaderPattern matches custom headers used for CSRF protection.
 var csrfHeaderPattern = regexp.MustCompile(`(?i)^(x-csrf-token|x-xsrf-token|x-requested-with|x-csrftoken|anti-csrf-token)$`)
@@ -111,16 +111,11 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	if ctx.Request().Header("Cookie") == "" {
 		return nil, nil
 	}
-	// A preference/analytics cookie is not ambient authentication. Require at
-	// least one cookie whose name looks like session/auth state.
-	hasSessionCookie := false
-	for _, name := range modkit.RequestCookieNames(ctx.Request().Header("Cookie")) {
-		if modkit.LikelySessionCookie(name) {
-			hasSessionCookie = true
-			break
-		}
-	}
-	if !hasSessionCookie {
+
+	// Dedup by method:host:path
+	dedupKey := utils.Sha1(fmt.Sprintf("%s:%s:%s", method, urlx.Host, urlx.Path))
+	diskSet := m.ds.Get(scanCtx.DedupMgr())
+	if diskSet != nil && diskSet.IsSeen(dedupKey) {
 		return nil, nil
 	}
 
@@ -145,40 +140,25 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		}
 	}
 
-	// Check 3: resolve the attributes of the session cookie actually carried by
-	// this request. Set-Cookie on an unrelated response is not the cookie policy.
-	if scanCtx != nil {
-		scanCtx.ObserveResponseCookies(ctx)
-		for _, policy := range scanCtx.RequestCookiePolicies(ctx) {
-			if !modkit.LikelySessionCookie(policy.Name) {
-				continue
-			}
-			if policy.SameSite == "strict" || policy.SameSite == "lax" {
-				return nil, nil
+	// Check 3: SameSite cookie in response
+	if ctx.HasResponse() {
+		for _, hdr := range ctx.Response().Headers() {
+			if strings.EqualFold(hdr.Name, "Set-Cookie") {
+				if sameSitePattern.MatchString(hdr.Value) {
+					return nil, nil // has SameSite protection
+				}
 			}
 		}
-	}
-
-	// Dedup only after the request has passed every protection check; a protected
-	// request must not claim the route and suppress a later unprotected shape.
-	identity := ctx.Request().IdentityFingerprint()
-	dedupKey := utils.Sha1(fmt.Sprintf("%s:%s:%s:%s", method, urlx.Host, urlx.Path, identity))
-	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(dedupKey) {
-		return nil, nil
 	}
 
 	// No CSRF protection found
 	return []*output.ResultEvent{
 		{
-			ModuleID:      ModuleID,
-			Host:          urlx.Host,
-			URL:           urlx.String(),
-			Matched:       urlx.String(),
-			Request:       string(ctx.Request().Raw()),
-			RecordKind:    output.RecordKindCandidate,
-			EvidenceGrade: output.EvidenceGradeCandidate,
-			DedupKey:      fmt.Sprintf("csrf-candidate|%s|%s|%s|%s", urlx.Host, method, urlx.Path, identity),
+			ModuleID: ModuleID,
+			Host:     urlx.Host,
+			URL:      urlx.String(),
+			Matched:  urlx.String(),
+			Request:  string(ctx.Request().Raw()),
 			Info: output.Info{
 				Name:        "Missing CSRF Protection",
 				Description: fmt.Sprintf("State-changing %s request to %s lacks anti-CSRF token, custom header, and SameSite cookie protection", method, urlx.Path),

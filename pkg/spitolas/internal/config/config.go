@@ -142,6 +142,32 @@ type Config struct {
 	FormFillMode    FormFillMode
 	FormInputs      []FormInputConfig
 
+	// SubmitGetForms makes the crawler, after filling a page's forms, synthesize
+	// and fetch the submit URL of each GET form (its resolved action plus the
+	// filled field values, e.g. a "/catalog" search box → /catalog?searchTerm=a)
+	// so the resulting request is captured. The interaction crawl only submits a
+	// form when its submit control happens to be clicked as an ordinary clickable,
+	// which the bounded action budget frequently never selects; this makes GET
+	// form submission deterministic. Default on; bounded by SubmitFormMaxVariants.
+	SubmitGetForms bool
+	// SubmitFormMaxVariants caps how many distinct GET-form submit URLs are fetched
+	// over the whole crawl (0 = default). Guards a page that programmatically wires
+	// up many forms from flooding the target. Shared budget with SubmitPostForms.
+	SubmitFormMaxVariants int
+
+	// SubmitPostForms makes the crawler, after filling a page's forms, trigger each
+	// same-origin POST form so its endpoint is exercised and captured. POST forms are
+	// frequently JS-driven (the page intercepts the submit and fires the real request
+	// through its own handler with a specific content type — e.g. a stock check that
+	// posts XML, a newsletter that posts JSON on button click), so this dispatches the
+	// page's submit/click handlers under a navigation guard and, for forms with no JS
+	// handler, synthesizes a plain urlencoded/multipart POST. Without it the endpoints
+	// behind JS-driven POST forms (a common home for XXE and body/cookie SQLi) are only
+	// reached if the bounded interaction crawl happens to click their submit control.
+	// Default on; deduped by (action + field-name) signature and bounded by
+	// SubmitFormMaxVariants (shared with the GET-form budget).
+	SubmitPostForms bool
+
 	// Conditions
 	CrawlConditions []ConditionConfig
 	WaitConditions  []WaitConditionConfig
@@ -160,6 +186,16 @@ type Config struct {
 	// Output (traffic is written to vigolium's HTTPRecord table via Writer)
 	IncludeResponseBody    bool // Include response body in HTTP traffic capture
 	IncludeResponseHeaders bool // Include response headers in HTTP traffic capture
+
+	// MaxParamValueVariants controls how many DISTINCT query-value variants of the
+	// same endpoint shape (same method, path, param-name set and response shape)
+	// the capture keeps. The dedup key is otherwise value-blind, so /catalog?
+	// category=Books, ?category=Gin, ?category=Juice … all collapse to one record;
+	// with N>1, up to N distinct value combinations survive, so filter/category/
+	// tab links and search results are not all hidden behind a single arbitrary
+	// representative. Bounded so an id sweep (?productId=1..1000) cannot explode
+	// the record count. 0 or 1 restores the original value-blind behavior.
+	MaxParamValueVariants int
 
 	// Service-worker asset priming. After the index page loads, the crawler
 	// discovers service-worker scripts + the web-app/ngsw manifest and fetches
@@ -186,6 +222,17 @@ type Config struct {
 	// kicks off after first paint complete before the DOM is read (0 = default).
 	NetworkIdleTimeout time.Duration
 
+	// AnchorLinkPriming makes the crawler, on each settled page, fetch the same-
+	// origin <a href> links that carry a query string directly from the live DOM,
+	// so parameterized links a framework renders client-side (e.g. ginandjuice's
+	// React category filter → /catalog?category=Books) are captured even when the
+	// bounded interaction budget never happens to click them. Distinct value-
+	// variants per endpoint shape are kept up to MaxParamValueVariants (so an id
+	// sweep stays bounded); deduped and capped across the crawl by
+	// AnchorLinkMaxAssets (default on).
+	AnchorLinkPriming   bool
+	AnchorLinkMaxAssets int // Cap on primed anchor-link fetches per crawl (0 = default)
+
 	// SPASettleTimeout bounds an extra "wait for the network to go idle" settle on
 	// the index/seed page before its state is captured and its clickables are
 	// extracted. A heavy enterprise SPA (Angular, Salesforce Lightning, …) renders
@@ -195,6 +242,21 @@ type Config struct {
 	// CTA and most data calls are missed. This longer settle lets the bootstrap
 	// quiesce first (0 = disabled).
 	SPASettleTimeout time.Duration
+
+	// WaitDOMQuiescence makes the settle wait for the DOM to stop mutating (not
+	// just for the network to go idle) before a page's state is captured and its
+	// clickables extracted. A client-rendered page (React/Vue/Angular) mounts its
+	// real anchors from an inline script AFTER the framework bundle loads — e.g.
+	// ginandjuice's /catalog builds its category-filter <a href="/catalog?
+	// category=…"> links via ReactDOM.render — so a snapshot taken at network-idle
+	// can miss them. This extra settle lets that render land. Bounded by
+	// DOMQuiescenceMax so a page with a perpetual animation/spinner cannot stall
+	// the crawl (default on).
+	WaitDOMQuiescence bool
+	// DOMQuiescenceMax bounds the WaitDOMQuiescence settle. A page whose DOM never
+	// fully stops mutating (carousels, live clocks) returns at this bound rather
+	// than blocking (0 = default).
+	DOMQuiescenceMax time.Duration
 
 	// DismissConsent makes the crawler click cookie-consent "accept" controls
 	// (OneTrust et al., piercing shadow DOM) on the index page before capture, so a
@@ -348,6 +410,16 @@ func New(targetURL string) (*Config, error) {
 		FormFillMode:    FormFillNormal,
 		FormInputs:      []FormInputConfig{},
 
+		// GET- and POST-form submission on by default (tied to form filling by the
+		// caller); bounded per crawl so a form-heavy page cannot flood the target.
+		SubmitGetForms:        true,
+		SubmitPostForms:       true,
+		SubmitFormMaxVariants: defaultSubmitFormMaxVariants,
+
+		// Keep a handful of distinct query-value variants per endpoint shape so
+		// category/filter/tab/search links are not all collapsed into one record.
+		MaxParamValueVariants: defaultMaxParamValueVariants,
+
 		CrawlConditions: []ConditionConfig{},
 		WaitConditions:  []WaitConditionConfig{},
 
@@ -375,14 +447,21 @@ func New(targetURL string) (*Config, error) {
 		IframeMaxAssets:    defaultIframeMaxAssets,
 		NetworkIdleTimeout: defaultNetworkIdleTimeout,
 
+		// Anchor-link priming on by default; bounded per crawl so a link-dense page
+		// cannot flood the target.
+		AnchorLinkPriming:   true,
+		AnchorLinkMaxAssets: defaultAnchorLinkMaxAssets,
+
 		// SPA bootstrap settle + consent dismissal + login-CTA priming on by
 		// default: together they get a heavy enterprise SPA to fully render its
 		// landing, clear a consent overlay, and enter the OAuth/SAML login flow so
 		// the deep login URLs are actually requested and captured.
-		SPASettleTimeout: defaultSPASettleTimeout,
-		DismissConsent:   true,
-		LoginCTAPriming:  true,
-		AutoScroll:       true,
+		SPASettleTimeout:  defaultSPASettleTimeout,
+		WaitDOMQuiescence: true,
+		DOMQuiescenceMax:  defaultDOMQuiescenceMax,
+		DismissConsent:    true,
+		LoginCTAPriming:   true,
+		AutoScroll:        true,
 
 		// Common-credential login attempts are off by default; the runner turns
 		// them on at balanced (minimal list) and deep (full list). They only ever
@@ -392,6 +471,25 @@ func New(targetURL string) (*Config, error) {
 		LoginCredentialFullList: false,
 	}, nil
 }
+
+// defaultSubmitFormMaxVariants bounds how many distinct GET-form submit URLs the
+// crawler synthesizes and fetches over the whole crawl. A handful of search/
+// filter forms is the common case; the cap guards a page that wires up many
+// forms without truncating real-world apps.
+const defaultSubmitFormMaxVariants = 50
+
+// defaultMaxParamValueVariants is how many distinct query-value variants of one
+// endpoint shape the capture keeps by default. Big enough to surface a typical
+// category/filter/tab set (ginandjuice has 5 catalog categories) yet small
+// enough that an id sweep (?productId=1..N) is still collapsed to a few
+// representatives rather than N records.
+const defaultMaxParamValueVariants = 6
+
+// defaultDOMQuiescenceMax bounds the DOM-mutation-stability settle. Kept short:
+// it only needs to absorb a client-render commit (React/Vue mounting the real
+// DOM after its bundle loads), not a long data-fetch chain (SPASettleTimeout
+// already covers that), and must return promptly on a perpetually animating page.
+const defaultDOMQuiescenceMax = 2 * time.Second
 
 // defaultSPASettleTimeout bounds the extra network-idle settle on the index page
 // before capture. Long enough to absorb a multi-step SPA bootstrap (several
@@ -404,6 +502,12 @@ const defaultSPASettleTimeout = 12 * time.Second
 // same-origin frames; the cap guards against a pathological page wiring up
 // hundreds without truncating real-world apps.
 const defaultIframeMaxAssets = 200
+
+// defaultAnchorLinkMaxAssets bounds how many distinct parameterized anchor links
+// the priming step fetches over the whole crawl. Big enough for a shop's
+// category/filter/pagination links plus a bounded slice of any id-indexed link
+// set, capped so a link-dense catalog cannot flood the target.
+const defaultAnchorLinkMaxAssets = 300
 
 // defaultNetworkIdleTimeout caps the network-idle settle performed before iframe
 // harvesting. Kept short so it only absorbs the tail of a framework's

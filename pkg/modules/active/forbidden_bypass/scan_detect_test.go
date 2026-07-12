@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	stringsutil "github.com/projectdiscovery/utils/strings"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -173,6 +174,56 @@ func TestScanPerRequest_NoFalsePositive_WhitespacePayloadRootCollapse(t *testing
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "a whitespace payload that collapses to the homepage must not be reported as a 403 bypass")
+}
+
+// pathHasManglingArtifact reports whether a raw request target carries a path
+// normalization / traversal artifact — the shape a reverse proxy renders its
+// generic soft page for. Used by the shape-catch-all regression handler below.
+func pathHasManglingArtifact(rawURI string) bool {
+	return stringsutil.ContainsAny(rawURI, "..", "//", ";", "%", `\`, "/.")
+}
+
+// TestScanPerRequest_NoFalsePositive_ShapeCatchall reproduces the reported
+// dialog1.acme.com (Salesforce Lightning behind a reverse proxy) false positive:
+// the protected resource (/admin) is a genuine 403 and a CLEAN random path 404s —
+// NOT a catch-all — so ConfirmNotSoft404 and confirmDistinctFromCatchAll (which
+// probe clean paths) all pass. The trap is that the proxy soft-serves ONE
+// base-independent 200 page for ANY path carrying a normalization/traversal
+// artifact (`/./admin`, `/admin..;/`, `//admin`), so every path payload "reaches"
+// that generic page. Only the path-shape catch-all control — re-applying the same
+// payload transformation to a random base and seeing the same body — recognises the
+// 200 is generic to the mangled shape rather than a bypass of /admin.
+func TestScanPerRequest_NoFalsePositive_ShapeCatchall(t *testing.T) {
+	t.Parallel()
+	// One base-independent generic page served for any mangled path shape.
+	const softPage = "<!doctype html><html><head><title>Welcome</title></head><body>" +
+		"<span class=\"error-msg-box\">This feature is not available in your country.</span></body></html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.RequestURI == "/admin":
+			// The clean protected path stays genuinely forbidden.
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("Forbidden"))
+		case pathHasManglingArtifact(r.RequestURI):
+			// Any mangled-shape path gets the same generic 200 soft page, regardless
+			// of which base segment it decorates.
+			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(softPage))
+		default:
+			// Clean unknown paths (the wildcard / catch-all reference probes) 404 —
+			// so the clean-path guards cannot see the shape catch-all.
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := seed403(t, srv.URL+"/admin")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a base-independent generic 200 served only for the mangled path shape must not be reported as a 403 bypass")
 }
 
 // TestScanPerRequest_DetectsTrustedHeaderBypass drives the scan against a backend

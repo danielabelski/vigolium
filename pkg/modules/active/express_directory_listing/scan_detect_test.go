@@ -97,7 +97,7 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "plain 404 responses must not yield a directory-listing finding")
 }
 
-// gatsbyMediaBody reproduces the Roche "Media" false positive: a rendered Gatsby
+// gatsbyMediaBody reproduces the Acme "Media" false positive: a rendered Gatsby
 // content page that has an <h1>, a <table>, and <a href=> links — but is a real
 // page (generator/react-helmet/OpenGraph markers), not a directory listing.
 const gatsbyMediaBody = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">` +

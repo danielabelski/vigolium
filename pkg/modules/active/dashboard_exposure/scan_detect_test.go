@@ -150,8 +150,8 @@ func TestScanPerRequest_FlakySinglePatternDropped(t *testing.T) {
 	}
 }
 
-// TestScanPerRequest_NoFP_HTMLReflectedVersion reproduces the roche
-// trace.rawaf-test SonarQube false positive: an echo/catch-all host answers every
+// TestScanPerRequest_NoFP_HTMLReflectedVersion reproduces the acme
+// trace.acme.com SonarQube false positive: an echo/catch-all host answers every
 // path with 200 text/html, and the /api/server/version fragment happens to start
 // with a version-shaped string (a reflected client IP left as "0.245.126.98" by a
 // body-truncation quirk) that satisfies SonarQube's ^\s*\d+\.\d+ BodyRe. The

@@ -262,6 +262,10 @@ type Executor struct {
 	scanUUID      string
 	projectUUID   string
 
+	// corroboration collects database-error leaks observed in any active module's
+	// 5xx probe response (via the requester response observer), emitted at phase end.
+	corroboration *probeCorroboration
+
 	// caches groups the per-scan lookup/dedup bookkeeping; pool groups the
 	// worker-pool concurrency state. Both are split out of Executor to keep
 	// this struct focused on orchestration rather than implementation state.
@@ -463,6 +467,7 @@ func NewExecutor(
 		findingWriter:  cfg.FindingWriter,
 		scanUUID:       cfg.ScanUUID,
 		projectUUID:    cfg.ProjectUUID,
+		corroboration:  newProbeCorroboration(),
 		storageHosts:   storageHosts,
 		caches: scanCaches{
 			requestUUIDs:          newShardedMap(cfg.Workers),
@@ -631,6 +636,15 @@ func (e *Executor) Execute(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("executor already running")
 	}
 	defer e.running.Store(false)
+
+	// Observe server-error probe responses so a leaked database error surfaced by
+	// ANY module's probe is corroborated even when the sending module didn't check
+	// for it. Installed for this run only; cleared on return so a later phase's
+	// traffic on the shared requester isn't observed into a stale collector.
+	if e.httpClient != nil {
+		e.httpClient.SetResponseObserver(e.observeProbeResponse)
+		defer e.httpClient.SetResponseObserver(nil)
+	}
 
 	// Enforce per-phase timeout when configured
 	if e.cfg.MaxDuration > 0 {
@@ -865,6 +879,10 @@ drainLoop:
 				}
 			}
 		}
+		// Emit corroboration observations harvested from probe traffic. Same
+		// workers-exited guard as the passive flush: the observer runs on request
+		// goroutines, so draining before they exit could race a live append.
+		e.drainProbeCorroboration(ctx)
 	} else {
 		zap.L().Warn("skipping passive-module flush after abandoning workers; deferred findings (e.g. secret detection, anomaly ranking) may be incomplete")
 	}
@@ -1455,6 +1473,37 @@ const defaultPassiveModuleTimeout = 5 * time.Second
 // (e.g. diffscan behavioral timing analysis) opt in via modules.TimeoutHinter.
 const defaultActiveModuleTimeout = 300 * time.Second
 
+// moduleDeadlineGrace is how far before the hard per-module watchdog a contextual
+// module's handed context is cancelled. It gives a deadline-aware module (one that
+// checks its context between insertion points) a window to unwind its loop and
+// return the findings it has already confirmed, so the executor collects them via
+// the result channel instead of the hard timeout discarding everything.
+const moduleDeadlineGrace = 15 * time.Second
+
+const (
+	// timeoutScaleRefPoints is the insertion-point count that maps a whole-request
+	// module to the base per-module timeout (1x). A ScanPerRequest module loops
+	// over every insertion point in a single call, so a browser-captured request
+	// (many cookies + headers → 20+ points) legitimately needs proportionally
+	// longer than a bare URL, or it exceeds the base timeout mid-loop.
+	timeoutScaleRefPoints = 10
+	// maxModuleTimeoutScale caps how far the per-module timeout may stretch for a
+	// high-insertion-point request, so a pathological request can't wedge a phase.
+	maxModuleTimeoutScale = 5
+)
+
+// scaleModuleTimeout stretches the base per-module timeout in proportion to the
+// number of insertion points a whole-request module must cover, capped at
+// maxModuleTimeoutScale x. Returns base unchanged when workUnits is at or below
+// the reference (the common small-request case) or when base is non-positive.
+func scaleModuleTimeout(base time.Duration, workUnits int) time.Duration {
+	if base <= 0 || workUnits <= timeoutScaleRefPoints {
+		return base
+	}
+	scale := min(float64(workUnits)/float64(timeoutScaleRefPoints), maxModuleTimeoutScale)
+	return time.Duration(float64(base) * scale)
+}
+
 // passiveModuleTimeout returns the effective passive module timeout.
 func (e *Executor) passiveModuleTimeout() time.Duration {
 	if e.cfg.PassiveModuleTimeout > 0 {
@@ -1554,11 +1603,14 @@ func releaseTimer(t *time.Timer) {
 // timeout. It returns the child context to hand the scan function, the timer's
 // fire channel (the genuine per-call timeout — selected separately from
 // ctx.Done(), which is parent cancellation), and a stop func the caller defers to
-// cancel the context and return the timer to the pool. WithCancel + a pooled timer
-// avoids the fresh runtime timer that context.WithTimeout allocates on every call
-// (these wrappers run on the hottest per-module dispatch loop). The child context
-// is intentionally NOT bound into the requester — that is phase-context-bound in
-// runActiveStage — so one module's timeout never cancels a request the clusterer
+// cancel the context and return the timer to the pool. The common non-contextual
+// case (the hottest per-module dispatch loop) hands back the parent ctx unchanged
+// and relies solely on the pooled watchdog timer, avoiding any per-call context
+// allocation; only contextual modules pay for a child context, and it carries a
+// soft deadline (a grace before the watchdog) so a deadline-aware module can return
+// its already-confirmed findings before the hard timeout discards them. The child
+// context is intentionally NOT bound into the requester — that is phase-context-bound
+// in runActiveStage — so one module's timeout never cancels a request the clusterer
 // shares with others.
 func callGuard(ctx context.Context, timeout time.Duration, needCancel bool) (callCtx context.Context, timeoutC <-chan time.Time, stop func()) {
 	t := acquireTimer(timeout)
@@ -1569,7 +1621,18 @@ func callGuard(ctx context.Context, timeout time.Duration, needCancel bool) (cal
 		// timer still enforces the per-module timeout via timeoutC.
 		return ctx, t.C, func() { releaseTimer(t) }
 	}
-	callCtx, cancel := context.WithCancel(ctx)
+	// Contextual module: give its handed context a soft deadline a short grace
+	// before the hard watchdog (timeoutC) fires. A deadline-aware module checks
+	// this context between insertion points and returns the findings it has
+	// already confirmed, so the executor collects them via the result channel
+	// instead of the hard timeout discarding everything. The context stays
+	// unbound from the requester (that is phase-context-bound), so this deadline
+	// only gates the module's own loop, never a request the clusterer shares.
+	soft := timeout - moduleDeadlineGrace
+	if soft <= 0 {
+		soft = timeout / 2
+	}
+	callCtx, cancel := context.WithTimeout(ctx, soft)
 	return callCtx, t.C, func() {
 		cancel()
 		releaseTimer(t)
@@ -1707,12 +1770,17 @@ func (e *Executor) runPassiveWithTimeout(
 // executor admit replacement work while abandoned scans still hold connections,
 // so the active-task cap would understate true concurrency (a hot/slow target
 // could then be hit far harder than --concurrency allows).
+// workUnits estimates how much a whole-request/host module must cover in one call
+// (its insertion-point count) so the per-module timeout can scale with it; pass 0
+// to leave the base timeout untouched (per-insertion-point calls, which are already
+// bounded and processed incrementally).
 func (e *Executor) runActiveWithTimeout(
 	ctx context.Context,
 	scanFn func(context.Context) ([]*output.ResultEvent, error),
 	module modules.Module,
 	item *httpmsg.HttpRequestResponse,
 	releaseSlot func(),
+	workUnits int,
 ) ([]*output.ResultEvent, bool) {
 	// Fast exit when the scan/phase context is already cancelled: skip the
 	// watchdog goroutine + pooled timer + result channel entirely (mirrors the
@@ -1724,7 +1792,12 @@ func (e *Executor) runActiveWithTimeout(
 		return nil, false
 	}
 
-	timeout := e.activeModuleTimeout()
+	// Scale the timeout with the request's insertion-point count for whole-request
+	// modules that loop over every point in a single call (workUnits 0, or at/below
+	// the reference count, leaves it unchanged): without this a request with many
+	// cookies/headers exceeds the base timeout mid-loop and its already-confirmed
+	// findings are discarded (capped at maxModuleTimeoutScale x).
+	timeout := scaleModuleTimeout(e.activeModuleTimeout(), workUnits)
 	// Allow modules to override with a per-module timeout hint (e.g. diffscan
 	// timing analysis legitimately needs longer than the global default).
 	if hinter, ok := module.(modules.TimeoutHinter); ok {

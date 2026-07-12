@@ -75,6 +75,12 @@ func (r *Runner) RunNativeScan() error {
 	// Warn the operator (once per host) when the edge WAF/CDN starts filtering
 	// scan traffic, across all phases that share this requester.
 	r.attachWAFBlockNotifier(infra.httpRequester)
+	// Proactively pace a host the first time an earlier phase reveals it is behind a
+	// CDN/WAF edge, so the active phase does not burst the edge into a rate-based
+	// block before the high-value probes run. Hangs off the shared host limiter (not a
+	// single requester), so the notice fires once per host regardless of which
+	// requester — heuristics, auth prep, discovery — first tripped the pre-arm.
+	r.attachWAFPacingNotifier(infra.hostLimiter)
 
 	// Initialize scan logger (must happen before printScanConfig so the tee captures it)
 	r.scanLogger = database.NewScanLogger(r.repository, infra.scanUUID)
@@ -565,6 +571,12 @@ func (r *Runner) buildInfrastructure() (*phaseInfra, error) {
 		Adaptive:       adaptive,
 		MinPerHost:     minPerHost,
 		CeilingPerHost: ceilingPerHost,
+		// Throttle a host only once it starts returning WAF/CDN blocks; a non-WAF
+		// scan is unaffected. The constructor drops this when Adaptive is on.
+		WafAutoArm: true,
+		// --no-waf-pacing turns off only the proactive edge pre-arm; reactive
+		// WAF-block back-off stays on.
+		DisablePreArm: r.options.NoWafPacing,
 	})
 	svc.HostLimiter = hostLimiter
 	infra.hostLimiter = hostLimiter

@@ -312,13 +312,23 @@ func (m *Module) probeNeighbor(
 		return nil, nil
 	}
 
-	// A single identity proves a stable cross-object differential, not that the
-	// neighboring object is unauthorized. A cookie alone is not ownership proof.
-	// Keep this as an E2 candidate until owner/non-owner, role, or tenant evidence
-	// is available.
+	// Structurally similar + content differs → potential IDOR
 	confidence := severity.Tentative
-	sev := severity.Medium
-	authenticated := authzutil.RequestCarriesCredential(ctx.Request())
+	if comparison.UserFieldsDiffer {
+		confidence = severity.Firm
+	}
+
+	// Authorization-boundary gate: IDOR/BOLA is an authorization flaw, so it is
+	// only provable when the ORIGINAL request actually carried a credential whose
+	// per-user boundary the neighbor id crossed. With no Authorization / Cookie /
+	// token the differential is just public content served per-id (blogs,
+	// catalogs, docs) — keep it as a Medium/Tentative lead, not a High/Firm
+	// authorization bypass.
+	sev := severity.High
+	if !authzutil.RequestCarriesCredential(ctx.Request()) {
+		sev = severity.Medium
+		confidence = severity.Tentative
+	}
 
 	desc := fmt.Sprintf(
 		"Parameter %s=%s was changed to %s and returned a structurally similar response "+
@@ -339,9 +349,6 @@ func (m *Module) probeNeighbor(
 		Response:           probeResponse,
 		FuzzingParameter:   ip.Name(),
 		AdditionalEvidence: ev.Entries(),
-		RecordKind:         output.RecordKindCandidate,
-		EvidenceGrade:      output.EvidenceGradeDifferential,
-		DedupKey:           fmt.Sprintf("bola-candidate|%s|%s|%s|%s|%s", host, ctx.Request().Method(), ctx.Request().Path(), ip.Name(), ctx.Request().IdentityFingerprint()),
 		ExtractedResults: []string{
 			fmt.Sprintf("%s=%s → %s", ip.Name(), ip.BaseValue(), neighborID),
 		},
@@ -357,25 +364,23 @@ func (m *Module) probeNeighbor(
 			},
 		},
 		Metadata: map[string]any{
-			"param_name":          ip.Name(),
-			"original_value":      ip.BaseValue(),
-			"neighbor_value":      neighborID,
-			"id_type":             classification.IDType.String(),
-			"predictability":      classification.Predictability.String(),
-			"name_signal":         classification.NameSignal.String(),
-			"total_score":         classification.TotalScore,
-			"resource_noun":       classification.ResourceNoun,
-			"baseline_status":     baseline.StatusCode,
-			"probe_status":        probeStatus,
-			"body_length_ratio":   comparison.BodyLengthRatio,
-			"content_identical":   comparison.ContentIdentical,
-			"user_fields_differ":  comparison.UserFieldsDiffer,
-			"differing_fields":    comparison.DifferingFields,
-			"self_id_ratio":       idVerdict.SelfRatio,
-			"cross_id_ratio":      idVerdict.CrossRatio,
-			"determinism_gate":    idVerdict.Reason,
-			"authenticated_probe": authenticated,
-			"authorization_proof": "single-identity differential only",
+			"param_name":         ip.Name(),
+			"original_value":     ip.BaseValue(),
+			"neighbor_value":     neighborID,
+			"id_type":            classification.IDType.String(),
+			"predictability":     classification.Predictability.String(),
+			"name_signal":        classification.NameSignal.String(),
+			"total_score":        classification.TotalScore,
+			"resource_noun":      classification.ResourceNoun,
+			"baseline_status":    baseline.StatusCode,
+			"probe_status":       probeStatus,
+			"body_length_ratio":  comparison.BodyLengthRatio,
+			"content_identical":  comparison.ContentIdentical,
+			"user_fields_differ": comparison.UserFieldsDiffer,
+			"differing_fields":   comparison.DifferingFields,
+			"self_id_ratio":      idVerdict.SelfRatio,
+			"cross_id_ratio":     idVerdict.CrossRatio,
+			"determinism_gate":   idVerdict.Reason,
 		},
 	}, nil
 }

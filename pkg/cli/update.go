@@ -126,15 +126,15 @@ func runUpdateCmd(cmd *cobra.Command, args []string) error {
 			if firstErr == nil {
 				firstErr = berr
 			}
-			updateSay("  %s binary update failed: %v\n", terminal.ErrorSymbol(), berr)
+			updateSay("%s binary update failed: %v\n", terminal.ErrorSymbol(), berr)
 		} else {
 			msg := "binary reinstalled"
 			if w := binaryPathWarning(); w != "" {
 				msg = msg + "; " + w
-				updateSay("  %s %s\n", terminal.SuccessSymbol(), terminal.White("binary reinstalled"))
-				updateSay("  %s %s\n", terminal.WarningSymbol(), terminal.Yellow(w))
+				updateSay("%s %s\n", terminal.SuccessSymbol(), terminal.White("binary reinstalled"))
+				updateSay("%s %s\n", terminal.WarningSymbol(), terminal.Yellow(w))
 			} else {
-				updateSay("  %s %s\n", terminal.SuccessSymbol(), terminal.White("binary reinstalled"))
+				updateSay("%s %s\n", terminal.SuccessSymbol(), terminal.White("binary reinstalled"))
 			}
 			out.Steps = append(out.Steps, updateStepResult{Step: "binary", Status: "ok", Message: msg})
 		}
@@ -149,10 +149,10 @@ func runUpdateCmd(cmd *cobra.Command, args []string) error {
 			if firstErr == nil {
 				firstErr = terr
 			}
-			updateSay("  %s templates update failed: %v\n", terminal.ErrorSymbol(), terr)
+			updateSay("%s templates update failed: %v\n", terminal.ErrorSymbol(), terr)
 		} else {
 			out.Steps = append(out.Steps, updateStepResult{Step: "templates", Status: "ok", Message: msg})
-			updateSay("  %s %s\n", terminal.SuccessSymbol(), terminal.White(msg))
+			updateSay("%s %s\n", terminal.SuccessSymbol(), terminal.White(msg))
 		}
 	} else {
 		out.Steps = append(out.Steps, updateStepResult{Step: "templates", Status: "skipped"})

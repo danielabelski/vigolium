@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -141,6 +142,7 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 	scanOpts.Timeout = globalTimeout
 	scanOpts.Concurrency = globalConcurrency
 	scanOpts.MaxPerHost = globalMaxPerHost
+	scanOpts.NoWafPacing = globalNoWafPacing
 	scanOpts.ConcurrencyExplicitlySet = cmd.Flags().Changed("concurrency")
 	scanOpts.MaxPerHostExplicitlySet = cmd.Flags().Changed("max-per-host")
 	// --rate-limit is enforced only when the operator sets it explicitly, so
@@ -775,7 +777,6 @@ func reportNativeScanSuccess(db *database.DB, settings *config.Settings, repo *d
 	finishFSExport(db, scanOpts)
 	uploadNativeScanResults(settings, scanOpts, repo)
 	if !scanOpts.Silent {
-		fmt.Fprintf(os.Stderr, "\n%s %s\n", terminal.Aqua(terminal.SymbolSparkle), terminal.BoldAqua("Native scan completed"))
 		hosts := summaryScopeHosts(context.Background(), repo, settings, scanOpts.Targets, scanOpts.ProjectUUID, scanOpts.ScanUUID)
 		printScanCompletionSummary(repo, scanOpts.ProjectUUID, hosts, time.Since(scanStart))
 	}
@@ -1118,7 +1119,7 @@ func (e *emptySource) Close() error                                   { return n
 // export and never leaks other projects' findings. scanUUID further restricts the
 // findings to a single scan (empty = all of the project's), so a persisted scan's
 // report reflects that run rather than the project's whole history.
-func generateReportFromDB(ctx context.Context, db *database.DB, outputPath string, omitResponse bool, projectUUID, scanUUID string, rf reportFormatEntry) error {
+func generateReportFromDB(ctx context.Context, db *database.DB, outputPath string, omitResponse bool, projectUUID, scanUUID string, rf reportFormatEntry, onTrim func(output.ReportTrimInfo)) error {
 	autoTarget, autoDuration := computeReportMeta(ctx, db)
 	meta := output.HTMLReportMeta{
 		Title:           "Vigolium Scan Report",
@@ -1126,6 +1127,9 @@ func generateReportFromDB(ctx context.Context, db *database.DB, outputPath strin
 		ScanDuration:    autoDuration,
 		ScanTarget:      autoTarget,
 		ReportSharedURL: scanReportSharedURL,
+		// nil keeps the generator's default inline "Note:" line; the stateless
+		// export path passes a collector so the trim summary folds into "Exports".
+		OnTrim: onTrim,
 	}
 	// Prefer the streaming generator when the format has one: it renders the
 	// report by pulling rows one at a time instead of loading the whole result
@@ -1246,7 +1250,7 @@ func maybeGenerateReports(db *database.DB, opts *types.Options) {
 		if rf.beforeMsg != "" {
 			fmt.Fprintf(os.Stderr, "%s %s\n", terminal.InfoSymbol(), rf.beforeMsg)
 		}
-		if err := generateReportFromDB(ctx, db, outPath, opts.OmitResponse, exportProjectScope(opts), scanScope, rf); err != nil {
+		if err := generateReportFromDB(ctx, db, outPath, opts.OmitResponse, exportProjectScope(opts), scanScope, rf, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "%s Failed to generate %s: %v\n", terminal.ErrorPrefix(), rf.label, err)
 		} else {
 			fmt.Fprintf(os.Stderr, "%s %s: %s\n", terminal.InfoSymbol(), rf.label, terminal.Cyan(outPath))
@@ -1276,10 +1280,70 @@ func finishFSExport(db *database.DB, opts *types.Options) {
 	fsPrintSummary(stats)
 }
 
+// exportedFile records one materialized file/directory for the unified stateless
+// export summary printed at the end of finishStatelessExport. detail is an
+// optional parenthetical (e.g. "53 records").
+type exportedFile struct {
+	label  string // format name: console, jsonl, sqlite, html, fs, …
+	path   string
+	detail string
+}
+
+// fsExportOutputs turns an fs-export result into unified summary rows — one per
+// directory actually written (traffic and/or findings) — so the fs format lists
+// alongside the other formats instead of printing its own separate block.
+func fsExportOutputs(stats fsExportStats) []exportedFile {
+	var out []exportedFile
+	if stats.TrafficDir != "" {
+		out = append(out, exportedFile{label: "fs", path: stats.TrafficDir, detail: fmt.Sprintf("%d records", stats.Traffic)})
+	}
+	if stats.FindingsDir != "" {
+		out = append(out, exportedFile{label: "fs", path: stats.FindingsDir, detail: fmt.Sprintf("%d findings", stats.Findings)})
+	}
+	return out
+}
+
+// displayExportPath renders an export destination as an absolute path with the
+// home directory collapsed to "~", so the summary shows exactly where a file
+// landed regardless of the cwd. Falls back to the raw path if it can't be made
+// absolute.
+func displayExportPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	return terminal.ShortenHome(abs)
+}
+
+// printExportSummary lists every materialized output under one aligned "Exports"
+// header, so a multi-format run reports its files consistently instead of
+// interleaving differently-shaped per-format "exported to" messages. Paths are
+// shown absolute (home collapsed to "~"). No-ops when nothing was written.
+func printExportSummary(outputs []exportedFile) {
+	if len(outputs) == 0 {
+		return
+	}
+	labelW := 0
+	for _, o := range outputs {
+		if len(o.label) > labelW {
+			labelW = len(o.label)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "\n%s %s\n", terminal.InfoSymbol(), terminal.BoldAqua("Exports"))
+	for _, o := range outputs {
+		line := fmt.Sprintf("  %-*s  %s", labelW, o.label, terminal.Cyan(displayExportPath(o.path)))
+		if o.detail != "" {
+			line += "  " + terminal.Gray("("+o.detail+")")
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
+}
+
 // finishStatelessExport writes the full database export to the output file(s)
 // when running in stateless mode. StandardWriter's live file output is
 // suppressed in stateless mode, so every requested format (console, jsonl,
-// html, report, pdf) is materialized here from the database.
+// html, report, pdf) is materialized here from the database, then listed under a
+// single unified "Exports" summary.
 func finishStatelessExport(db *database.DB, opts *types.Options, outputPath string, skipConsole bool) {
 	if !opts.Stateless {
 		return
@@ -1292,7 +1356,7 @@ func finishStatelessExport(db *database.DB, opts *types.Options, outputPath stri
 			if stats, err := writeFSExport(ctx, db, database.QueryFilters{}, "", fsExportOptions{omitResponse: opts.OmitResponse}); err != nil {
 				fmt.Fprintf(os.Stderr, "%s Failed to export fs tree: %v\n", terminal.ErrorPrefix(), err)
 			} else {
-				fsPrintSummary(stats)
+				printExportSummary(fsExportOutputs(stats))
 			}
 		}
 		return
@@ -1300,6 +1364,11 @@ func finishStatelessExport(db *database.DB, opts *types.Options, outputPath stri
 
 	basePath := types.StripFormatExtension(outputPath)
 
+	// Materialize every requested format, collecting one row per output file/dir,
+	// then print them together under a single "Exports" summary. Failures still
+	// print inline (they're not successes to list); the trailing summary lists
+	// only what was actually written.
+	var outputs []exportedFile
 	for _, format := range opts.OutputFormats {
 		outPath := types.FormatOutputPath(basePath, format)
 		switch format {
@@ -1308,17 +1377,23 @@ func finishStatelessExport(db *database.DB, opts *types.Options, outputPath stri
 				// A transcript was captured to this path; do not overwrite it.
 				continue
 			}
-			exportStatelessConsole(ctx, db, outPath, opts.OmitResponse)
+			if e, ok := exportStatelessConsole(ctx, db, outPath, opts.OmitResponse); ok {
+				outputs = append(outputs, e)
+			}
 		case "jsonl":
-			exportStatelessJSONL(ctx, db, opts, outPath)
+			if e, ok := exportStatelessJSONL(ctx, db, opts, outPath); ok {
+				outputs = append(outputs, e)
+			}
 		case "sqlite":
-			exportStatelessSQLite(ctx, db, outPath)
+			if e, ok := exportStatelessSQLite(ctx, db, outPath); ok {
+				outputs = append(outputs, e)
+			}
 		case "fs":
 			// The stateless temp DB holds only this run → whole-DB tree ("").
 			if stats, err := writeFSExport(ctx, db, database.QueryFilters{}, outPath, fsExportOptions{omitResponse: opts.OmitResponse}); err != nil {
 				fmt.Fprintf(os.Stderr, "%s Failed to export fs tree: %v\n", terminal.ErrorPrefix(), err)
 			} else {
-				fsPrintSummary(stats)
+				outputs = append(outputs, fsExportOutputs(stats)...)
 			}
 		default:
 			for _, rf := range reportFormats {
@@ -1328,15 +1403,20 @@ func finishStatelessExport(db *database.DB, opts *types.Options, outputPath stri
 				if rf.beforeMsg != "" {
 					fmt.Fprintf(os.Stderr, "%s %s\n", terminal.InfoSymbol(), rf.beforeMsg)
 				}
+				// Capture the report's body-trim summary (HTML only) so it lands as
+				// the row's detail in the unified "Exports" list instead of a long
+				// inline note printed mid-run.
+				var trim output.ReportTrimInfo
 				// Stateless temp DB holds only this run → whole-DB report ("").
-				if err := generateReportFromDB(ctx, db, outPath, opts.OmitResponse, "", "", rf); err != nil {
+				if err := generateReportFromDB(ctx, db, outPath, opts.OmitResponse, "", "", rf, func(t output.ReportTrimInfo) { trim = t }); err != nil {
 					fmt.Fprintf(os.Stderr, "%s Failed to generate %s: %v\n", terminal.ErrorPrefix(), rf.label, err)
 				} else {
-					fmt.Fprintf(os.Stderr, "%s %s exported to %s\n", terminal.InfoSymbol(), rf.label, terminal.Cyan(outPath))
+					outputs = append(outputs, exportedFile{label: rf.format, path: outPath, detail: trim.Summary()})
 				}
 			}
 		}
 	}
+	printExportSummary(outputs)
 }
 
 // dbIsolateAgentFlagUsage is the shared --db-isolate help text for the agent
@@ -1563,14 +1643,13 @@ func writeJSONLExport(ctx context.Context, db *database.DB, w io.Writer, omitRes
 // file. Used only in stateless mode, where the temp DB holds just this run, so
 // the whole-DB export is implicitly scoped to the current scan. The query runs
 // before the file is created so a query failure leaves no empty output file.
-func exportStatelessJSONL(ctx context.Context, db *database.DB, opts *types.Options, outputPath string) {
+func exportStatelessJSONL(ctx context.Context, db *database.DB, opts *types.Options, outputPath string) (exportedFile, bool) {
 	n, err := streamJSONLToFile(ctx, db, outputPath, opts.OmitResponse, "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s Failed to export data: %v\n", terminal.ErrorPrefix(), err)
-		return
+		return exportedFile{}, false
 	}
-	fmt.Fprintf(os.Stderr, "%s Results exported to %s (%d records)\n",
-		terminal.InfoSymbol(), terminal.Cyan(outputPath), n)
+	return exportedFile{label: "jsonl", path: outputPath, detail: fmt.Sprintf("%d records", n)}, true
 }
 
 // exportStatelessSQLite materializes the stateless run's database to a
@@ -1580,12 +1659,12 @@ func exportStatelessJSONL(ctx context.Context, db *database.DB, opts *types.Opti
 // later with `vigolium finding/traffic -S --db <file>.sqlite`. VACUUM INTO
 // refuses to overwrite, so any stale target (and its WAL/SHM sidecars) is
 // removed first.
-func exportStatelessSQLite(ctx context.Context, db *database.DB, outputPath string) {
+func exportStatelessSQLite(ctx context.Context, db *database.DB, outputPath string) (exportedFile, bool) {
 	for _, p := range []string{outputPath, outputPath + "-wal", outputPath + "-shm"} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "%s Failed to prepare SQLite export path %s: %v\n",
 				terminal.ErrorPrefix(), terminal.Cyan(outputPath), err)
-			return
+			return exportedFile{}, false
 		}
 	}
 	// outputPath is operator-supplied (not attacker-controlled); single-quote
@@ -1593,10 +1672,9 @@ func exportStatelessSQLite(ctx context.Context, db *database.DB, outputPath stri
 	stmt := fmt.Sprintf("VACUUM INTO '%s'", strings.ReplaceAll(outputPath, "'", "''"))
 	if _, err := db.ExecContext(ctx, stmt); err != nil {
 		fmt.Fprintf(os.Stderr, "%s Failed to export SQLite database: %v\n", terminal.ErrorPrefix(), err)
-		return
+		return exportedFile{}, false
 	}
-	fmt.Fprintf(os.Stderr, "%s SQLite database exported to %s\n",
-		terminal.InfoSymbol(), terminal.Cyan(outputPath))
+	return exportedFile{label: "sqlite", path: outputPath}, true
 }
 
 // finishScanJSONLExport emits the post-scan unified JSONL envelope for a scan
@@ -1646,7 +1724,7 @@ func finishScanJSONLExport(db *database.DB, opts *types.Options) {
 // with the default console format so -o always produces a populated file even
 // when the phase only ingests HTTP records (e.g. discovery) and emits no
 // findings.
-func exportStatelessConsole(ctx context.Context, db *database.DB, outputPath string, omitResponse bool) {
+func exportStatelessConsole(ctx context.Context, db *database.DB, outputPath string, omitResponse bool) (exportedFile, bool) {
 	var lines int
 	err := atomicfile.Write(outputPath, func(w *bufio.Writer) error {
 		return streamExportData(ctx, db, omitResponse, "", "", func(item any) error {
@@ -1673,10 +1751,9 @@ func exportStatelessConsole(ctx context.Context, db *database.DB, outputPath str
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s Failed to export data: %v\n", terminal.ErrorPrefix(), err)
-		return
+		return exportedFile{}, false
 	}
-	fmt.Fprintf(os.Stderr, "%s Results exported to %s (%d lines)\n",
-		terminal.InfoSymbol(), terminal.Cyan(outputPath), lines)
+	return exportedFile{label: "console", path: outputPath, detail: fmt.Sprintf("%d lines", lines)}, true
 }
 
 // consoleHTTPRecordLine renders an HTTP record export item as a plain-text
@@ -2068,6 +2145,15 @@ func summaryScopeHosts(ctx context.Context, repo *database.Repository, settings 
 // same project + in-scope hostnames (findings carry no port column), so the summary
 // reflects the current scan's targets rather than the whole project.
 func printScanCompletionSummary(repo *database.Repository, projectUUID string, hosts []database.HostTarget, elapsed time.Duration) {
+	// Header line carries the total wall-clock duration, so it prints first and
+	// unconditionally: even if the count queries below fail, the operator still
+	// sees the completion banner and how long the run took.
+	fmt.Fprintf(os.Stderr, "\n%s %s %s%s\n",
+		terminal.Aqua(terminal.SymbolSparkle),
+		terminal.BoldAqua("Native scan completed"),
+		terminal.Gray("in "),
+		terminal.Magenta(elapsed.Round(time.Second).String()))
+
 	if repo == nil {
 		return
 	}
@@ -2081,6 +2167,19 @@ func printScanCompletionSummary(repo *database.Repository, projectUUID string, h
 		return
 	}
 
+	// Records line, with the status-class breakdown (2xx/3xx/4xx/5xx…) appended
+	// inline. The classes cover the same in-scope origins as the record count, so
+	// they sum to it. Best-effort: a status-query error just drops the breakdown.
+	recordsLine := fmt.Sprintf("  %s Records: %s http records ingested",
+		terminal.Purple(terminal.SymbolInfo),
+		terminal.Cyan(fmt.Sprintf("%d", recordCount)))
+	if byCode, err := repo.CountRecordsByStatusCode(ctx, hosts...); err == nil {
+		if classes := formatStatusClassLine(bucketStatusCounts(byCode)); classes != "" {
+			recordsLine += terminal.Gray(" — ") + classes
+		}
+	}
+	fmt.Fprintln(os.Stderr, recordsLine)
+
 	// Count findings by severity, scoped to the same project + in-scope hostnames.
 	counts, err := database.CountFindingsBySeverity(ctx, repo.DB(), projectUUID, database.HostnamesOf(hosts)...)
 	if err != nil {
@@ -2091,19 +2190,6 @@ func printScanCompletionSummary(repo *database.Repository, projectUUID string, h
 	for _, c := range counts {
 		totalFindings += c
 	}
-
-	fmt.Fprintf(os.Stderr, "  %s Records: %s http records ingested\n",
-		terminal.Purple(terminal.SymbolInfo),
-		terminal.Cyan(fmt.Sprintf("%d", recordCount)))
-
-	// Total scan duration always prints last, after Records and the Findings line
-	// (whichever branch runs below). Registered here — not at function entry — so
-	// the rare DB-error early returns above don't emit a lone Duration line.
-	defer func() {
-		fmt.Fprintf(os.Stderr, "  %s Duration: %s\n",
-			terminal.Purple(terminal.SymbolInfo),
-			terminal.Gray(elapsed.Round(time.Second).String()))
-	}()
 
 	if totalFindings == 0 {
 		fmt.Fprintf(os.Stderr, "  %s Findings: %s\n",

@@ -49,6 +49,83 @@ func TestFindingPathPrefix(t *testing.T) {
 	}
 }
 
+func TestPocURLFromRequest(t *testing.T) {
+	base := "https://x.example/setup/page?source=BASE"
+	cases := []struct {
+		name    string
+		rawReq  string
+		baseLoc string
+		want    string
+	}{
+		{
+			name:    "same-endpoint-payload-query-upgraded",
+			rawReq:  "GET /setup/page?source=%22%5Ealert%281%29%5E%22 HTTP/1.1\r\nHost: x.example\r\n\r\n",
+			baseLoc: base,
+			want:    "https://x.example/setup/page?source=%22%5Ealert%281%29%5E%22",
+		},
+		{
+			name:    "post-to-get-conversion-same-path",
+			rawReq:  "GET /setup/page?source=PAYLOAD HTTP/1.1\nHost: x.example\n\n",
+			baseLoc: "https://x.example/setup/page",
+			want:    "https://x.example/setup/page?source=PAYLOAD",
+		},
+		{
+			name:    "different-host-ignored",
+			rawReq:  "GET /api/config HTTP/1.1\r\nHost: other.example\r\n\r\n",
+			baseLoc: "https://cognito.example/pool",
+			want:    "",
+		},
+		{
+			name:    "different-path-ignored",
+			rawReq:  "GET /other/place?x=1 HTTP/1.1\r\nHost: x.example\r\n\r\n",
+			baseLoc: base,
+			want:    "",
+		},
+		{
+			name:    "identical-to-base-no-change",
+			rawReq:  "GET /setup/page?source=BASE HTTP/1.1\r\nHost: x.example\r\n\r\n",
+			baseLoc: base,
+			want:    "",
+		},
+		{"empty-request", "", base, ""},
+		{"malformed-request-line", "not-a-request-line", base, ""},
+		{"empty-base", "GET /x HTTP/1.1\r\n\r\n", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, pocURLFromRequest(tc.rawReq, tc.baseLoc))
+		})
+	}
+}
+
+func TestFindingDisplayLocations(t *testing.T) {
+	// Single-location injection finding: the shown URL is upgraded to the PoC URL
+	// carried in the request, not the base matched_at.
+	xss := &database.Finding{
+		MatchedAt: []string{"https://x.example/p?source=BASE"},
+		Request:   "GET /p?source=%3Cscript%3E HTTP/1.1\r\nHost: x.example\r\n\r\n",
+	}
+	assert.Equal(t, []string{"https://x.example/p?source=%3Cscript%3E"}, findingDisplayLocations(xss))
+
+	// Grouped multi-URL finding: never upgraded — every matched location is kept.
+	grouped := &database.Finding{
+		MatchedAt: []string{"https://x.example/a", "https://x.example/b"},
+		Request:   "GET /a?x=1 HTTP/1.1\r\nHost: x.example\r\n\r\n",
+	}
+	assert.Equal(t, []string{"https://x.example/a", "https://x.example/b"}, findingDisplayLocations(grouped))
+
+	// Request targeting a different endpoint: keep the matched_at location.
+	crossHost := &database.Finding{
+		MatchedAt: []string{"https://cognito.example/pool"},
+		Request:   "GET /api/config HTTP/1.1\r\nHost: app.example\r\n\r\n",
+	}
+	assert.Equal(t, []string{"https://cognito.example/pool"}, findingDisplayLocations(crossHost))
+
+	// No matched_at, no request: falls back to the finding's URL value.
+	bare := &database.Finding{URL: "https://x.example/only"}
+	assert.Equal(t, []string{"https://x.example/only"}, findingDisplayLocations(bare))
+}
+
 func TestColorSeverityTag(t *testing.T) {
 	assert.Equal(t, "[HIGH]", terminal.StripANSI(colorSeverityTag("high")))
 	assert.Equal(t, "[CRITICAL]", terminal.StripANSI(colorSeverityTag("critical")))

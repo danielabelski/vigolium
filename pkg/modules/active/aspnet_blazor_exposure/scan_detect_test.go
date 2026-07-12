@@ -58,8 +58,8 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host with no Blazor endpoints must not yield a finding")
 }
 
-// TestScanPerRequest_NoFP_TruncatedHTMLReflector reproduces the roche
-// trace.rawaf-test catch-all: every path returns 200 text/html echoing the
+// TestScanPerRequest_NoFP_TruncatedHTMLReflector reproduces the acme
+// trace.acme.com catch-all: every path returns 200 text/html echoing the
 // request, but a gzip/Content-Length:0 quirk left only a truncated tail (no
 // leading <!DOCTYPE/<html>), so the anti-markers are gone yet weak Blazor markers
 // ("assembly", "resources", "_framework", "Blazor", "connectionId") survive. The

@@ -190,3 +190,31 @@ func TestClassifyParam_PathUUID(t *testing.T) {
 	assert.Equal(t, UUIDv4, result.IDType)
 	assert.Equal(t, "orders", result.ResourceNoun)
 }
+
+// TestClassifyParam_SingularResourceNoun verifies that singular resource path
+// segments (/basket/6, /user/1, /order/5) are classified as object IDs, not just
+// their plural forms — the Juice Shop basket-IDOR miss (GET /rest/basket/6).
+func TestClassifyParam_SingularResourceNoun(t *testing.T) {
+	cases := []struct {
+		name         string
+		pathSegments []string
+		value        string
+		wantObjectID bool
+	}{
+		{"singular basket", []string{"", "rest", "basket", "6"}, "6", true},
+		{"singular user", []string{"", "api", "user", "1"}, "1", true},
+		{"singular order", []string{"", "order", "5"}, "5", true},
+		{"singular category (y→ies)", []string{"", "category", "3"}, "3", true},
+		{"plural still works", []string{"", "users", "42"}, "42", true},
+		{"non-resource segment stays ambiguous", []string{"", "page", "5"}, "5", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClassifyParam("", tc.value, true, tc.pathSegments)
+			if got.IsObjectID != tc.wantObjectID {
+				t.Errorf("ClassifyParam(%v) IsObjectID = %v, want %v (score=%d, resource=%q)",
+					tc.pathSegments, got.IsObjectID, tc.wantObjectID, got.TotalScore, got.ResourceNoun)
+			}
+		})
+	}
+}

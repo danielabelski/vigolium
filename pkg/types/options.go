@@ -46,6 +46,10 @@ type Options struct {
 
 	// MaxPerHost is the maximum concurrent requests per host
 	MaxPerHost int
+	// NoWafPacing disables the proactive CDN/WAF-edge pacing (pre-arming the
+	// per-host limiter when an edge is fingerprinted). The reactive WAF-block back-off
+	// still applies. Wired from the --no-waf-pacing CLI flag.
+	NoWafPacing bool
 	// MaxHostError is the maximum number of errors allowed for a host
 	MaxHostError int
 	// MaxFindingsPerModule caps findings emitted per module (0 = unlimited)

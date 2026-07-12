@@ -41,16 +41,14 @@ func TestScanPerRequest_SensitiveFields(t *testing.T) {
 	require.NotEmpty(t, results)
 	assert.Equal(t, ModuleID, results[0].ModuleID)
 	assert.Equal(t, "Sensitive API Fields Detected", results[0].Info.Name)
-	assert.Equal(t, output.RecordKindCandidate, results[0].RecordKind)
-	assert.Equal(t, output.EvidenceGradeCandidate, results[0].EvidenceGrade)
+	assert.Equal(t, output.RecordKindFinding, results[0].EffectiveRecordKind())
 }
 
-// TestScanPerRequest_RedactedValuesSkipped is the regression for the name-only
+// TestScanPerRequest_RedactedValuesAreFindings is the regression for the name-only
 // false positive: a redacted user object ({"password":null,"secret":""}) or a
 // feature flag ({"secret":false}) carries the sensitive KEY names but no value —
-// the value gate must keep them as observations rather than vulnerability
-// candidates, preserving useful schema context without inflating findings.
-func TestScanPerRequest_RedactedValuesAreObservations(t *testing.T) {
+// the parser retains that schema signal as a visible informational finding.
+func TestScanPerRequest_RedactedValuesAreFindings(t *testing.T) {
 	t.Parallel()
 	m := New()
 	for _, body := range []string{
@@ -62,8 +60,7 @@ func TestScanPerRequest_RedactedValuesAreObservations(t *testing.T) {
 		results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
 		require.NoError(t, err)
 		require.Len(t, results, 1)
-		assert.Equal(t, output.RecordKindObservation, results[0].RecordKind)
-		assert.Equal(t, output.EvidenceGradeObservation, results[0].EvidenceGrade)
+		assert.Equal(t, output.RecordKindFinding, results[0].EffectiveRecordKind())
 	}
 }
 
@@ -79,14 +76,14 @@ func TestScanPerRequest_SeverityIsLow(t *testing.T) {
 	assert.Equal(t, severity.Low, results[0].Info.Severity)
 }
 
-func TestScanPerRequest_PublicAPIIdentifierIsObservation(t *testing.T) {
+func TestScanPerRequest_PublicAPIIdentifierIsFinding(t *testing.T) {
 	t.Parallel()
 	m := New()
 	ctx := makeJSONCtx(`{"api_key":"AKIAIOSFODNN7EXAMPLE"}`)
 	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.Len(t, results, 1)
-	assert.Equal(t, output.RecordKindObservation, results[0].RecordKind)
+	assert.Equal(t, output.RecordKindFinding, results[0].EffectiveRecordKind())
 }
 
 func TestScanPerRequest_SensitiveKeyInsideStringIgnored(t *testing.T) {

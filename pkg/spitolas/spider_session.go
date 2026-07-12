@@ -71,6 +71,9 @@ func NewSpiderSession(ctx context.Context, base SpiderConfig, repo RecordSaver) 
 	}
 	capture := network.New(writer, crawlerCfg.NoColor, base.Silent, base.Verbose,
 		base.IncludeResponseBody, base.IncludeHeaders, targetHost, "spider")
+	// Keep several distinct query-value variants per endpoint shape (category/
+	// filter/tab/search links) rather than collapsing them to one representative.
+	capture.SetMaxParamValueVariants(crawlerCfg.MaxParamValueVariants)
 	if err := capture.Start(br.RodBrowser()); err != nil {
 		_ = pool.Close()
 		_ = writer.Close()

@@ -106,9 +106,16 @@ func newConfirmMarker() string {
 // execCandidate is one executable payload attempt: the bytes to inject plus the
 // literal breakout signatures that must appear UNESCAPED in the response body for
 // the breakout to count (strongest first).
+//
+// quote is the JavaScript-string delimiter this payload breaks out of ('\”, '"'
+// or '`'), or 0 when the candidate is not a JS-string breakout (HTML markup,
+// event handler, ${} template injection, raw code). A non-zero quote switches the
+// body check to the escaping-aware signatureSurvived (see there); 0 uses plain
+// substring matching.
 type execCandidate struct {
 	payload    string
 	signatures []string
+	quote      byte
 }
 
 // execContextCandidates returns the executable XSS payloads to try for a
@@ -129,12 +136,14 @@ func execContextCandidates(rc ReflectionContext, marker string) []execCandidate 
 	one := func(payload string, sigs ...string) []execCandidate {
 		return []execCandidate{{payload: payload, signatures: sigs}}
 	}
-	// jsString builds the operator-chaining + terminator candidate set for a value
-	// reflected inside a quote-delimited JS string.
+	// jsString builds the operator-chaining + terminator + backslash-escape-bypass
+	// candidate set for a value reflected inside a quote-delimited JS string. The
+	// signature is the payload itself, credited only when its quote survives
+	// unescaped — the quote field drives the escaping-aware signatureSurvived.
 	jsString := func(quote byte) []execCandidate {
 		var out []execCandidate
 		for _, p := range xssbreakout.JSStringPayloads(quote, alert) {
-			out = append(out, execCandidate{payload: p, signatures: []string{p, alert}})
+			out = append(out, execCandidate{payload: p, signatures: []string{p}, quote: quote})
 		}
 		return out
 	}
@@ -334,20 +343,64 @@ func sendExec(
 	body := resp.Body().String()
 	resp.Close()
 
-	// Redirects and error pages don't carry an exploitable reflection.
-	if status >= 300 {
+	// Skip only 3xx redirects — 4xx/5xx pages ARE rendered and their scripts run
+	// (e.g. a Salesforce 401 login/setup page that reflects `source` into a JS
+	// string), so they must be confirmed like any 2xx. Gating all >= 300 here once
+	// silently dropped genuine XSS on auth-gated (401/403) and not-found (404) pages.
+	if isRedirect(status) {
 		return out
 	}
 
 	for _, sig := range cand.signatures {
-		if sig != "" && strings.Contains(body, sig) {
-			out.httpBreakout = true
-			out.signature = sig
-			out.bodySnippet = snippetAround(body, sig)
-			break
+		if sig == "" {
+			continue
 		}
+		if !signatureSurvived(body, sig, cand.quote) {
+			continue
+		}
+		out.httpBreakout = true
+		out.signature = sig
+		out.bodySnippet = snippetAround(body, sig)
+		break
 	}
 	return out
+}
+
+// signatureSurvived reports whether sig appears in body as a genuine breakout. For
+// a non-JS-string candidate (quote == 0) it is a plain substring test. For a
+// JS-string candidate it is escaping-aware: the breakout quote in the matched
+// region must not itself be backslash-escaped, i.e. it must be preceded by an even
+// number of consecutive backslashes. This is what separates a real breakout
+// (\\'  — an escaped backslash then a live closing quote) from a neutralized
+// reflection (\'  — the quote escaped and still inside the string), which a plain
+// strings.Contains cannot tell apart and which used to pin genuine High findings
+// (and echo-only false positives) at Low.
+func signatureSurvived(body, sig string, quote byte) bool {
+	if quote == 0 {
+		return strings.Contains(body, sig)
+	}
+	// The breakout quote is the first quote byte of the signature; the bytes before
+	// it (e.g. the payload's own leading backslash) are part of the run we count.
+	qi := strings.IndexByte(sig, quote)
+	if qi < 0 {
+		return strings.Contains(body, sig)
+	}
+	for from := 0; from <= len(body); {
+		idx := strings.Index(body[from:], sig)
+		if idx < 0 {
+			return false
+		}
+		quotePos := from + idx + qi
+		backslashes := 0
+		for j := quotePos - 1; j >= 0 && body[j] == '\\'; j-- {
+			backslashes++
+		}
+		if backslashes%2 == 0 {
+			return true // quote is not escaped — the string closed, breakout is real
+		}
+		from += idx + 1
+	}
+	return false
 }
 
 // browserConfirm navigates the fuzzed GET request in a headless browser and
