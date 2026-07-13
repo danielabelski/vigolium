@@ -59,7 +59,16 @@ func runAutopilotOlium(settings *config.Settings, repo *database.Repository, ins
 
 	sessionsDir := settings.Agent.EffectiveSessionsDir()
 	agenticScanUUID := pinnedOrNewUUID(globalScanUUID)
-	sessionDir, sdErr := agent.EnsureSessionDir(sessionsDir, agenticScanUUID)
+	var sessionDir string
+	var sdErr error
+	if autopilotSessionDir != "" {
+		// --session-dir: pin the debug-artifact directory explicitly. EnsureSessionDir
+		// builds the subdir tree under baseDir/name; the run UUID stays a real UUID
+		// (see parentAgenticScanUUID below), so a non-UUID dir name is fine here.
+		sessionDir, sdErr = agent.EnsureSessionDir(filepath.Dir(autopilotSessionDir), filepath.Base(autopilotSessionDir))
+	} else {
+		sessionDir, sdErr = agent.EnsureSessionDir(sessionsDir, agenticScanUUID)
+	}
 	if sdErr != nil {
 		zap.L().Warn("Failed to create session dir", zap.Error(sdErr))
 	}
@@ -118,7 +127,9 @@ func runAutopilotOlium(settings *config.Settings, repo *database.Repository, ins
 	startedAt := time.Now()
 	var parentAgenticScanUUID string
 	if sessionDir != "" {
-		parentAgenticScanUUID = filepath.Base(sessionDir)
+		// The real run UUID (not the dir basename) so DB linkage holds even when
+		// --session-dir points artifacts at a custom directory.
+		parentAgenticScanUUID = agenticScanUUID
 	}
 	if repo != nil && parentAgenticScanUUID != "" {
 		parentRun := &database.AgenticScan{
@@ -279,7 +290,30 @@ func runAutopilotOlium(settings *config.Settings, repo *database.Repository, ins
 	}
 
 	webhook.FireAgenticScan(settings, repo, parentAgenticScanUUID)
+	copyTranscriptIfRequested(sessionDir, streamWriter)
 	return nil
+}
+
+// copyTranscriptIfRequested honors --transcript: after the run, copy the
+// session's transcript.jsonl to the requested path so it survives even when the
+// caller doesn't want to hunt in the session dir (e.g. a throwaway/stateless DB
+// run kept only for debugging). The in-session copy is always kept; any failure
+// is non-fatal and surfaced on the stream.
+func copyTranscriptIfRequested(sessionDir string, w io.Writer) {
+	if autopilotTranscript == "" || sessionDir == "" {
+		return
+	}
+	src := filepath.Join(sessionDir, "transcript.jsonl")
+	data, err := os.ReadFile(src)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "[transcript] could not read %s: %v\n", src, err)
+		return
+	}
+	if err := os.WriteFile(autopilotTranscript, data, 0o600); err != nil {
+		_, _ = fmt.Fprintf(w, "[transcript] could not write %s: %v\n", autopilotTranscript, err)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "[transcript] copied to %s\n", autopilotTranscript)
 }
 
 // autopilotRunStatus maps an autopilot result to a short status string for the

@@ -68,6 +68,8 @@ var (
 	autopilotDisableGuardrail bool
 	autopilotHeaded           bool
 	autopilotResume           string
+	autopilotSessionDir       string
+	autopilotTranscript       string
 
 	// autopilotInstructionPrefix holds the verbatim natural-language prompt
 	// when autopilot was invoked with a positional `<prompt>` argument. It is
@@ -166,6 +168,8 @@ func init() {
 	f.BoolVar(&autopilotDisableGuardrail, "disable-guardrail", false, "Skip the prompt-safety classifier on the natural-language prompt (use only when refusing a known-good prompt)")
 	f.BoolVarP(&autopilotVerbose, "verbose", "v", false, "Show a per-tool head/tail preview of each tool result alongside the standard one-liner")
 	f.StringVar(&autopilotResume, "resume", "", "Resume a previous durable-autopilot run by its agentic-scan UUID: reuses its session dir, project, target, and durable scratchpad/candidates; skips pre-scan and audit re-prep (requires agent.olium.autopilot_mode != legacy)")
+	f.StringVar(&autopilotSessionDir, "session-dir", "", "Explicit session directory for this run's debug artifacts (transcript.jsonl, runtime.log, scratchpad, tool-results). Default: <agent.sessions_dir>/<run-uuid>. Pin it to know exactly where to look when debugging (e.g. alongside -S/--stateless scans).")
+	f.StringVar(&autopilotTranscript, "transcript", "", "After the run, also copy the session's transcript.jsonl to this path. The in-session copy is always kept; this is a convenience for debugging (e.g. keep the transcript when the DB is throwaway).")
 }
 
 func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {

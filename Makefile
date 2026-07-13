@@ -4,7 +4,8 @@
 .PHONY: all build-linux build-darwin build-windows deps-chrome-cft sync-platform \
 	test-canary-postgres test-pg-full test-e2e-autonomous test-e2e-scorecard \
 	access-lab-up access-lab-down access-lab-logs access-lab-status \
-	setup-agent-codex test-smoke-autopilot-access
+	setup-agent-codex test-smoke-autopilot test-smoke-autopilot-ginandjuice \
+	test-smoke-autopilot-crapi test-smoke-autopilot-juiceshop
 
 # Go parameters
 GOCMD=go
@@ -656,21 +657,44 @@ setup-agent-codex:
 	vigolium config set agent.olium.model gpt-5.4
 	@echo "$(PREFIX) done. Verify with: vigolium ol -p 'what model are you running'"
 
-# Durable-autopilot access-control + XSS SMOKE test (not a deterministic e2e
-# test): runs the REAL agent (a live, PAID LLM run under your configured
-# agent.olium credentials) against access-lab, feeding credentials in the
-# prompt, then scores IDOR / BAC / DOM-XSS / stored-XSS / mass-assignment.
+# Durable-autopilot SMOKE tests (not deterministic e2e tests): run the REAL
+# agent (a live, PAID LLM run under your configured agent.olium credentials)
+# against a vulnerable target, logging in and hunting IDOR / BAC / XSS / mass-
+# assignment — the auth-gated, multi-step, browser classes a native scan can't
+# reach. Print the exact agent command + the actual input before running.
 #
 #   !!! COSTS MONEY. Requires `make setup-agent-codex` (or another configured
-#   !!! agent.olium provider) first. Bounded by MAX_DURATION (default 12m).
+#   !!! agent.olium provider) first. Bounded by MAX_DURATION (default 15m).
 #
-# Uses the freshly built branch binary (bin/vigolium) so enforced mode is
-# available. Prints the exact agent command + setup before running. Override
-# via env, e.g.:
-#   MODEL=gpt-5.5 MODE=shadow MAX_DURATION=8m make test-smoke-autopilot-access
-test-smoke-autopilot-access: build
-	@echo "$(PREFIX) Durable-autopilot access-control + XSS SMOKE test (REAL, PAID agent run)..."
-	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium bash scripts/smoke-autopilot-access.sh
+# Override via env, e.g.:
+#   MODEL=gpt-5.5 MODE=shadow MAX_DURATION=8m make test-smoke-autopilot
+test-smoke-autopilot: build
+	@echo "$(PREFIX) Durable-autopilot access-lab SMOKE test (REAL, PAID agent run)..."
+	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=access-lab bash scripts/smoke-autopilot.sh
+
+# Live PortSwigger demo shop (external target, carlos/hunter2). Outward-facing +
+# paid — only run against a target you are authorized to test.
+test-smoke-autopilot-ginandjuice: build
+	@echo "$(PREFIX) Durable-autopilot SMOKE test against ginandjuice.shop (REAL, PAID, EXTERNAL)..."
+	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=ginandjuice bash scripts/smoke-autopilot.sh
+
+# Local OWASP crAPI (brings the stack up; provisions a login account best-effort).
+test-smoke-autopilot-crapi: build crapi-up
+	@echo "$(PREFIX) Provisioning a crAPI account (best-effort) ..."
+	@curl -s -m 15 -X POST http://127.0.0.1:8888/identity/api/auth/signup \
+		-H 'Content-Type: application/json' \
+		-d '{"name":"smoke","email":"smoke@crapi.test","number":"4088888888","password":"Smoke123!"}' >/dev/null 2>&1 || true
+	@echo "$(PREFIX) Durable-autopilot SMOKE test against crAPI (REAL, PAID agent run)..."
+	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=crapi CREDS=smoke@crapi.test/Smoke123! bash scripts/smoke-autopilot.sh
+
+# Local OWASP Juice Shop (brings it up; registers a login account best-effort).
+test-smoke-autopilot-juiceshop: build juiceshop-up
+	@echo "$(PREFIX) Registering a Juice Shop account (best-effort) ..."
+	@curl -s -m 15 -X POST http://127.0.0.1:3000/api/Users \
+		-H 'Content-Type: application/json' \
+		-d '{"email":"smoke@juice-sh.op","password":"Smoke123!","passwordRepeat":"Smoke123!"}' >/dev/null 2>&1 || true
+	@echo "$(PREFIX) Durable-autopilot SMOKE test against Juice Shop (REAL, PAID agent run)..."
+	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=juiceshop CREDS=smoke@juice-sh.op/Smoke123! bash scripts/smoke-autopilot.sh
 
 # jstangle binary management
 # update-jstangle and ensure-jstangle are already declared .PHONY at the top.
