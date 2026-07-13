@@ -56,7 +56,7 @@ func (h *Handlers) startCombinedAuditRun(c fiber.Ctx, driver string, req AgentAu
 		return nil // 429 already sent
 	}
 
-	parentUUID, err := h.registerRunningAgenticScan("audit", driver, req.ScanUUID)
+	parentUUID, err := h.registerRunningAgenticScan("audit", driver, req.ScanUUID, projectUUID)
 	if err != nil {
 		h.releaseHeavyAgentSlotForProject(projectUUID)
 		if authCleanup != nil {

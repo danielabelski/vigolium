@@ -403,6 +403,10 @@ func (h *Handlers) HandleRunScan(c fiber.Ctx) error {
 	// runtime.log lands at a path uploadNativeScanResults can't find, and
 	// /api/findings?scan_uuid=<api-uuid> returns nothing.
 	opts.ScanUUID = scanID
+	// The server owns the scan record's pending/queued/running lifecycle below;
+	// tell the runner not to create a competing row, but let it keep ownership of
+	// the single terminal CompleteScan.
+	opts.ManagedScanRecord = true
 
 	formats, err := resolveAPIOutputFormats(req.OutputFormats)
 	if err != nil {
@@ -427,91 +431,102 @@ func (h *Handlers) HandleRunScan(c fiber.Ctx) error {
 
 	scanMode := "target"
 
-	scan := &database.Scan{
-		UUID:        scanID,
-		ProjectUUID: projectUUID,
-		Name:        "api-scan",
-		Status:      "pending",
-		Modules:     strings.Join(resolvedModules, ","),
-		ScanSource:  "api",
-		ScanMode:    scanMode,
-		StartedAt:   time.Now(),
-	}
-
-	if err := h.repo.CreateScan(ctx, scan); err != nil {
-		return respondScanPinError(c, err)
-	}
-
+	// Dry run: validate and return without persisting a scan record or building a
+	// runner. Nothing runs, so leaving no row (rather than a permanently "pending"
+	// one) is the honest result.
 	if req.DryRun {
 		return c.Status(fiber.StatusOK).JSON(ScanResponse{
 			ProjectUUID:  projectUUID,
 			ScanUUID:     scanID,
 			Status:       "dry_run",
-			Message:      "scan record created (dry run)",
+			Message:      "scan validated (dry run)",
 			TargetsCount: len(req.Targets),
 			ScanMode:     scanMode,
 		})
 	}
 
-	// Create scan runner
+	newScanRecord := func(status string) *database.Scan {
+		return &database.Scan{
+			UUID:        scanID,
+			ProjectUUID: projectUUID,
+			Name:        "api-scan",
+			Status:      status,
+			Modules:     strings.Join(resolvedModules, ","),
+			ScanSource:  "api",
+			ScanMode:    scanMode,
+			StartedAt:   time.Now(),
+		}
+	}
+
+	// Admission before heavyweight allocation: decide the outcome (reject / queue /
+	// run) first, and only then build a runner and persist a record. A rejected
+	// submission (queue full / project busy without a queue) leaves no pending row
+	// and no leaked runner. qCh is non-nil once we've decided to queue this scan.
+	h.scanMu.Lock()
+	st := h.getProjectScanState(projectUUID)
+
+	var qCh chan *queuedScan
+	if st.running {
+		// Project busy — queue if enabled, else reject.
+		if h.config.ScanQueueCapacity <= 0 {
+			h.scanMu.Unlock()
+			return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
+				Error: ErrScanAlreadyRunning.Error(),
+			})
+		}
+		ch, ok := h.scanQueues[projectUUID]
+		if !ok {
+			ch = make(chan *queuedScan, h.config.ScanQueueCapacity)
+			h.scanQueues[projectUUID] = ch
+			go h.scanQueueWorker(projectUUID, ch)
+		}
+		if len(ch) >= h.config.ScanQueueCapacity {
+			h.scanMu.Unlock()
+			return c.Status(fiber.StatusTooManyRequests).JSON(ErrorResponse{
+				Error: "scan queue full for this project",
+			})
+		}
+		qCh = ch
+	}
+
+	// Admitted (run or queue): build the runner and persist the record once.
+	status := "running"
+	if qCh != nil {
+		status = "queued"
+	}
 	scanRunner, err := runner.New(opts)
 	if err != nil {
+		h.scanMu.Unlock()
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to create scan runner: " + err.Error(),
 		})
 	}
-
 	scanRunner.SetSettings(settings)
 	scanRunner.SetRepository(h.repo)
-
-	// Acquire per-project scan lock
-	h.scanMu.Lock()
-	st := h.getProjectScanState(projectUUID)
-	if st.running {
-		// Project busy — check if queuing is enabled
-		if h.config.ScanQueueCapacity > 0 {
-			qCh, ok := h.scanQueues[projectUUID]
-			if !ok {
-				qCh = make(chan *queuedScan, h.config.ScanQueueCapacity)
-				h.scanQueues[projectUUID] = qCh
-				go h.scanQueueWorker(projectUUID, qCh)
-			}
-			if len(qCh) >= h.config.ScanQueueCapacity {
-				h.scanMu.Unlock()
-				return c.Status(fiber.StatusTooManyRequests).JSON(ErrorResponse{
-					Error: "scan queue full for this project",
-				})
-			}
-			scan.Status = "queued"
-			if err := h.repo.UpdateScan(ctx, scan); err != nil {
-				zap.L().Warn("failed to mark scan queued", zap.String("scan", scan.UUID), zap.Error(err))
-			}
-			qCh <- &queuedScan{
-				scanID:        scanID,
-				runner:        scanRunner,
-				projectUUID:   projectUUID,
-				enqueued:      time.Now(),
-				uploadResults: req.UploadResults,
-			}
-			h.scanMu.Unlock()
-			return c.Status(fiber.StatusAccepted).JSON(ScanResponse{
-				ProjectUUID:  projectUUID,
-				ScanUUID:     scanID,
-				Status:       "queued",
-				Message:      fmt.Sprintf("scan queued (position %d)", len(qCh)),
-				TargetsCount: len(req.Targets),
-				ScanMode:     scanMode,
-			})
-		}
+	if err := h.repo.CreateScan(ctx, newScanRecord(status)); err != nil {
 		h.scanMu.Unlock()
-		return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
-			Error: ErrScanAlreadyRunning.Error(),
-		})
+		scanRunner.Discard()
+		return respondScanPinError(c, err)
 	}
 
-	scan.Status = "running"
-	if err := h.repo.UpdateScan(ctx, scan); err != nil {
-		zap.L().Warn("failed to mark scan running", zap.String("scan", scan.UUID), zap.Error(err))
+	if qCh != nil {
+		qCh <- &queuedScan{
+			scanID:        scanID,
+			runner:        scanRunner,
+			projectUUID:   projectUUID,
+			enqueued:      time.Now(),
+			uploadResults: req.UploadResults,
+		}
+		position := len(qCh)
+		h.scanMu.Unlock()
+		return c.Status(fiber.StatusAccepted).JSON(ScanResponse{
+			ProjectUUID:  projectUUID,
+			ScanUUID:     scanID,
+			Status:       "queued",
+			Message:      fmt.Sprintf("scan queued (position %d)", position),
+			TargetsCount: len(req.Targets),
+			ScanMode:     scanMode,
+		})
 	}
 
 	st.runner = scanRunner
@@ -687,8 +702,8 @@ func (h *Handlers) HandleDeleteScan(c fiber.Ctx) error {
 		})
 	}
 
-	// Verify scan exists
-	_, err := h.repo.GetScanByUUID(c.Context(), scanUUID)
+	// Verify scan exists and belongs to the request's active project.
+	scan, err := h.repo.GetScanByUUID(c.Context(), scanUUID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
@@ -699,6 +714,12 @@ func (h *Handlers) HandleDeleteScan(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to retrieve scan: " + err.Error(),
 			Code:  fiber.StatusInternalServerError,
+		})
+	}
+	if !inRequestProject(c, scan.ProjectUUID) {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrScanNotFound.Error(),
+			Code:  fiber.StatusNotFound,
 		})
 	}
 
@@ -726,28 +747,32 @@ func (h *Handlers) HandleStopScan(c fiber.Ctx) error {
 		})
 	}
 
+	// Scope to the request's active project (X-Project-UUID): a scan is stopped
+	// only through the project that owns it, matching HandleGetScan/HandleDeleteScan.
+	projectUUID := getProjectUUID(c)
 	h.scanMu.Lock()
-	defer h.scanMu.Unlock()
-
-	// Find the scan across all projects
-	for _, st := range h.scanStates {
-		if st.running && st.scanID == scanUUID {
-			if st.runner != nil {
-				st.runner.Close()
-			}
-			return c.JSON(ScanStatusResponse{
-				ProjectUUID: getProjectUUID(c),
-				ScanUUID:    scanUUID,
-				Running:     true,
-				Status:      "cancelling",
-				Message:     "scan stop requested, workers finishing current tasks",
-			})
-		}
+	st, ok := h.scanStates[projectUUID]
+	if !ok || !st.running || st.scanID != scanUUID {
+		h.scanMu.Unlock()
+		return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
+			Error: "scan " + scanUUID + " is not running",
+			Code:  fiber.StatusConflict,
+		})
 	}
+	scanRunner := st.runner
+	h.scanMu.Unlock()
 
-	return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
-		Error: "scan " + scanUUID + " is not running",
-		Code:  fiber.StatusConflict,
+	// Close outside the lock: it cancels and waits (bounded) for the scan to
+	// unwind, so holding scanMu would stall every other scan operation meanwhile.
+	if scanRunner != nil {
+		scanRunner.Close()
+	}
+	return c.JSON(ScanStatusResponse{
+		ProjectUUID: projectUUID,
+		ScanUUID:    scanUUID,
+		Running:     true,
+		Status:      "cancelling",
+		Message:     "scan stop requested, workers finishing current tasks",
 	})
 }
 
@@ -802,35 +827,34 @@ func (h *Handlers) HandlePauseScan(c fiber.Ctx) error {
 		})
 	}
 
+	// Scope to the request's active project (see HandleStopScan).
+	projectUUID := getProjectUUID(c)
 	h.scanMu.Lock()
 	defer h.scanMu.Unlock()
 
-	// Find the scan across all projects
-	for _, st := range h.scanStates {
-		if st.running && st.scanID == scanUUID {
-			if st.runner.IsPaused() {
-				return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
-					Error: "scan is already paused",
-					Code:  fiber.StatusConflict,
-				})
-			}
-			st.runner.Pause()
-			if h.repo != nil {
-				_ = h.repo.PauseScan(c.Context(), scanUUID)
-			}
-			return c.JSON(ScanStatusResponse{
-				ProjectUUID: getProjectUUID(c),
-				ScanUUID:    scanUUID,
-				Running:     true,
-				Status:      "paused",
-				Message:     "scan paused, workers finishing current items",
-			})
-		}
+	st, ok := h.scanStates[projectUUID]
+	if !ok || !st.running || st.scanID != scanUUID || st.runner == nil {
+		return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
+			Error: "scan " + scanUUID + " is not running",
+			Code:  fiber.StatusConflict,
+		})
 	}
-
-	return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
-		Error: "scan " + scanUUID + " is not running",
-		Code:  fiber.StatusConflict,
+	if st.runner.IsPaused() {
+		return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
+			Error: "scan is already paused",
+			Code:  fiber.StatusConflict,
+		})
+	}
+	st.runner.Pause()
+	if h.repo != nil {
+		_ = h.repo.PauseScan(c.Context(), scanUUID)
+	}
+	return c.JSON(ScanStatusResponse{
+		ProjectUUID: projectUUID,
+		ScanUUID:    scanUUID,
+		Running:     true,
+		Status:      "paused",
+		Message:     "scan paused, workers finishing current items",
 	})
 }
 
@@ -844,35 +868,34 @@ func (h *Handlers) HandleResumeScan(c fiber.Ctx) error {
 		})
 	}
 
+	// Scope to the request's active project (see HandleStopScan).
+	projectUUID := getProjectUUID(c)
 	h.scanMu.Lock()
 	defer h.scanMu.Unlock()
 
-	// Find the scan across all projects
-	for _, st := range h.scanStates {
-		if st.running && st.scanID == scanUUID {
-			if !st.runner.IsPaused() {
-				return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
-					Error: "scan is not paused",
-					Code:  fiber.StatusConflict,
-				})
-			}
-			st.runner.Resume()
-			if h.repo != nil {
-				_ = h.repo.ResumeScan(c.Context(), scanUUID)
-			}
-			return c.JSON(ScanStatusResponse{
-				ProjectUUID: getProjectUUID(c),
-				ScanUUID:    scanUUID,
-				Running:     true,
-				Status:      "running",
-				Message:     "scan resumed",
-			})
-		}
+	st, ok := h.scanStates[projectUUID]
+	if !ok || !st.running || st.scanID != scanUUID || st.runner == nil {
+		return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
+			Error: "scan " + scanUUID + " is not running",
+			Code:  fiber.StatusConflict,
+		})
 	}
-
-	return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
-		Error: "scan " + scanUUID + " is not running",
-		Code:  fiber.StatusConflict,
+	if !st.runner.IsPaused() {
+		return c.Status(fiber.StatusConflict).JSON(ErrorResponse{
+			Error: "scan is not paused",
+			Code:  fiber.StatusConflict,
+		})
+	}
+	st.runner.Resume()
+	if h.repo != nil {
+		_ = h.repo.ResumeScan(c.Context(), scanUUID)
+	}
+	return c.JSON(ScanStatusResponse{
+		ProjectUUID: projectUUID,
+		ScanUUID:    scanUUID,
+		Running:     true,
+		Status:      "running",
+		Message:     "scan resumed",
 	})
 }
 
@@ -905,8 +928,8 @@ func (h *Handlers) HandleGetScanLogs(c fiber.Ctx) error {
 		})
 	}
 
-	// Verify scan exists
-	_, err := h.repo.GetScanByUUID(c.Context(), scanUUID)
+	// Verify scan exists and belongs to the request's active project.
+	scan, err := h.repo.GetScanByUUID(c.Context(), scanUUID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
@@ -917,6 +940,12 @@ func (h *Handlers) HandleGetScanLogs(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to retrieve scan: " + err.Error(),
 			Code:  fiber.StatusInternalServerError,
+		})
+	}
+	if !inRequestProject(c, scan.ProjectUUID) {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrScanNotFound.Error(),
+			Code:  fiber.StatusNotFound,
 		})
 	}
 
@@ -1005,12 +1034,20 @@ func (h *Handlers) runBackgroundScan(scanID string, scanRunner *runner.Runner, p
 		zap.String("scan_uuid", scanID),
 		zap.Duration("elapsed", elapsed))
 
-	// Background goroutine, no request in scope: the originating request returned
-	// 202 long ago. Use a fresh context so finalizing the scan record can't be
-	// cancelled by a client disconnect.
-	ctx := context.Background()
-	if err := h.repo.CompleteScan(ctx, scanID, errMsg); err != nil {
-		zap.L().Error("Failed to complete scan record", zap.String("scan_uuid", scanID), zap.Error(err))
+	// The runner is the single finalization owner: RunNativeScan writes the
+	// terminal status (on a detached context, so a stop can't fail it) and marks
+	// itself finalized. Only fall back to a server-side completion when the runner
+	// never reached its finalizer (e.g. infrastructure setup failed before the
+	// scan record's completion defer was registered), so we never overwrite the
+	// runner's truthful cancelled/failed outcome with "completed".
+	if !scanRunner.Finalized() {
+		// Background goroutine, no request in scope: the originating request
+		// returned 202 long ago. Use a fresh context so finalizing the scan record
+		// can't be cancelled by a client disconnect.
+		ctx := context.Background()
+		if err := h.repo.CompleteScan(ctx, scanID, errMsg); err != nil {
+			zap.L().Error("Failed to complete scan record", zap.String("scan_uuid", scanID), zap.Error(err))
+		}
 	}
 
 	if uploadResults {

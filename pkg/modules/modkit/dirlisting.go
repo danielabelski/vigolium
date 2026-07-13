@@ -157,6 +157,13 @@ func DetectDirectoryListingServer(body string) string {
 func ServiceBaseURL(service *httpmsg.Service) string {
 	proto := service.Protocol()
 	host := service.Host()
+	// Service.Host() is unbracketed, so a raw IPv6 literal must be wrapped in
+	// brackets to form a valid authority — otherwise "https://2001:db8::1" (or the
+	// ambiguous ":port" form) is an invalid URL the directory-listing modules then
+	// probe. A ':' in the host means it's an IPv6 address (hostnames/IPv4 never have one).
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
 	port := service.Port()
 	if port == 0 ||
 		(proto == "https" && port == 443) ||

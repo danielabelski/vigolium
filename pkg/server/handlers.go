@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -182,6 +183,11 @@ type Handlers struct {
 	// context from runCtx, so runCancel stops them first.
 	nativeScanSem chan struct{}
 	nativeScanWG  sync.WaitGroup
+
+	// shuttingDown is set at the start of Close so per-project queue workers stop
+	// starting newly-dequeued scans (they discard them instead) once the server is
+	// tearing down.
+	shuttingDown atomic.Bool
 
 	// Cached COUNT query results for server-info endpoint
 	counts *countCache
@@ -461,6 +467,16 @@ func (h *Handlers) getProjectScanState(projectUUID string) *scanState {
 // scanQueueWorker processes queued scans for a project sequentially.
 func (h *Handlers) scanQueueWorker(projectUUID string, ch chan *queuedScan) {
 	for qs := range ch {
+		// Server is tearing down: don't start a scan that was still queued. Release
+		// its runner and mark the record terminal so it doesn't linger as "queued".
+		if h.shuttingDown.Load() {
+			qs.runner.Discard()
+			if h.repo != nil {
+				_ = h.repo.CompleteScan(context.Background(), qs.scanID, "cancelled: server shutdown")
+			}
+			continue
+		}
+
 		h.scanMu.Lock()
 		st := h.getProjectScanState(qs.projectUUID)
 		st.running = true
@@ -528,31 +544,58 @@ func (h *Handlers) cancelRun(uuid string) bool {
 }
 
 func (h *Handlers) Close() {
+	// Mark shutdown first so queue workers stop starting newly-dequeued scans
+	// (they discard them) as soon as their channels are closed below.
+	h.shuttingDown.Store(true)
+
 	// Cancel in-flight agent runs first so their streaming connections drain
 	// and go idle before the HTTP server's graceful shutdown waits on them.
 	if h.runCancel != nil {
 		h.runCancel()
 	}
 	close(h.agentCleanupStop)
+
 	h.scanMu.Lock()
 	for _, ch := range h.scanQueues {
 		close(ch)
 	}
 	h.scanQueues = make(map[string]chan *queuedScan)
+	// Snapshot the runners of in-flight full (target) scans. These are launched as
+	// detached goroutines and are NOT tracked by nativeScanWG, so without this they
+	// would neither be cancelled nor awaited on shutdown.
+	var fullScanRunners []*runner.Runner
+	for _, st := range h.scanStates {
+		if st.running && st.runner != nil {
+			fullScanRunners = append(fullScanRunners, st.runner)
+		}
+	}
 	h.scanMu.Unlock()
 
-	// Wait for url/request background scans to unwind. runCancel above cancelled
-	// runCtx, from which they derive their context, so they should return
-	// promptly; bound the wait so a wedged scan can't hang shutdown.
+	// Cancel + release each in-flight full scan concurrently (Runner.Close cancels
+	// its context and waits, bounded by ShutdownTimeout; it's idempotent, so a
+	// concurrent runBackgroundScan.Close is harmless).
+	var fullScanWG sync.WaitGroup
+	for _, r := range fullScanRunners {
+		fullScanWG.Add(1)
+		go func(r *runner.Runner) {
+			defer fullScanWG.Done()
+			r.Close()
+		}(r)
+	}
+
+	// Wait for all background scans to unwind. runCancel above cancelled runCtx
+	// (url/request scans) and the runners above were cancelled; bound the wait so a
+	// wedged scan can't hang shutdown.
 	done := make(chan struct{})
 	go func() {
 		h.nativeScanWG.Wait()
+		fullScanWG.Wait()
 		close(done)
 	}()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
-		zap.L().Warn("Shutdown: native scans did not drain within 10s; proceeding")
+	case <-time.After(30 * time.Second):
+		zap.L().Warn("Shutdown: scans did not drain within 30s; proceeding")
 	}
 	// Agent engine is in-process (olium); no resources to release.
 }

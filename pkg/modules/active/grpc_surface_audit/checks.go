@@ -213,6 +213,15 @@ func (m *Module) checkMissingAuthz(
 		return nil
 	}
 
+	// Content equivalence, not just size: High/Firm requires the no-auth response
+	// to return the SAME message-frame bytes as the authed baseline (stable across
+	// both rounds). A same-size-but-different payload is likely a public/redacted
+	// view — real but far weaker — so it is emitted as a lower-confidence candidate
+	// instead of a High/Firm authorization bypass.
+	contentMatchesAuthed := base1.dataHash != "" &&
+		na1.dataHash == base1.dataHash &&
+		na1.dataHash == na2.dataHash
+
 	ev := modkit.NewEvidenceCollector()
 	ev.Add("authed-baseline", base1.rawReq, base1.rawResp)
 	ev.Add("no-auth round 1", na1.rawReq, na1.rawResp)
@@ -237,6 +246,15 @@ func (m *Module) checkMissingAuthz(
 		}
 	}
 
+	sev := severity.Medium
+	conf := severity.Tentative
+	desc := "An idempotent gRPC-Web read method returns a successful response (grpc-status 0) with substantive data of similar size to the authed baseline after the Authorization and Cookie headers are removed, reproduced across multiple rounds. However, the returned content DIFFERS from the authenticated response, so this may be a public/redacted view rather than a full authorization bypass — review the exposed fields."
+	if contentMatchesAuthed {
+		sev = severity.High
+		conf = severity.Firm
+		desc = "An idempotent gRPC-Web read method returns the SAME substantive data as the authenticated baseline (byte-identical message frames) after the Authorization and Cookie headers are removed, reproduced across multiple rounds. The method enforces no authorization."
+	}
+
 	return &output.ResultEvent{
 		ModuleID:           ModuleID,
 		Host:               u.Host,
@@ -249,18 +267,20 @@ func (m *Module) checkMissingAuthz(
 		ExtractedResults: []string{
 			fmt.Sprintf("RPC %s returns grpc-status 0 with %d bytes after removing Authorization and Cookie", u.Path, na1.dataLen),
 			fmt.Sprintf("Authed baseline: %d bytes; no-auth rounds: %d / %d bytes", base1.dataLen, na1.dataLen, na2.dataLen),
+			fmt.Sprintf("Content matches authed baseline: %t", contentMatchesAuthed),
 		},
 		Metadata: map[string]interface{}{
-			"rpc_path":      u.Path,
-			"grpc_status":   na1.grpcStatus,
-			"rounds":        2,
-			"decoded_bytes": na1.dataLen,
+			"rpc_path":               u.Path,
+			"grpc_status":            na1.grpcStatus,
+			"rounds":                 2,
+			"decoded_bytes":          na1.dataLen,
+			"content_matches_authed": contentMatchesAuthed,
 		},
 		Info: output.Info{
 			Name:        "gRPC-Web Missing Authorization",
-			Description: "An idempotent gRPC-Web read method returns a successful response (grpc-status 0) with substantive data after the Authorization and Cookie headers are removed, and the result reproduces across multiple rounds. The method enforces no authorization.",
-			Severity:    severity.High,
-			Confidence:  severity.Firm,
+			Description: desc,
+			Severity:    sev,
+			Confidence:  conf,
 			Tags:        ModuleTags,
 		},
 	}

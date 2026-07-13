@@ -2,6 +2,7 @@ package sqli_boolean_blind
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -118,14 +119,15 @@ func (m *Module) scanPerRequest(
 		return results, errors.Wrap(err, "failed to create insertion points")
 	}
 
-	// Filter out already checked insertion points
-	rhm := m.rhm.Get(scanCtx.DedupMgr())
-	if rhm != nil {
-		points = rhm.GetNotCheckedInsertionPoints(urlx, ctx.Request(), points)
-	}
 	if len(points) == 0 {
 		return results, nil
 	}
+	// rhm dedup is claimed PER insertion point inside the loop (just before
+	// scanning it), not for the whole batch up front: GetNotCheckedInsertionPoints
+	// marks every point seen at filter time, so a per-module timeout after an early
+	// point left the later (never-probed) points permanently suppressed on a
+	// retry/resume. See the per-point ShouldCheckInsertionPoint claim below.
+	rhm := m.rhm.Get(scanCtx.DedupMgr())
 
 	// If a WAF was observed fronting this host (recorded by other modules on
 	// block responses), prepare signature-evasion mutators so detection isn't
@@ -143,6 +145,12 @@ ipScan:
 		}
 		// Skip content-negotiation request headers (see negotiationHeaders).
 		if isExcludedHeader(ip) {
+			continue
+		}
+		// Claim dedup for THIS point immediately before scanning it (marks it seen).
+		// Doing it per point — rather than for the whole batch up front — keeps
+		// points that a tight per-module budget never reaches eligible on retry.
+		if rhm != nil && !rhm.ShouldCheckInsertionPoint(urlx, ctx.Request(), ip.Name(), ip.BaseValue(), strconv.Itoa(int(ip.Type()))) {
 			continue
 		}
 		baseValue := ip.BaseValue()
@@ -178,6 +186,13 @@ ipScan:
 		}
 
 		for _, pair := range payloads {
+			// Honor the per-module deadline BETWEEN payload pairs too: a
+			// high-parameter request's baseline/true/false/WAF/stability/confirmation
+			// probes for one point can far outlast the watchdog if only checked
+			// between points.
+			if runCtx.Err() != nil {
+				return results, nil
+			}
 			result, err := m.testPayloadPair(ctx, httpClient, ip, baseValue, pair, baselineSig, baselineFull)
 			if err != nil {
 				if errors.Is(err, hosterrors.ErrUnresponsiveHost) {

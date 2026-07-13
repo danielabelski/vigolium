@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vigolium/vigolium/internal/config"
@@ -66,6 +67,17 @@ type Runner struct {
 	cancel    context.CancelFunc    // cancels ctx to signal workers to stop
 	done      chan struct{}         // closed when RunNativeScan finishes
 	pauseCtrl *core.PauseController // cooperative pause/resume for workers
+
+	closeOnce sync.Once   // guards one-time resource release (Close/Discard may race)
+	finalized atomic.Bool // set once RunNativeScan has written the terminal scan status
+}
+
+// Finalized reports whether RunNativeScan already wrote the scan's terminal
+// status. The API server uses this so its safety-net CompleteScan only runs when
+// the runner never reached its finalizer (e.g. infrastructure setup failed),
+// avoiding a second write that would clobber the runner's truthful outcome.
+func (r *Runner) Finalized() bool {
+	return r.finalized.Load()
 }
 
 // spideringOutcome captures cross-phase signals from the Spidering phase that
@@ -330,23 +342,35 @@ func NewWithInputSource(options *types.Options, inputSource source.InputSource) 
 	}, nil
 }
 
-// setupUserAgents initializes global user agents for HTTP requests.
+// setupUserAgentsOnce guards the one-time write to the package-global
+// useragent.UserAgents slice. Every runner construction called it, racing the
+// shared global against concurrent request setup; the picked set is effectively
+// constant, so initialize it exactly once.
+var setupUserAgentsOnce sync.Once
+
+// setupUserAgents initializes global user agents for HTTP requests (once).
 func setupUserAgents() {
-	filters := []useragent.Filter{useragent.Windows}
-	userAgents, err := useragent.PickWithFilters(30, filters...)
-	if err != nil {
-		zap.L().Error("Error picking user agent", zap.Error(err))
-		userAgents = []*useragent.UserAgent{
-			{
-				Raw:  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-				Tags: []string{"Chrome"},
-			},
+	setupUserAgentsOnce.Do(func() {
+		filters := []useragent.Filter{useragent.Windows}
+		userAgents, err := useragent.PickWithFilters(30, filters...)
+		if err != nil {
+			zap.L().Error("Error picking user agent", zap.Error(err))
+			userAgents = []*useragent.UserAgent{
+				{
+					Raw:  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
+					Tags: []string{"Chrome"},
+				},
+			}
 		}
-	}
-	useragent.UserAgents = userAgents
+		useragent.UserAgents = userAgents
+	})
 }
 
-// Close releases all the resources and cleans up
+// Close cancels the run, waits (bounded) for RunNativeScan to finish, then
+// releases resources. Safe to call concurrently and repeatedly — a stop handler
+// and the background-completion path can both call it, so the resource release
+// (which decrements the process-global network dialer refcount) is guarded by
+// sync.Once to avoid a double teardown of the shared dialer.
 func (r *Runner) Close() {
 	// Resume if paused — workers must unblock before they can see context cancellation
 	if r.pauseCtrl != nil && r.pauseCtrl.IsPaused() {
@@ -372,6 +396,23 @@ func (r *Runner) Close() {
 		}
 	}
 
+	r.closeOnce.Do(r.releaseResources)
+}
+
+// Discard releases a runner's resources without waiting for RunNativeScan.
+// Used when a scan is rejected (queue full / project busy) before it ever
+// starts: r.done is never closed in that case, so a normal Close would block for
+// the full shutdown timeout. Shares closeOnce with Close so the network refcount
+// is released exactly once.
+func (r *Runner) Discard() {
+	if r.cancel != nil {
+		r.cancel()
+	}
+	r.closeOnce.Do(r.releaseResources)
+}
+
+// releaseResources frees the runner's owned resources. Runs at most once.
+func (r *Runner) releaseResources() {
 	if r.output != nil {
 		r.output.Close()
 	}

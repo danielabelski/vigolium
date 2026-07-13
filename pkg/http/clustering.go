@@ -371,7 +371,7 @@ func computeClusterKey(input *httpmsg.HttpRequestResponse, opts Options) string 
 	// the literal request-line target (routing-based SSRF), and collapsing them
 	// would serve the first probe's response for every target.
 	var b strings.Builder
-	b.Grow(len(prefix) + len(opts.RawRequestTarget) + 48)
+	b.Grow(len(prefix) + len(opts.RawRequestTarget) + 64)
 	b.WriteString(prefix)
 	b.WriteString("\x00noRedir=")
 	b.WriteString(strconv.FormatBool(opts.NoRedirects))
@@ -379,6 +379,12 @@ func computeClusterKey(input *httpmsg.HttpRequestResponse, opts Options) string 
 	b.WriteString(strconv.FormatBool(opts.RawRequest))
 	b.WriteString("\x00ignTimeout=")
 	b.WriteString(strconv.FormatBool(opts.IgnoreTimeoutTracking))
+	// DisableCompression changes the request (drops Accept-Encoding) and the
+	// response handling (Go auto-decompression), so two otherwise-identical
+	// requests differing only in this flag must not be coalesced — the second
+	// caller would receive a body produced under the first's compression behavior.
+	b.WriteString("\x00noCompress=")
+	b.WriteString(strconv.FormatBool(opts.DisableCompression))
 	b.WriteString("\x00rawTarget=")
 	b.WriteString(opts.RawRequestTarget)
 	return b.String()

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"os"
@@ -31,8 +32,12 @@ import (
 )
 
 const (
-	MaxBodyRead           = int64(30 * 1024 * 1024) // 30MB
-	responseHeaderTimeout = 5 * time.Second
+	MaxBodyRead = int64(30 * 1024 * 1024) // 30MB
+	// responseHeaderTimeoutFloor is the minimum transport ResponseHeaderTimeout.
+	// It sits comfortably above the slowest time-based probe (time-blind SQLi
+	// sleeps ~6s) so those responses are never aborted at the transport layer, and
+	// it never drops below the configured request timeout (see respHeaderTimeout).
+	responseHeaderTimeoutFloor = 30 * time.Second
 )
 
 // Options per-request
@@ -89,6 +94,10 @@ type Requester struct {
 	// maybePaceEdge). Pointer field so WithContext's shallow copy shares one
 	// instance (and its once-per-host dedup). Always non-nil after NewRequester.
 	edgePacer *edgePacer
+	// poolStats accumulates connection-pool telemetry (reuse ratio, TLS handshakes)
+	// via httptrace. Pointer field so WithContext copies and anonymous views share
+	// one scan-wide instance. Always non-nil after NewRequester.
+	poolStats *poolStats
 }
 
 // edgePacer fingerprints the CDN/WAF edge fronting a host from ordinary (non-block)
@@ -384,6 +393,16 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 	// always >= the old 100 floor.
 	maxIdleConns := maxIdlePerHost * 10
 
+	// ResponseHeaderTimeout is the transport-level cap on waiting for response
+	// headers. The old hard-coded 5s aborted deliberately-delayed responses (e.g.
+	// time-based blind SQLi probes that sleep ~6s) as transport-level false
+	// negatives. Floor it well above any time-based probe (and never below the
+	// configured request timeout) so those probes complete; the request/context
+	// timeout — not this transport backstop — governs a genuinely stalled server.
+	// The floor also guards against a degenerate/misconfigured tiny options.Timeout
+	// making the transport reject every response instantly.
+	respHeaderTimeout := max(timeout, responseHeaderTimeoutFloor)
+
 	// Transport factory
 	makeTransport := func() *http.Transport {
 		t := &http.Transport{
@@ -406,7 +425,7 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 			MaxIdleConns:           maxIdleConns,
 			MaxIdleConnsPerHost:    maxIdlePerHost,
 			IdleConnTimeout:        90 * time.Second,
-			ResponseHeaderTimeout:  responseHeaderTimeout,
+			ResponseHeaderTimeout:  respHeaderTimeout,
 			MaxResponseHeaderBytes: 48 * 1024,
 			ReadBufferSize:         16 * 1024,
 		}
@@ -490,6 +509,7 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 		blockNotifier:    &blockNotifier{seen: make(map[string]struct{})},
 		respObserver:     &responseObserver{},
 		edgePacer:        &edgePacer{},
+		poolStats:        newPoolStats(),
 	}
 
 	// Keep the edge-pacer's once-per-host dedup in sync with the limiter's entry
@@ -498,7 +518,11 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 	// pinned at full rate by the stale (monotonic) claim.
 	if services != nil && services.HostLimiter != nil {
 		ep := r.edgePacer
-		services.HostLimiter.SetEvictNotifier(func(host string) {
+		// The subscription lives for the limiter's (scan's) lifetime. Anonymous views
+		// (CloneWithoutCredentials) share this edgePacer rather than registering their
+		// own, so the number of subscriptions stays bounded to the real setup-time
+		// requesters (main + per-session).
+		services.HostLimiter.AddEvictNotifier(func(host string) {
 			ep.seen.Delete(strings.ToLower(host))
 		})
 	}
@@ -564,36 +588,110 @@ func parseHeaders(headers []string) map[string]string {
 	return result
 }
 
-// CloneWithoutCredentials builds an isolated requester that preserves transport,
-// proxy, timeout, and rate-limit settings but starts with a fresh cookie jar and
-// omits configured credential-bearing headers. Authorization differential
-// modules must not reuse the primary requester's cookie jar/custom auth headers:
-// deleting Authorization from one raw request is otherwise undone by doRequest,
-// which reapplies r.customHeaders immediately before sending.
+// CloneWithoutCredentials returns a lightweight anonymous VIEW over the same
+// scan-scoped requester: it shares the transport (connection pool), rate limiter,
+// response observer, block notifier, edge-pacing dedup, and request clusterer, and
+// isolates only the credential surface — a fresh cookie jar and credential-stripped
+// headers. Authorization-differential modules must not reuse the primary
+// requester's cookie jar/custom auth headers: deleting Authorization from one raw
+// request is otherwise undone by doRequest, which reapplies r.customHeaders
+// immediately before sending.
+//
+// Sharing rather than rebuilding (the previous NewRequester clone) matters on a
+// large corpus: each old clone minted its own http.Transport + four HTTP clients +
+// jar with no idle-connection reclamation, so probe traffic fragmented the pool
+// (extra TCP/TLS handshakes) and — because it also got a fresh response observer /
+// block state — was invisible to the executor's scan-wide 5xx corroboration and
+// edge pacing. The view fixes both: probes reuse the warm pool and stay observed.
+// The clusterer is safe to share because it keys on the full raw-request hash
+// (computeClusterKey), so a credential-stripped probe never collides with an
+// authenticated request.
 func (r *Requester) CloneWithoutCredentials() (*Requester, error) {
-	if r == nil || r.services == nil || r.services.Options == nil {
-		return nil, errors.New("cannot clone requester without runtime options")
-	}
-	opts := *r.services.Options
-	opts.Headers = filterCredentialHeaders(opts.Headers)
-	clone, err := NewRequester(&opts, r.services)
+	view, err := r.cloneSharingTransport()
 	if err != nil {
 		return nil, err
 	}
-	clone.defaultCtx = r.defaultCtx
-	return clone, nil
+	view.customHeaders = stripCredentialHeaderMap(r.customHeaders)
+	return view, nil
 }
 
-func filterCredentialHeaders(headers []string) []string {
-	filtered := make([]string, 0, len(headers))
-	for _, header := range headers {
-		parts := strings.SplitN(header, ":", 2)
-		if len(parts) != 2 || credentialHeaderName(parts[0]) {
+// CloneForScan returns a per-scan requester that SHARES the expensive
+// transport (connection pool), dialer, and host rate limiter with r, but gives
+// the scan its OWN behavioral state that concurrent scans would otherwise
+// corrupt on a single shared requester: a fresh cookie jar, a fresh response
+// observer (the 5xx corroboration sink — installed per-Execute, so on a shared
+// requester the last writer wins and the first to finish clears it for the
+// rest), and a fresh request clusterer (keyed on the request hash — sharing it
+// would serve one scan's response to another scan's byte-identical request).
+//
+// The server holds one shared requester and runs multiple lightweight scans
+// (scan-url / scan-request) concurrently; this isolates their evidence and
+// cookies. The edge-pacer and block-notifier stay shared: they dedup per host
+// across the whole process, and giving each scan its own edge-pacer would
+// register a new (never-removed) evict subscription on the shared limiter and
+// leak subscriptions over the server's lifetime.
+func (r *Requester) CloneForScan() (*Requester, error) {
+	scoped, err := r.cloneSharingTransport()
+	if err != nil {
+		return nil, err
+	}
+	scoped.respObserver = &responseObserver{}
+	if r.services.Options.ClusterRequests {
+		scoped.clusterer = NewRequestClustererWithSize(ClustererSizeForConcurrency(r.services.Options.Concurrency))
+	} else {
+		scoped.clusterer = nil
+	}
+	return scoped, nil
+}
+
+// cloneSharingTransport returns a shallow copy of r that SHARES the transport
+// (connection pool), dialer, and rate limiter, with a fresh cookie jar on its two
+// retry clients so cookies are isolated while pooling is preserved. Callers then
+// override only the behavioral state they need to isolate (credential headers,
+// response observer, clusterer). Errors if r has no runtime options.
+func (r *Requester) cloneSharingTransport() (*Requester, error) {
+	if r == nil || r.services == nil || r.services.Options == nil {
+		return nil, errors.New("cannot clone requester without runtime options")
+	}
+
+	// Fresh cookie jar wrapping the SAME shared transport, so the clone's cookies
+	// never mix with the parent jar while connection pooling is preserved.
+	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	if err != nil {
+		return nil, errors.Wrap(err, "could not create cookiejar")
+	}
+
+	retryOpts := retryablehttp.DefaultOptionsSpraying
+	retryOpts.RetryMax = r.services.Options.Retries
+	retryOpts.RetryWaitMax = 10 * time.Second
+
+	clone := *r
+	clone.client = cloneRetryClientWithJar(r.client, jar, retryOpts)
+	clone.clientNoRedir = cloneRetryClientWithJar(r.clientNoRedir, jar, retryOpts)
+	return &clone, nil
+}
+
+// cloneRetryClientWithJar rebuilds a retryablehttp client that shares src's
+// transport, timeout, and redirect policy (all carried on the copied *http.Client)
+// but swaps in a fresh cookie jar, so an anonymous view keeps connection pooling
+// while isolating cookies.
+func cloneRetryClientWithJar(src *retryablehttp.Client, jar http.CookieJar, opts retryablehttp.Options) *retryablehttp.Client {
+	base := *src.HTTPClient // shares Transport + CheckRedirect, keeps Timeout
+	base.Jar = jar
+	return retryablehttp.NewWithHTTPClient(&base, opts)
+}
+
+// stripCredentialHeaderMap returns a copy of the header map with credential-bearing
+// entries (per credentialHeaderName) removed.
+func stripCredentialHeaderMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for name, value := range in {
+		if credentialHeaderName(name) {
 			continue
 		}
-		filtered = append(filtered, header)
+		out[name] = value
 	}
-	return filtered
+	return out
 }
 
 func credentialHeaderName(name string) bool {
@@ -837,6 +935,14 @@ var defaultHeaderTemplate = func() http.Header {
 
 func (r *Requester) doRequest(ctx context.Context, input *httpmsg.HttpRequestResponse, opts Options) (*httpUtils.ResponseChain, error) {
 	start := time.Now()
+
+	// Attach connection-pool tracing so scan diagnostics can surface reuse ratio /
+	// handshake churn (OPT-3). One shared ClientTrace, so this costs a single context
+	// wrap. The rawhttp path bypasses net/http, so it is intentionally not traced.
+	if r.poolStats != nil && !opts.RawRequest {
+		ctx = httptrace.WithClientTrace(ctx, r.poolStats.ct)
+		r.poolStats.requests.Add(1)
+	}
 
 	req, err := input.BuildRetryableRequestWithContext(ctx)
 	if err != nil {

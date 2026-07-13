@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"sync/atomic"
+	"time"
 
 	"github.com/grafana/sobek"
 	"github.com/vigolium/vigolium/pkg/database"
@@ -14,6 +16,38 @@ import (
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 )
+
+// jsCallTimeout hard-bounds a single JS extension callable. Sobek runs JS
+// synchronously with no built-in cancellation, so an extension containing an
+// infinite loop would otherwise pin a worker goroutine and a CPU core forever —
+// even after the executor's per-module watchdog abandons the goroutine. The
+// watchdog below interrupts the VM at this deadline.
+const jsCallTimeout = 60 * time.Second
+
+// callJSWithTimeout invokes a JS extension callable under jsCallTimeout. A timer
+// goroutine calls vm.Interrupt (safe to call from another goroutine) when the
+// deadline elapses, unblocking a runaway loop. The returned poisoned bool is
+// true whenever the VM was interrupted: an interrupted runtime carries a sticky
+// interrupt flag, so the caller MUST discard it instead of returning it to the
+// pool (the pool then builds a fresh VM on the next Get).
+func callJSWithTimeout(vm *sobek.Runtime, callable sobek.Callable, this sobek.Value, args ...sobek.Value) (val sobek.Value, err error, poisoned bool) {
+	var interrupted atomic.Bool
+	timer := time.AfterFunc(jsCallTimeout, func() {
+		interrupted.Store(true)
+		vm.Interrupt("vigolium: JS extension exceeded execution timeout")
+	})
+	val, err = callable(this, args...)
+	timer.Stop()
+	if interrupted.Load() {
+		if err != nil {
+			return nil, fmt.Errorf("JS extension exceeded %s execution timeout: %w", jsCallTimeout, err), true
+		}
+		// Completed right at the deadline: the result is usable, but the VM was
+		// still interrupted, so discard it.
+		return val, nil, true
+	}
+	return val, err, false
+}
 
 // JSActiveModule wraps a JS active extension as an ActiveModule.
 // No mutex needed — sync.Pool is thread-safe and each VM is an independent runtime.
@@ -60,7 +94,8 @@ func (m *JSActiveModule) ScanPerInsertionPoint(
 	scanCtx *modkit.ScanContext,
 ) ([]*output.ResultEvent, error) {
 	vm := m.pool.Get()
-	defer m.pool.Put(vm)
+	poisoned := false
+	defer func() { m.returnVM(vm, poisoned) }()
 
 	// Build context object for JS
 	ctxObj := buildRequestContext(vm, ctx)
@@ -79,12 +114,23 @@ func (m *JSActiveModule) ScanPerInsertionPoint(
 		return nil, fmt.Errorf("scanPerInsertionPoint is not a function in %s", m.script.Path)
 	}
 
-	result, err := callable(exports, ctxObj, ipObj)
+	result, err, timedOut := callJSWithTimeout(vm, callable, exports, ctxObj, ipObj)
+	poisoned = timedOut
 	if err != nil {
 		return nil, fmt.Errorf("JS error in %s: %w", m.script.Path, err)
 	}
 
 	return parseJSResults(vm, result, ctx), nil
+}
+
+// returnVM returns a VM to the pool, or discards it when poisoned (interrupted
+// by the execution-timeout watchdog) so a runaway extension's tainted runtime is
+// never reused.
+func (m *JSActiveModule) returnVM(vm *sobek.Runtime, poisoned bool) {
+	if poisoned {
+		return
+	}
+	m.pool.Put(vm)
 }
 
 func (m *JSActiveModule) ScanPerRequest(
@@ -93,7 +139,8 @@ func (m *JSActiveModule) ScanPerRequest(
 	scanCtx *modkit.ScanContext,
 ) ([]*output.ResultEvent, error) {
 	vm := m.pool.Get()
-	defer m.pool.Put(vm)
+	poisoned := false
+	defer func() { m.returnVM(vm, poisoned) }()
 
 	ctxObj := buildRequestContext(vm, ctx)
 	enrichRecordContext(vm, ctxObj, ctx, scanCtx, m.pool.opts.Repository)
@@ -109,7 +156,8 @@ func (m *JSActiveModule) ScanPerRequest(
 		return nil, fmt.Errorf("scanPerRequest is not a function in %s", m.script.Path)
 	}
 
-	result, err := callable(exports, ctxObj)
+	result, err, timedOut := callJSWithTimeout(vm, callable, exports, ctxObj)
+	poisoned = timedOut
 	if err != nil {
 		return nil, fmt.Errorf("JS error in %s: %w", m.script.Path, err)
 	}
@@ -123,7 +171,8 @@ func (m *JSActiveModule) ScanPerHost(
 	scanCtx *modkit.ScanContext,
 ) ([]*output.ResultEvent, error) {
 	vm := m.pool.Get()
-	defer m.pool.Put(vm)
+	poisoned := false
+	defer func() { m.returnVM(vm, poisoned) }()
 
 	ctxObj := buildRequestContext(vm, ctx)
 	enrichRecordContext(vm, ctxObj, ctx, scanCtx, m.pool.opts.Repository)
@@ -139,7 +188,8 @@ func (m *JSActiveModule) ScanPerHost(
 		return nil, fmt.Errorf("scanPerHost is not a function in %s", m.script.Path)
 	}
 
-	result, err := callable(exports, ctxObj)
+	result, err, timedOut := callJSWithTimeout(vm, callable, exports, ctxObj)
+	poisoned = timedOut
 	if err != nil {
 		return nil, fmt.Errorf("JS error in %s: %w", m.script.Path, err)
 	}

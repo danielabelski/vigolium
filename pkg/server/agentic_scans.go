@@ -29,7 +29,7 @@ var nativeScanUploadFormats = []string{"jsonl", "html"}
 // persistAgenticScan creates an agentic_scans DB record for a new agent run.
 // Returns ErrScanProjectMismatch when the caller pinned a UUID that already
 // exists under a different project; other errors are logged but not returned.
-func (h *Handlers) persistAgenticScan(agenticScanUUID, mode, agentName string) error {
+func (h *Handlers) persistAgenticScan(agenticScanUUID, mode, agentName, projectUUID string) error {
 	if h.repo == nil {
 		return nil
 	}
@@ -38,13 +38,14 @@ func (h *Handlers) persistAgenticScan(agenticScanUUID, mode, agentName string) e
 		protocol, model = h.settings.Agent.BackendMeta()
 	}
 	run := &database.AgenticScan{
-		UUID:      agenticScanUUID,
-		Mode:      mode,
-		AgentName: agentName,
-		Protocol:  protocol,
-		Model:     model,
-		Status:    "running",
-		StartedAt: time.Now(),
+		UUID:        agenticScanUUID,
+		ProjectUUID: projectUUID,
+		Mode:        mode,
+		AgentName:   agentName,
+		Protocol:    protocol,
+		Model:       model,
+		Status:      "running",
+		StartedAt:   time.Now(),
 	}
 	// Detached on purpose: an agent run outlives the HTTP request that starts it,
 	// so its DB lifecycle is not tied to any request context.
@@ -127,20 +128,30 @@ func respondScanPinError(c fiber.Ctx, err error) error {
 // attach a remote-created scan record across nodes; otherwise a fresh UUID is
 // minted. Returns ErrScanProjectMismatch when pinUUID belongs to a different
 // project, which the caller should surface as HTTP 409.
-func (h *Handlers) registerRunningAgenticScan(mode, agentName, pinUUID string) (string, error) {
+func (h *Handlers) registerRunningAgenticScan(mode, agentName, pinUUID, projectUUID string) (string, error) {
 	agenticScanUUID := pinUUID
 	if agenticScanUUID == "" {
 		agenticScanUUID = uuid.New().String()
 	}
+	// Normalize so the DB row (which CreateAgenticScan defaults) and the in-memory
+	// status agree on ownership, and so project-scoping checks compare like for like.
+	if projectUUID == "" {
+		projectUUID = database.DefaultProjectUUID
+	}
 	effectiveAgentName := h.effectiveAgentName(agentName)
 
-	if err := h.persistAgenticScan(agenticScanUUID, mode, effectiveAgentName); err != nil {
+	// Persist with the project set at creation so the row is born correctly owned:
+	// this removes the incorrect-ownership window the old post-registration UPDATE
+	// left, and lets a pinned cross-node UUID in a non-default project pass
+	// CreateAgenticScan's project match instead of colliding with the default.
+	if err := h.persistAgenticScan(agenticScanUUID, mode, effectiveAgentName, projectUUID); err != nil {
 		return "", err
 	}
 
 	h.agentMu.Lock()
 	h.agenticScanStatus[agenticScanUUID] = &AgenticScanStatusResponse{
 		AgenticScanUUID: agenticScanUUID,
+		ProjectUUID:     projectUUID,
 		Mode:            mode,
 		Status:          "running",
 		AgentName:       effectiveAgentName,
@@ -271,7 +282,7 @@ func (h *Handlers) startAgenticScan(c fiber.Ctx, mode string, stream bool, opts 
 
 	opts.AgentName = h.effectiveAgentName(opts.AgentName)
 	opts.ProjectUUID = projectUUID
-	agenticScanUUID, err := h.registerRunningAgenticScan(mode, opts.AgentName, opts.ScanUUID)
+	agenticScanUUID, err := h.registerRunningAgenticScan(mode, opts.AgentName, opts.ScanUUID, projectUUID)
 	if err != nil {
 		if byokCleanup != nil {
 			byokCleanup()

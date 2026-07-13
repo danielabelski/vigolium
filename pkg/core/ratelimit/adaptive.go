@@ -86,8 +86,8 @@ func (h *HostRateLimiter) PreArm(host, vendor string) {
 	zap.L().Debug("HostRateLimiter: CDN/WAF edge fingerprinted — pre-arming pacing",
 		zap.String("host", host), zap.String("vendor", vendor),
 		zap.Int("from", from), zap.Int("start", start), zap.Int("ceiling", h.ceilingPerHost))
-	if h.preArmSink != nil {
-		h.preArmSink(PreArmNotice{Host: host, Vendor: vendor, From: from, Start: start, Ceiling: h.ceilingPerHost})
+	if fn := h.preArmSink.Load(); fn != nil {
+		(*fn)(PreArmNotice{Host: host, Vendor: vendor, From: from, Start: start, Ceiling: h.ceilingPerHost})
 	}
 }
 

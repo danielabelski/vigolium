@@ -89,7 +89,7 @@ func (h *Handlers) startAuditRun(c fiber.Ctx, plan auditRunPlan) error {
 		return nil // 429 already sent
 	}
 
-	agenticScanUUID, err := h.registerRunningAgenticScan(plan.harness.DBMode, plan.harness.DBAgentName, plan.scanUUID)
+	agenticScanUUID, err := h.registerRunningAgenticScan(plan.harness.DBMode, plan.harness.DBAgentName, plan.scanUUID, plan.projectUUID)
 	if err != nil {
 		h.releaseHeavyAgentSlotForProject(plan.projectUUID)
 		if plan.authCleanup != nil {

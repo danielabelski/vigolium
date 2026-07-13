@@ -111,14 +111,21 @@ func loadScript(path string, extractor *metadataExtractor) (*LoadedScript, error
 	}, nil
 }
 
-// metadataExtractor reuses a single Sobek VM across multiple script metadata extractions.
-// This avoids the overhead of creating a new VM and setting up stub APIs for each script.
-// Sequential use only — not safe for concurrent access.
-type metadataExtractor struct {
-	vm *sobek.Runtime
-}
+// metadataExtractor extracts script metadata by running each script in a FRESH
+// Sobek VM. A previous version reused one VM across scripts and reset only
+// module.exports, but top-level var/let/const/class/function declarations persist
+// in the runtime's global scope — so a second script declaring the same
+// identifier threw "already declared", making load order affect which scripts
+// validated. A fresh VM per Extract eliminates that cross-script leakage.
+type metadataExtractor struct{}
 
 func newMetadataExtractor() *metadataExtractor {
+	return &metadataExtractor{}
+}
+
+// newExtractorVM builds a fresh Sobek VM wired with stub vigolium.* APIs so a
+// script can be evaluated far enough to read its module.exports metadata.
+func newExtractorVM() *sobek.Runtime {
 	vm := sobek.New()
 
 	noopFn := func(call sobek.FunctionCall) sobek.Value { return sobek.Undefined() }
@@ -170,14 +177,14 @@ func newMetadataExtractor() *metadataExtractor {
 
 	_ = vm.Set("vigolium", vigolium)
 
-	return &metadataExtractor{vm: vm}
+	return vm
 }
 
-// Extract runs a script in the reused VM and reads its module.exports metadata.
+// Extract runs a script in a fresh VM and reads its module.exports metadata.
 func (me *metadataExtractor) Extract(source, path string) (*ScriptMetadata, error) {
-	vm := me.vm
+	vm := newExtractorVM()
 
-	// Reset module.exports for each script
+	// Set up module.exports for the script
 	exports := vm.NewObject()
 	module := vm.NewObject()
 	_ = module.Set("exports", exports)

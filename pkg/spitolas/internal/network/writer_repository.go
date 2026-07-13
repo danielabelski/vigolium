@@ -62,6 +62,9 @@ type RepositoryWriter struct {
 
 	mu    sync.Mutex
 	count int
+	// failed counts records dropped because their SaveRecordBatch failed, so a
+	// crawl that lost traffic to a failing DB doesn't silently report success.
+	failed int
 	// specSeen tracks already-parsed spec content hashes to avoid re-parsing.
 	specSeen map[string]struct{}
 
@@ -139,8 +142,11 @@ func (w *RepositoryWriter) flushLoop() {
 		}
 		ids, err := w.repo.SaveRecordBatch(context.Background(), records, w.source, w.projectUUID)
 		if err != nil {
-			zap.L().Debug("Failed to save spidering record batch",
+			zap.L().Warn("Failed to save spidering record batch; records dropped",
 				zap.Int("count", len(records)), zap.Error(err))
+			w.mu.Lock()
+			w.failed += len(records)
+			w.mu.Unlock()
 		} else {
 			w.mu.Lock()
 			w.count += len(ids)
@@ -256,9 +262,16 @@ func (w *RepositoryWriter) Close() error {
 	<-w.done
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	zap.L().Debug("RepositoryWriter closed",
-		zap.Int("records_saved", w.count),
-		zap.String("source", w.source))
+	if w.failed > 0 {
+		zap.L().Warn("RepositoryWriter closed with dropped records (DB save failures)",
+			zap.Int("records_saved", w.count),
+			zap.Int("records_dropped", w.failed),
+			zap.String("source", w.source))
+	} else {
+		zap.L().Debug("RepositoryWriter closed",
+			zap.Int("records_saved", w.count),
+			zap.String("source", w.source))
+	}
 	return nil
 }
 

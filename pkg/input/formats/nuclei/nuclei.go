@@ -53,9 +53,14 @@ func (j *NucleiFormat) Parse(input string, resultsCb formats.ParseReqRespCallbac
 
 	for dec.More() {
 		var outputResult NucleiOutput
-		err := dec.Decode(&outputResult)
-		if err != nil {
-			continue
+		if err := dec.Decode(&outputResult); err != nil {
+			// A decode error poisons json.Decoder: its read position does not
+			// advance, so dec.More() stays true and Decode() returns the same error
+			// on every iteration — a single malformed/truncated line would otherwise
+			// spin this loop at 100% CPU forever. dec.More() already guards clean EOF,
+			// so any error here is a real parse failure: stop parsing.
+			zap.L().Warn("nuclei: stopping parse on malformed JSON", zap.Error(err))
+			break
 		}
 
 		if outputResult.URL == "" {
@@ -63,6 +68,7 @@ func (j *NucleiFormat) Parse(input string, resultsCb formats.ParseReqRespCallbac
 		}
 
 		var requestResponse *httpmsg.HttpRequestResponse
+		var err error
 		if outputResult.Request != nil && outputResult.Request.Raw != "" {
 			requestResponse, err = httpmsg.ParseRawRequestWithURL(outputResult.Request.Raw, outputResult.URL)
 		} else {
@@ -73,7 +79,10 @@ func (j *NucleiFormat) Parse(input string, resultsCb formats.ParseReqRespCallbac
 			continue
 		}
 
-		resultsCb(requestResponse)
+		// Honor the callback's cancellation signal, matching the other input formats.
+		if !resultsCb(requestResponse) {
+			return nil
+		}
 	}
 
 	return nil
@@ -92,7 +101,9 @@ func (j *NucleiFormat) Count(input string) (int64, error) {
 	for dec.More() {
 		var obj json.RawMessage
 		if err := dec.Decode(&obj); err != nil {
-			continue
+			// Same decoder-poison guard as Parse: stop on a malformed line rather
+			// than spinning forever re-hitting the same error.
+			break
 		}
 		count++
 	}

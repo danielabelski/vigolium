@@ -26,6 +26,8 @@
 package grpc_surface_audit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"sync"
 
@@ -53,6 +55,12 @@ type Module struct {
 	compareClients []*http.Requester
 	compareLabels  []string
 }
+
+// Fresh implements modules.PerScanModule so the runner gives each scan its own
+// instance — reflectionSeen dedups the reflection/health probe for the instance's
+// lifetime, which on the shared singleton suppressed the probe across every later
+// scan of a gRPC host (and grew unbounded).
+func (m *Module) Fresh() any { return New() }
 
 // New creates a new gRPC-Web Surface Audit module.
 func New() *Module {
@@ -172,6 +180,7 @@ type replayResult struct {
 	httpCode   int    // HTTP status code of the transport response
 	grpcStatus string // decoded grpc-status ("" if none)
 	dataLen    int    // total bytes across all non-trailer (message) frames
+	dataHash   string // sha256 of concatenated non-trailer frame bytes (content fingerprint)
 	decoded    bool   // response decoded as a valid gRPC-Web body
 	rawReq     string // raw request sent (for evidence)
 	rawResp    string // full raw response (for evidence)
@@ -231,11 +240,17 @@ func (m *Module) executeRaw(
 	}
 
 	frames, _ := grpcweb.DecodeBody(ct, body)
+	// Fingerprint the message-frame content so callers can compare what was
+	// RETURNED, not just how many bytes — a same-size but different (public/redacted)
+	// payload must not read as "the same substantive data".
+	h := sha256.New()
 	for _, f := range frames {
 		if !f.Trailer {
 			rr.dataLen += len(f.Data)
+			h.Write(f.Data)
 		}
 	}
+	rr.dataHash = hex.EncodeToString(h.Sum(nil))
 	if code, ok := grpcweb.GRPCStatus(frames); ok {
 		rr.grpcStatus = code
 		rr.decoded = true

@@ -836,3 +836,63 @@ func TestPassiveFlushSkippedWhenWorkerAbandoned(t *testing.T) {
 		t.Fatal("Flush ran while a worker was still abandoned in flight — this is the race the guard must prevent")
 	}
 }
+
+// TestRunScanFnGuardedRecoversPanic verifies a module panic is converted to an
+// error value rather than unwinding the goroutine (CR-06). Without the recover
+// this would crash the test binary.
+func TestRunScanFnGuardedRecoversPanic(t *testing.T) {
+	t.Parallel()
+	e, _ := newTestExecutor(ExecutorConfig{}, nil)
+
+	events, err := e.runScanFnGuarded(context.Background(), "boom-module", func(context.Context) ([]*output.ResultEvent, error) {
+		panic("kaboom")
+	})
+	if err == nil {
+		t.Fatal("expected an error from a panicking module, got nil")
+	}
+	if !strings.Contains(err.Error(), "boom-module") {
+		t.Fatalf("error should name the panicking module, got: %v", err)
+	}
+	if events != nil {
+		t.Fatalf("expected nil events on panic, got %d", len(events))
+	}
+
+	// A non-panicking call passes its return through unchanged.
+	want := []*output.ResultEvent{{}}
+	got, err := e.runScanFnGuarded(context.Background(), "ok", func(context.Context) ([]*output.ResultEvent, error) {
+		return want, nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error from clean call: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d passthrough events, got %d", len(want), len(got))
+	}
+}
+
+// TestRunActiveWithTimeoutRecoversPanic drives the real watchdog goroutine path:
+// a panicking active scan function must complete cleanly (result "completed" with
+// no events), release its slot, and never crash the process (CR-06).
+func TestRunActiveWithTimeoutRecoversPanic(t *testing.T) {
+	t.Parallel()
+	e, _ := newTestExecutor(ExecutorConfig{}, nil)
+	mod := &activeStub{id: "panic-active", scopes: modkit.ScanScopeRequest, canProc: true}
+	_, item := makeTestItem("example.com", "/boom", "<html>x</html>")
+
+	released := make(chan struct{})
+	events, completed := e.runActiveWithTimeout(context.Background(),
+		func(context.Context) ([]*output.ResultEvent, error) { panic("boom") },
+		mod, item, func() { close(released) }, 0)
+
+	if !completed {
+		t.Fatal("a recovered panic should report completed=true (it produced a result), not a timeout")
+	}
+	if events != nil {
+		t.Fatalf("expected nil events from a panicking module, got %d", len(events))
+	}
+	select {
+	case <-released:
+	case <-time.After(5 * time.Second):
+		t.Fatal("releaseSlot was never called — the slot would leak after a module panic")
+	}
+}

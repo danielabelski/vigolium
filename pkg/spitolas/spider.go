@@ -272,6 +272,11 @@ func RunSpider(ctx context.Context, cfg SpiderConfig, repo RecordSaver) (*Spider
 	}
 	writer := network.NewRepositoryWriter(repo, source, cfg.ProjectUUID)
 	writer.ScopeFilter = cfg.ScopeFilter
+	// NewRepositoryWriter starts a background flush goroutine, so it must be closed
+	// on every exit path — including the crawler.New / c.Run error paths below,
+	// which return before the crawler's capture would otherwise close it. Close is
+	// idempotent (closeOnce), so the capture's own close on the success path is safe.
+	defer func() { _ = writer.Close() }()
 
 	c, err := crawler.New(crawlerCfg)
 	if err != nil {

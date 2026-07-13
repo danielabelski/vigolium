@@ -50,6 +50,11 @@ type authorizationTarget struct {
 	references []string
 }
 
+// Fresh implements modules.PerScanModule so the runner gives each scan its own
+// instance — per-scan compare clients set via SetCompareClients must not leak
+// across concurrent server-mode scans.
+func (m *Module) Fresh() any { return New() }
+
 // New creates a new cross-session authorization compare module.
 func New() *Module {
 	m := &Module{

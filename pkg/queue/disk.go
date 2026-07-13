@@ -315,20 +315,34 @@ func (q *DiskQueue) EnqueueBatch(ctx context.Context, tasks []*ScanTask) error {
 		task.UpdatedAt = task.CreatedAt
 	}
 
-	// Check if rotation needed before batch write
-	if q.activeSegment.TotalTasks()+int64(len(tasks)) >= int64(q.maxRecordsPerSeg) {
-		q.activeSegment.Seal()
-		if err := q.createNewSegment(); err != nil {
-			return fmt.Errorf("failed to create new segment: %w", err)
+	// Write in chunks no larger than the per-segment cap so an oversized batch
+	// can't blow past maxRecordsPerSeg in a single segment. Each chunk runs the
+	// same rotate-if-full check a normal batch does.
+	chunkMax := q.maxRecordsPerSeg
+	if chunkMax <= 0 {
+		chunkMax = len(tasks)
+	}
+	for start := 0; start < len(tasks); start += chunkMax {
+		end := start + chunkMax
+		if end > len(tasks) {
+			end = len(tasks)
 		}
-	}
+		chunk := tasks[start:end]
 
-	if err := q.activeSegment.WriteTasks(tasks); err != nil {
-		q.enqueueErrors.Add(int64(len(tasks)))
-		return err
-	}
+		// Rotate before writing when this chunk would fill/overflow the segment.
+		if q.activeSegment.TotalTasks()+int64(len(chunk)) >= int64(q.maxRecordsPerSeg) {
+			q.activeSegment.Seal()
+			if err := q.createNewSegment(); err != nil {
+				return fmt.Errorf("failed to create new segment: %w", err)
+			}
+		}
 
-	q.totalEnqueued.Add(int64(len(tasks)))
+		if err := q.activeSegment.WriteTasks(chunk); err != nil {
+			q.enqueueErrors.Add(int64(len(chunk)))
+			return err
+		}
+		q.totalEnqueued.Add(int64(len(chunk)))
+	}
 
 	// Wake up blocked Dequeue callers
 	select {

@@ -39,6 +39,11 @@ type Module struct {
 	hosts   map[string]*hostState
 }
 
+// Fresh implements modules.PerScanModule so the runner gives each scan its own
+// instance — the per-host chunk/route discovery map (hosts) is scan-scoped and
+// must not accumulate or bleed across concurrent server-mode scans.
+func (m *Module) Fresh() any { return New() }
+
 func New() *Module {
 	m := &Module{
 		BaseActiveModule: modkit.NewBaseActiveModule(

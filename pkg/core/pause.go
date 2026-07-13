@@ -9,10 +9,17 @@ import (
 // PauseController provides cooperative pause/resume for worker goroutines.
 // Workers call WaitIfPaused between items; Pause blocks until all active
 // items finish, then holds future workers until Resume is called.
+//
+// stateMu serializes the Pause/Resume transitions in full (including the mu
+// Lock/Unlock that spans a pause), so concurrent Pause+Resume — reachable, e.g.
+// a stop-triggered Runner.Close resuming while an API pause request is in flight
+// — can never close a nil channel, unlock an unlocked mutex, or leave pausedCh
+// stale relative to the paused flag.
 type PauseController struct {
-	mu       sync.RWMutex
-	paused   atomic.Bool
-	pausedCh chan struct{} // closed when paused, reopened on resume
+	mu       sync.RWMutex  // RLock held by active workers; write-locked for the pause duration
+	stateMu  sync.Mutex    // serializes Pause/Resume transitions and guards pausedCh
+	paused   atomic.Bool   // fast-path snapshot for WaitIfPaused/IsPaused
+	pausedCh chan struct{} // non-nil and open while paused; closed on resume
 }
 
 // NewPauseController creates a new PauseController in the unpaused state.
@@ -21,19 +28,28 @@ func NewPauseController() *PauseController {
 }
 
 // Pause blocks new workers and waits for in-flight items to finish.
-// Safe to call multiple times (idempotent).
+// Safe to call multiple times (idempotent) and concurrently with Resume.
 func (p *PauseController) Pause() {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
 	if p.paused.Load() {
 		return
 	}
-	p.paused.Store(true)
+	// Create the resume channel BEFORE flipping the flag so a worker that observes
+	// paused==true always reads a fresh, open channel (never nil or a stale closed
+	// one). stateMu is held across mu.Lock() so a racing Resume can't unlock mu
+	// before this Pause has locked it.
 	p.pausedCh = make(chan struct{})
-	// Acquire write lock — blocks until all RLocks (active workers) release
+	p.paused.Store(true)
+	// Acquire write lock — blocks until all RLocks (active workers) release.
 	p.mu.Lock()
 }
 
-// Resume unblocks paused workers. Safe to call when not paused.
+// Resume unblocks paused workers. Safe to call when not paused and concurrently
+// with Pause.
 func (p *PauseController) Resume() {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
 	if !p.paused.CompareAndSwap(true, false) {
 		return
 	}
@@ -53,11 +69,20 @@ func (p *PauseController) WaitIfPaused(ctx context.Context) bool {
 	if !p.paused.Load() {
 		return true
 	}
+	// Read a consistent (paused, channel) snapshot under stateMu so we never
+	// select on a nil or stale channel raced in by a concurrent Pause/Resume.
+	p.stateMu.Lock()
+	paused := p.paused.Load()
+	ch := p.pausedCh
+	p.stateMu.Unlock()
+	if !paused || ch == nil {
+		return true
+	}
 	// Wait for resume or context cancellation
 	select {
 	case <-ctx.Done():
 		return false
-	case <-p.pausedCh:
+	case <-ch:
 		return true
 	}
 }

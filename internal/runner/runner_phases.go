@@ -26,7 +26,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/knownissuescan"
 	"github.com/vigolium/vigolium/pkg/modules"
 	"github.com/vigolium/vigolium/pkg/modules/active/authz_compare"
-	"github.com/vigolium/vigolium/pkg/modules/active/nextjs_chunk_audit"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/passive/secret_detect"
 	"github.com/vigolium/vigolium/pkg/notify"
@@ -39,6 +38,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// stderrCaptureActive guards the process-global os.Stderr redirection used for
+// raw-stderr scan-log capture. Only the scan that wins the claim redirects
+// os.Stderr; concurrent scans skip capture so they can't restore/close each
+// other's descriptors.
+var stderrCaptureActive atomic.Bool
+
 // RunNativeScan orchestrates the native scan plan:
 //
 //	HeuristicsCheck   — optional root-page probe to optimize downstream phase selection
@@ -48,7 +53,7 @@ import (
 //	Seed              — ingest CLI targets when discovery is skipped but DB-backed phases still need records
 //	KnownIssueScan    — nuclei + secret scan (opt-in via --known-issue-scan)
 //	DynamicAssessment — modules + extensions scan DB records
-func (r *Runner) RunNativeScan() error {
+func (r *Runner) RunNativeScan() (err error) {
 	defer close(r.done)
 	ctx := r.ctx
 
@@ -88,8 +93,9 @@ func (r *Runner) RunNativeScan() error {
 	defer r.scanLogger.Close()
 
 	// Create scan record in the database so every scan is tracked with its lifecycle.
-	// Skip when ScanOnReceive — the server already created the scan record.
-	if r.repository != nil && !r.options.ScanOnReceive {
+	// Skip when ScanOnReceive or ManagedScanRecord — the server already created the
+	// scan record and owns its pending/queued/running transitions.
+	if r.repository != nil && !r.options.ScanOnReceive && !r.options.ManagedScanRecord {
 		target := strings.Join(r.options.Targets, ", ")
 		scan := &database.Scan{
 			UUID:        infra.scanUUID,
@@ -108,20 +114,41 @@ func (r *Runner) RunNativeScan() error {
 	}
 	if r.repository != nil {
 		defer func() {
+			// Terminal status, most-truthful first: a returned error (including a
+			// recovered panic — the recovery defer below sets err, and runs before
+			// this one since it is registered later) marks the scan failed;
+			// otherwise a cancelled run context marks it cancelled; otherwise it
+			// completed cleanly.
 			var errMsg string
-			if r.ctx.Err() != nil {
+			switch {
+			case err != nil:
+				errMsg = err.Error()
+			case r.ctx.Err() != nil:
 				errMsg = "cancelled"
 			}
-			// Write on r.ctx (un-bounded parent), not the total-budget-bounded ctx:
-			// a scan curtailed by --scanning-max-duration must still record completion.
-			if completeErr := r.repository.CompleteScan(r.ctx, infra.scanUUID, errMsg); completeErr != nil {
+			// Finalize on a detached, bounded context: r.ctx is already cancelled on
+			// a stop/Ctrl-C, which would fail this write and leave the row stuck at
+			// "running". WithoutCancel keeps values (project/tenant) but not the
+			// cancellation, so the terminal status always lands. This makes the
+			// runner the single finalization owner — the server no longer overwrites.
+			finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(r.ctx), 30*time.Second)
+			defer finalCancel()
+			if completeErr := r.repository.CompleteScan(finalCtx, infra.scanUUID, errMsg); completeErr != nil {
 				zap.L().Warn("Failed to complete scan record", zap.Error(completeErr))
 			}
+			r.finalized.Store(true)
 		}()
 	}
 
 	// Set up TeeWriter to capture raw stderr output as trace-level scan logs.
-	if r.repository != nil {
+	//
+	// This redirects the PROCESS-GLOBAL os.Stderr to a pipe, so only one scan may
+	// own the capture at a time: two concurrent scans (server mode) would otherwise
+	// restore or close each other's descriptors and corrupt process-wide stderr.
+	// A single-owner claim keeps the common single-scan (CLI) case fully captured
+	// while a concurrent secondary scan simply skips raw capture rather than racing.
+	if r.repository != nil && stderrCaptureActive.CompareAndSwap(false, true) {
+		defer stderrCaptureActive.Store(false)
 		origStderr := os.Stderr
 		// Optionally mirror raw console output to ~/.vigolium/native-sessions/{uuid}/run.log.
 		var sessionLogFile *os.File
@@ -211,7 +238,9 @@ func (r *Runner) RunNativeScan() error {
 		}()
 	}
 
-	// Panic recovery with notification
+	// Panic recovery with notification. Sets the named return so the panic
+	// surfaces as a scan error instead of being swallowed into a nil return that
+	// the finalizer (and the server) would record as a successful scan.
 	defer func() {
 		if rec := recover(); rec != nil {
 			stack := make([]byte, 4096)
@@ -228,6 +257,7 @@ func (r *Runner) RunNativeScan() error {
 			if infra.notifier != nil {
 				_ = infra.notifier.SendRaw(errorMessage)
 			}
+			err = errors.Errorf("panic recovered in runner execution: %+v", rec)
 		}
 	}()
 
@@ -996,22 +1026,22 @@ func (r *Runner) runSecretScanBatch(ctx context.Context, infra *phaseInfra, onRe
 
 // freshenPerScanModules returns a copy of mods with per-scan-stateful active
 // modules replaced by fresh instances. Those modules keep mutable state that is
-// meaningful only within one scan — authz_compare's per-session compare clients
-// and nextjs_chunk_audit's per-host chunk/route discovery map — but the registry
-// stores one shared singleton of each (GetActiveModules copies the pointers). Two
-// concurrent server-mode scans sharing a singleton would race on / clobber that
-// state and leak it across scans. Swapping in a fresh instance for this scan's
-// slice leaves the registry singleton untouched. Modules whose per-scan state is
-// already isolated via dedup.Lazy(scanCtx.DedupMgr()) or ScanContext need no swap.
+// meaningful only within one scan (per-host dedup maps, per-scan budgets, compare
+// clients, discovery maps), but the registry stores one shared singleton of each
+// (GetActiveModules copies the pointers). Two concurrent server-mode scans sharing
+// a singleton would race on / clobber that state and leak it across scans. Modules
+// opt in by implementing modules.PerScanModule; swapping in their Fresh() instance
+// for this scan's slice leaves the registry singleton untouched. Modules whose
+// per-scan state is already isolated via dedup.Lazy(scanCtx.DedupMgr()) or
+// ScanContext need not implement it.
 func freshenPerScanModules(mods []modules.ActiveModule) []modules.ActiveModule {
 	out := make([]modules.ActiveModule, len(mods))
 	copy(out, mods)
 	for i, mod := range out {
-		switch mod.(type) {
-		case *authz_compare.Module:
-			out[i] = authz_compare.New()
-		case *nextjs_chunk_audit.Module:
-			out[i] = nextjs_chunk_audit.New()
+		if f, ok := mod.(modules.PerScanModule); ok {
+			if fresh, ok := f.Fresh().(modules.ActiveModule); ok {
+				out[i] = fresh
+			}
 		}
 	}
 	return out
@@ -1605,6 +1635,7 @@ func (r *Runner) runDynamicAssessmentRound(
 	if c := infra.httpRequester.Clusterer(); c != nil {
 		c.LogStats()
 	}
+	infra.httpRequester.LogPoolStats()
 	if err != nil {
 		return 0, err
 	}

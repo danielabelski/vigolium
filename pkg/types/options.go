@@ -129,6 +129,13 @@ type Options struct {
 	// force a scan-on-receive run to terminate on its own.
 	ScanOnReceiveIdleTimeout time.Duration
 
+	// ManagedScanRecord signals that an external orchestrator (the API server)
+	// already created the scan record and owns its pending/queued/running
+	// transitions. The runner then skips its own CreateScan so the two do not
+	// compete over the same row; the runner still owns the single terminal
+	// CompleteScan (recorded on a detached context so cancellation can't fail it).
+	ManagedScanRecord bool
+
 	// DisableFetchResponse skips fetching HTTP responses during ingestion
 	DisableFetchResponse bool
 

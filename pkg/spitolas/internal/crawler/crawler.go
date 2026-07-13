@@ -321,8 +321,7 @@ func (c *Crawler) Run(ctx context.Context) (*Result, error) {
 	// The single-threaded crawler pins exactly one browser for the entire crawl
 	// (see the Pool.Get() note below), so launching the configured BrowserCount>1
 	// only burns startup time and memory without adding any crawl throughput. Cap
-	// it to one until real multi-browser scheduling (ParallelCrawler) is
-	// production-ready — the configured value still flows into that path unchanged.
+	// it to one; multi-browser scheduling is not implemented in this crawler.
 	if c.config.BrowserCount > 1 {
 		zap.L().Debug("Capping browser pool to 1 for single-threaded crawl",
 			zap.Int("configured", c.config.BrowserCount))
@@ -357,9 +356,8 @@ func (c *Crawler) Run(ctx context.Context) (*Result, error) {
 	// Start capture at BROWSER level (captures ALL pages).
 	// Pin one browser for the entire crawl — Pool.Get() round-robins, so calling
 	// it from each helper would silently rotate to a different browser whose
-	// CurrentPage is nil. The single-threaded Crawler is not designed for
-	// multiple browsers; ParallelCrawler is the path that fans out across the
-	// pool.
+	// CurrentPage is nil. This Crawler is single-threaded and not designed to fan
+	// out across multiple browsers.
 	br := pool.Get()
 	if br == nil {
 		return nil, fmt.Errorf("browser pool returned nil browser")
@@ -451,7 +449,7 @@ func (c *Crawler) crawlWithBrowser(ctx context.Context, br *browser.Browser, cap
 	// Log final MAB summary
 	c.logMABFinalSummary()
 
-	return c.buildResult(), nil
+	return c.buildResult(ctx), nil
 }
 
 // logMABFinalSummary logs comprehensive MAB policy state at end of crawl.
@@ -2464,7 +2462,7 @@ func (c *Crawler) extractFragments(page *browser.Page, s *state.State) {
 }
 
 // buildResult builds the crawl result.
-func (c *Crawler) buildResult() *Result {
+func (c *Crawler) buildResult(ctx context.Context) *Result {
 	if c.crawlPath != nil {
 		c.crawlPath.Close()
 		c.session.AddCrawlPath(c.crawlPath.ImmutableCopy())
@@ -2476,7 +2474,6 @@ func (c *Crawler) buildResult() *Result {
 	res := &Result{
 		Config:    c.config,
 		Graph:     c.graph,
-		Stats:     c.stats,
 		Fragments: c.fragManager.GetStats(),
 		Session:   c.session,
 	}
@@ -2499,8 +2496,20 @@ func (c *Crawler) buildResult() *Result {
 
 	// Confirm DOM-based XSS on reflected client routes the crawl visited. Runs last
 	// (it navigates the browser) and only after a cheap no-navigation prefilter finds
-	// a reflected parameter, so it never spins up navigations blindly.
-	res.DOMXssFindings = c.probeDOMXSS()
+	// a reflected parameter, so it never spins up navigations blindly. Skips entirely
+	// when ctx is already cancelled and budgets itself from the remaining parent
+	// deadline, so it can't keep hitting the target after the operator stops the scan.
+	res.DOMXssFindings = c.probeDOMXSS(ctx)
+
+	// Stamp the end time only now, after every post-pass, and copy stats into the
+	// immutable Result under the lock. The outer Run/RunOnBrowser defer also sets
+	// EndTime, but it runs after this Result is built and copies c.stats by value,
+	// so without stamping here Result.Stats.EndTime stays zero and Result.Duration()
+	// underflows to a huge negative value.
+	c.mu.Lock()
+	c.stats.EndTime = time.Now()
+	res.Stats = c.stats
+	c.mu.Unlock()
 
 	return res
 }

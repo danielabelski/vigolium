@@ -123,3 +123,21 @@ type BodyDifferentialConfirmable interface {
 type TechAware interface {
 	RequiredTechs() []string
 }
+
+// PerScanModule is an optional interface for active modules that carry mutable
+// state meaningful only within ONE scan (per-host dedup maps, per-scan budgets,
+// compare clients, discovery maps). The registry stores a single shared singleton
+// of each module, so without isolation that state bleeds across concurrent
+// server-mode scans. The runner replaces such a module with a fresh instance for
+// each scan (see freshenPerScanModules); modules whose per-scan state is already
+// isolated via dedup.Lazy(scanCtx.DedupMgr()) or ScanContext need not implement it.
+//
+// Fresh returns a new instance with zeroed per-scan state. It is typed `any`
+// rather than ActiveModule so a module package can implement it without importing
+// pkg/modules — which would form an import cycle with the registry; the runner
+// asserts the result back to ActiveModule. Implementations are one line:
+//
+//	func (m *Module) Fresh() any { return New() }
+type PerScanModule interface {
+	Fresh() any
+}

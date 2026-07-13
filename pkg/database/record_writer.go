@@ -257,10 +257,12 @@ func (w *RecordWriter) admit(ctx context.Context, rr *httpmsg.HttpRequestRespons
 	w.enqueued.Add(1)
 	shard := w.shardFor(record.Hostname)
 
-	// w.ctx is NOT cancelled while any admission is outstanding (Close waits for
-	// admitWG before cancelling), so the flush loop is alive and consuming; the
-	// send can only wait on buffer space, never on shutdown. Only the caller's own
-	// ctx can abandon the send.
+	// Normally w.ctx stays live while an admission is outstanding, so this send
+	// only waits on buffer space. But if a steady-state flush wedges on a stalled
+	// database, the shard channel fills and this send would block indefinitely —
+	// so Close's bounded admitWG wait cancels w.ctx on timeout, and the
+	// w.ctx.Done() case here releases the blocked send (resolved as closed) so
+	// shutdown can complete. The caller's own ctx can also abandon the send.
 	select {
 	case shard.ch <- writeRequest{record: record, result: resultCh}:
 		w.admitWG.Done() // admitted; the drain now owns delivering our result
@@ -268,6 +270,9 @@ func (w *RecordWriter) admit(ctx context.Context, rr *httpmsg.HttpRequestRespons
 	case <-ctx.Done():
 		w.admitWG.Done() // never sent; nothing to deliver
 		return pendingWrite{err: ctx.Err(), resolved: true}
+	case <-w.ctx.Done():
+		w.admitWG.Done() // writer shutting down with a full/wedged shard; give up the send
+		return pendingWrite{err: ErrRecordWriterClosed, resolved: true}
 	}
 }
 
@@ -419,9 +424,39 @@ func (w *RecordWriter) Close() {
 	w.closed.Store(true)
 	w.admitMu.Unlock()
 
-	w.admitWG.Wait() // all in-flight enqueues have landed (or been abandoned)
-	w.cancel()       // now the drain sees every admitted record
-	w.wg.Wait()
+	// Wait for in-flight enqueues to land in a shard channel, but BOUND it: if a
+	// steady-state flush is wedged on a stalled database, its shard channel fills
+	// and an admitted enqueue blocks on the send — admitWG.Wait() would then never
+	// return and Close would hang forever, defeating FlushTimeout. On timeout we
+	// cancel the flush context anyway; the admit-send also selects on w.ctx.Done(),
+	// so cancelling releases any blocked send (resolved as closed) and unblocks
+	// admitWG.
+	if !waitBounded(&w.admitWG, w.cfg.FlushTimeout) {
+		zap.L().Warn("RecordWriter.Close: admitted enqueues did not settle before FlushTimeout; forcing shutdown")
+	}
+	w.cancel() // drain sees every admitted record; also releases blocked admit-sends
+	// Bound the flush-loop drain too: a steady-state flush already executing on an
+	// uncancellable context when Close fired sits outside the drain's FlushTimeout,
+	// so without this bound wg.Wait() could still hang on a wedged database.
+	if !waitBounded(&w.wg, w.cfg.FlushTimeout) {
+		zap.L().Warn("RecordWriter.Close: flush loops did not drain before FlushTimeout; proceeding")
+	}
+}
+
+// waitBounded waits for wg with a timeout. Returns true if the group completed,
+// false if the timeout elapsed first.
+func waitBounded(wg *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // flushLoop is the goroutine that drains a shard's channel and batch-inserts.

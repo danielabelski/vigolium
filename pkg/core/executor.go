@@ -151,11 +151,12 @@ type ExecutorConfig struct {
 	MaxDuration           time.Duration                                                                                                       // When > 0, cancel execution after this duration
 	FeedbackDrainTimeout  time.Duration                                                                                                       // Idle timeout for draining feedback after source EOF (default: 100ms)
 	FeedbackDrainMaxStall time.Duration                                                                                                       // Hard cap on draining with workers in-flight but making no progress (0 = 2x active module timeout). Guards against a module that ignores cancellation.
+	WorkerExitGrace       time.Duration                                                                                                       // Grace for worker goroutines to exit after the item channel is closed (0 = default 60s, capped at FeedbackDrainMaxStall). Kept short and separate from the drain-stall cap so shutdown stays responsive.
 	IPCacheSize           int                                                                                                                 // LRU cache size for parsed insertion points (default: 4096)
 	IPCache               *lru.Cache[string, []httpmsg.InsertionPoint]                                                                        // Optional: shared IP cache (if nil, a new one is created)
 	ParallelPassive       bool                                                                                                                // When true, run passive per-request modules concurrently
 	PassiveModuleTimeout  time.Duration                                                                                                       // Timeout per passive module call (default: 5s). 0 uses default.
-	ActiveModuleTimeout   time.Duration                                                                                                       // Timeout per active module call (default: 90s). 0 uses default. Modules may raise via TimeoutHinter.
+	ActiveModuleTimeout   time.Duration                                                                                                       // Timeout per active module call (default: 300s). 0 uses default. Modules may raise via TimeoutHinter.
 	AdaptiveWorkers       bool                                                                                                                // When true, dynamically scale worker count based on queue depth
 	MinWorkers            int                                                                                                                 // Floor for adaptive scaling (default: 2)
 	MaxWorkers            int                                                                                                                 // Ceiling for adaptive scaling (default: Workers*4)
@@ -829,18 +830,18 @@ drainLoop:
 		}()
 		wg.Wait()
 	}()
-	maxStall := e.feedbackDrainMaxStall()
+	exitGrace := e.workerExitGrace()
 	workersExited := true
 	select {
 	case <-waitDone:
 		if r := waitPanic.Load(); r != nil {
 			panic(r)
 		}
-	case <-time.After(maxStall):
+	case <-time.After(exitGrace):
 		workersExited = false
-		zap.L().Warn("abandoning scan worker(s) that did not exit within the stall timeout to avoid hanging the scan; leaking goroutine(s)",
+		zap.L().Warn("abandoning scan worker(s) that did not exit within the shutdown grace to avoid hanging the scan; leaking goroutine(s)",
 			zap.Int64("in_flight", e.pool.inFlight.Load()),
-			zap.Duration("stall_timeout", maxStall))
+			zap.Duration("worker_exit_grace", exitGrace))
 	}
 
 	// Passive-module flush must only run once every worker has exited. Flusher /
@@ -868,13 +869,13 @@ drainLoop:
 					continue
 				}
 				for _, r := range results {
-					if !e.moduleFindingAllowed(pm.ID()) {
-						continue
-					}
 					r.ModuleType = database.ModuleTypePassive
 					r.FindingSource = database.FindingSourceDynamicAssessment
 					// Deferred batch findings carry their own request; no baseline
 					// item is in scope here, so take the standard parse/save path.
+					// The per-module cap is enforced once inside emitResult →
+					// admitFinding; do NOT pre-check moduleFindingAllowed here or each
+					// finding would consume the cap twice (a cap of 15 admits ~7).
 					e.emitResult(ctx, r, nil)
 				}
 			}
@@ -1565,6 +1566,33 @@ func (e *Executor) feedbackDrainMaxStall() time.Duration {
 	return 2 * e.maxModuleTimeout()
 }
 
+// workerExitGraceDefault bounds how long Execute waits for worker goroutines to
+// exit after the item channel is closed. It is deliberately short and fixed,
+// unlike the drain-stall cap: by the time workers are joined the drain loop has
+// already ended, so on a clean scan inFlight is 0 and this wait returns at once,
+// while on cancellation a worker returns as soon as it observes ctx.Done. Only a
+// worker wedged in inline passive code that ignores cancellation lingers — and
+// inline passive modules are bounded and short — so a minute of grace is ample.
+const workerExitGraceDefault = 60 * time.Second
+
+// workerExitGrace returns the bounded wait for worker goroutines to exit after
+// the item channel is closed. It is decoupled from feedbackDrainMaxStall so a
+// stuck worker (or a scan cancelled by Ctrl-C / --scanning-max-duration) doesn't
+// inherit that cap's up-to-50-minute worst case, which is sized for a
+// legitimately slow module still running mid-drain, not for shutdown. It never
+// exceeds the drain-stall cap, so an operator who tightens FeedbackDrainMaxStall
+// also tightens shutdown.
+func (e *Executor) workerExitGrace() time.Duration {
+	grace := workerExitGraceDefault
+	if e.cfg.WorkerExitGrace > 0 {
+		grace = e.cfg.WorkerExitGrace
+	}
+	if stall := e.feedbackDrainMaxStall(); stall < grace {
+		grace = stall
+	}
+	return grace
+}
+
 // timerPool recycles the watchdog timers used by the per-module timeout wrappers
 // so each module call doesn't allocate a fresh runtime timer — these wrappers run
 // on the hottest per-module dispatch loop (every active and passive call). A
@@ -1728,7 +1756,10 @@ func (e *Executor) runPassiveWithTimeout(
 	start := time.Now()
 	ch := moduleResultChanPool.Get().(chan moduleCallResult)
 	go func() {
-		events, err := scanFn(callCtx)
+		// runScanFnGuarded recovers a module panic into an error: this goroutine
+		// is outside processItem's recover and the conc.WaitGroup boundary, so an
+		// unrecovered panic here would crash the process.
+		events, err := e.runScanFnGuarded(callCtx, module.ID(), scanFn)
 		ch <- moduleCallResult{events, err}
 	}()
 
@@ -1823,7 +1854,10 @@ func (e *Executor) runActiveWithTimeout(
 		// abandoned goroutine keeps the slot until scanFn actually unwinds, so the
 		// executor's concurrency cap keeps reflecting genuinely in-flight scans.
 		defer releaseSlot()
-		events, err := scanFn(callCtx)
+		// runScanFnGuarded recovers a module panic into an error: this goroutine
+		// is outside processItem's recover and the conc.WaitGroup boundary, so an
+		// unrecovered panic here would crash the process.
+		events, err := e.runScanFnGuarded(callCtx, module.ID(), scanFn)
 		ch <- moduleCallResult{events, err}
 	}()
 

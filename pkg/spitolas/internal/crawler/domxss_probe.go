@@ -50,20 +50,62 @@ type reflectedCandidate struct {
 	dedupeKey      string // value-independent identity so each surface is confirmed once
 }
 
+// domXssProbeBudget computes the probe's wall-clock budget from the parent
+// context and reports whether the probe should run at all. It returns ok=false
+// when the parent is already cancelled/expired or has no remaining time, so the
+// probe never starts fresh navigations after the scan has been stopped; otherwise
+// it caps the budget at domXssBudget and at whatever time the parent has left.
+func domXssProbeBudget(parent context.Context) (time.Duration, bool) {
+	if parent.Err() != nil {
+		return 0, false
+	}
+	budget := domXssBudget
+	if dl, ok := parent.Deadline(); ok {
+		if remaining := time.Until(dl); remaining < budget {
+			budget = remaining
+		}
+	}
+	if budget <= 0 {
+		return 0, false
+	}
+	return budget, true
+}
+
 // probeDOMXSS confirms DOM-based XSS on client routes the crawl already visited.
 // It never navigates the browser blindly: a cheap prefilter over each captured
 // state's DOM selects only (route, param) pairs whose value actually reflected, and
 // only those are re-navigated with an execution canary. Best-effort and budget-
 // capped; runs while the crawl browser is still alive (from buildResult).
-func (c *Crawler) probeDOMXSS() []DOMXssFinding {
+func (c *Crawler) probeDOMXSS(parent context.Context) []DOMXssFinding {
 	if c.browser == nil || c.graph == nil {
 		return nil
 	}
+	// Honor cancellation and budget from the remaining parent deadline. If the
+	// crawl/phase/operator context is already done (Ctrl-C, the per-target
+	// max-duration, or the enclosing phase deadline), don't spin up a fresh
+	// navigation pass — that is exactly the traffic the operator asked to stop.
+	// Previously this rooted its own 45s window at context.Background(), so it kept
+	// hitting the target for the full budget after the scan was cancelled and hid
+	// inside the runner's teardown grace.
+	budget, ok := domXssProbeBudget(parent)
+	if !ok {
+		zap.L().Debug("DOM-XSS probe: skipped, crawl context cancelled or out of budget", zap.Error(parent.Err()))
+		return nil
+	}
+
+	// Cheap no-navigation prefilter first: reflected params on routes the crawl
+	// already visited, read from captured DOM. Collected before opening any page so a
+	// crawl with nothing reflected and no mineable route table costs no navigation.
+	freeCandidates := c.collectReflectedCandidates()
+
 	origin := ""
 	if c.config != nil && c.config.URL != nil {
 		origin = c.config.URL.Scheme + "://" + c.config.URL.Host
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), domXssBudget)
+
+	// Keep the probe a child of the parent so it can never exceed the scan's own
+	// bound and a Ctrl-C mid-probe cancels it promptly.
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 
 	// The crawl's pages are bound to the (now-expired) crawl deadline, so every op on
@@ -84,11 +126,12 @@ func (c *Crawler) probeDOMXSS() []DOMXssFinding {
 	}
 
 	// Candidates come from two sources: (1) reflected params on routes the crawl
-	// actually visited (free, from captured DOM), and (2) the app's own client route
-	// table mined from its JS bundle, paired with common reflected-param names — this
-	// reaches user-driven routes (e.g. a search view) the crawl never hit with a
-	// parameter. Both only reach the execution canary through a marker-reflection gate.
-	candidates := append(c.collectReflectedCandidates(), c.jsRouteCandidates(page)...)
+	// actually visited (free, from captured DOM, collected above), and (2) the app's
+	// own client route table mined from its JS bundle, paired with common reflected-
+	// param names — this reaches user-driven routes (e.g. a search view) the crawl
+	// never hit with a parameter. Both only reach the execution canary through a
+	// marker-reflection gate.
+	candidates := append(freeCandidates, c.jsRouteCandidates(page)...)
 	zap.L().Debug("DOM-XSS probe: candidates collected", zap.Int("count", len(candidates)))
 	if len(candidates) == 0 {
 		return nil

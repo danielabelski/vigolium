@@ -580,10 +580,21 @@ func (h *Handlers) runBackgroundURLScan(scanID, target string, rr *httpmsg.HttpR
 		concurrency = 10
 	}
 
+	// Each concurrent lightweight scan gets its own behavioral requester state
+	// (response observer, request clusterer, cookie jar) layered over the shared
+	// transport, so two scans running at once on this server don't overwrite each
+	// other's 5xx corroboration observer or coalesce identical requests across scans.
+	scanRequester := h.httpRequester
+	if cloned, err := h.httpRequester.CloneForScan(); err == nil {
+		scanRequester = cloned
+	} else {
+		zap.L().Warn("failed to clone per-scan requester; falling back to shared requester", zap.Error(err))
+	}
+
 	executorCfg := core.ExecutorConfig{
 		Workers:              concurrency,
 		Services:             h.services,
-		HTTPRequester:        h.httpRequester,
+		HTTPRequester:        scanRequester,
 		Repository:           h.repo,
 		ScanUUID:             scanID,
 		MaxFindingsPerModule: 10,

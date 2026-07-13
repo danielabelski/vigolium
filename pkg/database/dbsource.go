@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -325,12 +326,13 @@ func (s *DBInputSource) fetchNextBatch(ctx context.Context) ([]*HTTPRecord, erro
 func (s *DBInputSource) workItemFromRecord(record *HTTPRecord, seq uint64) (*work.WorkItem, error) {
 	rr, err := s.recordToHttpRequestResponse(record)
 	if err != nil {
-		s.mu.Lock()
-		delete(s.pendingBySeq, seq)
-		if s.nextAckSeq == seq {
-			s.nextAckSeq++
-		}
-		s.mu.Unlock()
+		// A record that can't be converted will never succeed. Acknowledge its
+		// cursor slot (ack marks it processed and drains the contiguous head)
+		// rather than deleting it. Deleting left a permanent hole in pendingBySeq
+		// when earlier records were still un-acked: the contiguous ack-drain stops
+		// at that missing seq forever, freezing the durable cursor and
+		// processed_count just before the malformed row for the source's lifetime.
+		s.ack(seq)
 		return nil, err
 	}
 
@@ -720,9 +722,16 @@ func (s *RiskPrioritizedDBInputSource) nextPageRowsLocked(ctx context.Context) (
 		return nil, nil // caller marks the stream exhausted
 	}
 
-	last := rows[len(rows)-1]
-	s.keyScore, s.keyAt, s.keyID, s.started = last.RiskScore, last.CreatedAt, last.UUID, true
+	// Do NOT advance the keyset here. The caller advances it (advanceKeyLocked)
+	// only after the page's records are either coalesced away or successfully
+	// fetched, so a transient bulk-fetch failure re-pulls THIS exact page instead
+	// of stepping past it and leaving a permanent coverage hole.
 	return rows, nil
+}
+
+// advanceKeyLocked steps the keyset past the given page's last row. Caller holds s.mu.
+func (s *RiskPrioritizedDBInputSource) advanceKeyLocked(last riskPageRow) {
+	s.keyScore, s.keyAt, s.keyID, s.started = last.RiskScore, last.CreatedAt, last.UUID, true
 }
 
 // fillNextPageLocked pulls keyset pages (applying coalescing) until it has a
@@ -739,6 +748,8 @@ func (s *RiskPrioritizedDBInputSource) fillNextPageLocked(ctx context.Context) (
 			return false, nil // stream drained
 		}
 
+		last := rows[len(rows)-1]
+
 		// Coalesce the page in priority order; survivors are the UUIDs to scan.
 		surviving := make([]string, 0, len(rows))
 		for i := range rows {
@@ -747,25 +758,43 @@ func (s *RiskPrioritizedDBInputSource) fillNextPageLocked(ctx context.Context) (
 			}
 		}
 		if len(surviving) == 0 {
-			continue // whole page coalesced away; pull the next page
-		}
-		s.total += len(surviving)
-
-		// Fetch full records for the survivors. Release the lock across the fetch so
-		// worker ack callbacks (ackSnapshotItem) aren't blocked on it. Next() has a
-		// single caller, so no other goroutine advances the lane state meanwhile.
-		s.mu.Unlock()
-		records, ferr := s.repo.GetScanRecordsByUUIDs(ctx, surviving)
-		s.mu.Lock()
-		if ferr != nil {
-			// Transient fetch failure: the lane cursor already advanced, so resolve
-			// these survivors as skipped and move on rather than spinning on them.
-			zap.L().Debug("RiskPrioritizedDBInputSource: batch record fetch failed, skipping page",
-				zap.Error(ferr), zap.Int("page_size", len(surviving)))
-			s.skipped += len(surviving)
-			s.maybeCommitCursorLocked()
+			// Whole page coalesced away — nothing to fetch, so it's safe to step the
+			// keyset past it and pull the next page.
+			s.advanceKeyLocked(last)
 			continue
 		}
+
+		// Fetch full records for the survivors, with a bounded retry so a transient
+		// DB error (SQLITE_BUSY, a brief failover) doesn't drop the page. Release the
+		// lock across each attempt so worker ack callbacks (ackSnapshotItem) aren't
+		// blocked. Next() has a single caller, so no other goroutine advances the
+		// lane state meanwhile.
+		var records []*HTTPRecord
+		var ferr error
+		for attempt := 0; attempt < 3; attempt++ {
+			s.mu.Unlock()
+			records, ferr = s.repo.GetScanRecordsByUUIDs(ctx, surviving)
+			if ferr != nil && ctx.Err() == nil && attempt < 2 {
+				select {
+				case <-ctx.Done():
+				case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
+				}
+			}
+			s.mu.Lock()
+			if ferr == nil {
+				break
+			}
+		}
+		if ferr != nil {
+			// The keyset was NOT advanced, so re-pulling this page after the error is
+			// surfaced retries the exact same survivors — a transient failure becomes
+			// retryable coverage instead of a silent hole committed as "complete".
+			// Return the error rather than counting survivors as skipped.
+			return false, fmt.Errorf("risk-prioritized page record fetch failed: %w", ferr)
+		}
+		// Fetch succeeded: now it's safe to advance the keyset and count survivors.
+		s.advanceKeyLocked(last)
+		s.total += len(surviving)
 
 		byUUID := make(map[string]*HTTPRecord, len(records))
 		for _, rec := range records {
@@ -833,6 +862,7 @@ func (s *RiskPrioritizedDBInputSource) Close() error {
 type UUIDListDBInputSource struct {
 	repo   *Repository
 	uuids  []string
+	mu     sync.Mutex // guards index; the Source contract requires Next be concurrency-safe
 	index  int
 	closed atomic.Bool
 }
@@ -853,12 +883,16 @@ func (s *UUIDListDBInputSource) Next(ctx context.Context) (*work.WorkItem, error
 			return nil, io.EOF
 		}
 
+		// Claim the next index under the mutex so concurrent Next() callers (the
+		// Source contract permits them) never read the same UUID or race s.index.
+		s.mu.Lock()
 		if s.index >= len(s.uuids) {
+			s.mu.Unlock()
 			return nil, io.EOF
 		}
-
 		uuid := s.uuids[s.index]
 		s.index++
+		s.mu.Unlock()
 
 		record, err := s.repo.GetRecordByUUID(ctx, uuid)
 		if err != nil {

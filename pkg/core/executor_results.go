@@ -431,20 +431,49 @@ func (e *Executor) fillHostFromResult(result *output.ResultEvent) {
 	result.Host = "unknown"
 }
 
+// reportPanic logs a recovered panic with its stack trace and forwards it to the
+// operator notifier. label identifies where it happened (e.g. "processItem" or
+// "module <id>"). Shared by recoverFromPanic and the per-module guard so the
+// stack-capture/formatting/notify logic lives in exactly one place.
+func (e *Executor) reportPanic(label string, r any) {
+	stack := make([]byte, 4096)
+	length := goruntime.Stack(stack, false)
+	errorMessage := fmt.Sprintf(
+		"Recovered from panic in %s: %+v\nStack Trace:\n%s",
+		label, r, string(stack[:length]),
+	)
+	zap.L().Error(errorMessage)
+
+	if e.cfg.Services != nil && e.cfg.Services.Notifier != nil {
+		_ = e.cfg.Services.Notifier.SendRaw(errorMessage)
+	}
+}
+
 func (e *Executor) recoverFromPanic(ctx string) {
 	if r := recover(); r != nil {
-		stack := make([]byte, 4096)
-		length := goruntime.Stack(stack, false)
-		stackTrace := string(stack[:length])
-
-		errorMessage := fmt.Sprintf(
-			"Recovered from panic in %s: %+v\nStack Trace:\n%s",
-			ctx, r, stackTrace,
-		)
-		zap.L().Error(errorMessage)
-
-		if e.cfg.Services != nil && e.cfg.Services.Notifier != nil {
-			_ = e.cfg.Services.Notifier.SendRaw(errorMessage)
-		}
+		e.reportPanic(ctx, r)
 	}
+}
+
+// runScanFnGuarded runs a module scan function, converting a panic into an
+// error value instead of letting it unwind. The active/passive timeout wrappers
+// invoke scanFn from a raw goroutine that neither processItem's recover nor the
+// conc.WaitGroup boundary can reach, so an unrecovered panic there crashes the
+// whole process. Recovering here keeps a single defective module (or a parser
+// panic on adversarial input) from taking down a long-running server, while
+// still surfacing the failure through the normal (nil, err) result path so the
+// watchdog goroutine completes its channel send and slot release.
+func (e *Executor) runScanFnGuarded(
+	ctx context.Context,
+	moduleID string,
+	fn func(context.Context) ([]*output.ResultEvent, error),
+) (events []*output.ResultEvent, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			e.reportPanic("module "+moduleID, r)
+			events = nil
+			err = fmt.Errorf("module %s panicked: %v", moduleID, r)
+		}
+	}()
+	return fn(ctx)
 }

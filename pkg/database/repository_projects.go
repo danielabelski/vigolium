@@ -133,6 +133,7 @@ func (r *Repository) UpdateProject(ctx context.Context, project *Project) error 
 var projectOwnedTables = []string{
 	"scans",
 	"http_records",
+	"analysis_artifacts",
 	"findings",
 	"scopes",
 	"oast_interactions",

@@ -281,7 +281,7 @@ func (h *Handlers) startSwarmRun(c fiber.Ctx, req AgentSwarmRequest, timeout tim
 		return nil // 429 already sent
 	}
 
-	agenticScanUUID, err := h.registerRunningAgenticScan("swarm", req.Agent, req.ScanUUID)
+	agenticScanUUID, err := h.registerRunningAgenticScan("swarm", req.Agent, req.ScanUUID, projectUUID)
 	if err != nil {
 		h.releaseHeavyAgentSlotForProject(projectUUID)
 		if byokCleanup != nil {
@@ -418,7 +418,7 @@ func (h *Handlers) buildSwarmConfig(req AgentSwarmRequest, projectUUID string) a
 
 	// Resolve a target URL for the scan runner.
 	// The runner needs at least one target to create an input source.
-	targetURL := h.resolveSwarmTargetURL(req)
+	targetURL := h.resolveSwarmTargetURL(req, projectUUID)
 
 	// Wire scan callback using the server's runner infrastructure
 	cfg.ScanFunc = h.buildServerAgentSwarmFunc(targetURL, projectUUID, req.ScanUUID, req.OnlyPhase, req.SkipPhases, settings, &generatedAuthConfig)
@@ -586,7 +586,7 @@ func buildServerSyntheticCheckpoint(startFrom string) *agent.SwarmCheckpoint {
 
 // resolveSwarmTargetURL extracts a target URL from the swarm request.
 // It checks the URL hint, then tries each input to find a usable target.
-func (h *Handlers) resolveSwarmTargetURL(req AgentSwarmRequest) string {
+func (h *Handlers) resolveSwarmTargetURL(req AgentSwarmRequest, projectUUID string) string {
 	// The URL field is an explicit hint — use it directly if provided.
 	if req.URL != "" {
 		return req.URL
@@ -599,7 +599,9 @@ func (h *Handlers) resolveSwarmTargetURL(req AgentSwarmRequest) string {
 			return input
 		}
 		if h.repo != nil && len(input) == 36 && strings.Count(input, "-") == 4 {
-			if rec, err := h.repo.GetRecordByUUID(context.Background(), input); err == nil && rec != nil {
+			// Scope the record lookup to the request's active project so a raw
+			// UUID can't resolve a target from another project's traffic.
+			if rec, err := h.repo.GetRecordByUUID(context.Background(), input); err == nil && rec != nil && rec.ProjectUUID == projectUUID {
 				scheme := rec.Scheme
 				if scheme == "" {
 					scheme = "https"

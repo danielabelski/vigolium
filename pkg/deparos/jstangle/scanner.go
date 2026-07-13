@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	// capabilityBaseTimeout bounds the normal capability handshake.
+	capabilityBaseTimeout = 15 * time.Second
+	// capabilityColdStartTimeout is the extended bound for a single retry when the
+	// first handshake times out. First launch of a freshly extracted standalone Bun
+	// executable can include platform signature/quarantine checks that, on a
+	// CPU-starved host, exceed the base bound without being a genuine protocol
+	// failure — so a one-shot longer retry avoids rejecting a valid helper.
+	capabilityColdStartTimeout = 45 * time.Second
 )
 
 // Scanner manages the embedded jstangle binary and its capability handshake.
@@ -134,14 +146,27 @@ func (s *Scanner) getBinary() (*CachedBinary, error) {
 }
 
 func queryCapabilities(binaryPath string) (*Capabilities, error) {
-	// First launch of a freshly extracted standalone Bun executable can include
-	// platform signature/quarantine checks. Keep this bounded, but do not treat a
-	// normal cold start as a protocol failure.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	caps, err := queryCapabilitiesWithin(binaryPath, capabilityBaseTimeout)
+	// A slow cold start (signature/quarantine checks under CPU starvation) can trip
+	// the base deadline without being a real protocol failure. Retry exactly once
+	// with a longer bound before rejecting an otherwise valid embedded helper.
+	if err != nil && errors.Is(err, context.DeadlineExceeded) {
+		caps, err = queryCapabilitiesWithin(binaryPath, capabilityColdStartTimeout)
+	}
+	return caps, err
+}
+
+func queryCapabilitiesWithin(binaryPath string, timeout time.Duration) (*Capabilities, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binaryPath, "--capabilities")
 	output, err := cmd.Output()
 	if err != nil {
+		// Surface the deadline as the cause (not the opaque exec kill error) so the
+		// caller can distinguish a timeout worth retrying from a real failure.
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: query capabilities within %s: %w", ErrIncompatibleProtocol, timeout, ctx.Err())
+		}
 		return nil, fmt.Errorf("%w: query capabilities: %w", ErrIncompatibleProtocol, err)
 	}
 	if len(output) > 1024*1024 {

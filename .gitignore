@@ -89,6 +89,10 @@ test/integration/*-test/
 **/vigolium-results/findings-draft/
 **/vigolium-results/longshot/
 **/vigolium-results/attack-surface/
+**/vigolium-results/codeql-artifacts/
+**/vigolium-results/codeql-queries/
+**/vigolium-results/semgrep-res/
+**/vigolium-results/semgrep-rules/
 **/piolium/audit-state.json
 **/piolium/file-records/
 **/piolium/attack-surface/

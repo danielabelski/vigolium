@@ -297,6 +297,49 @@ func TestCreateScanWithCursorIncremental(t *testing.T) {
 	}
 }
 
+// TestCreateScanWithCursorIsolatesProjects verifies an incremental scan in one
+// project never inherits a cursor from a completed scan in another project, even
+// when the module strings match exactly (CR-03).
+func TestCreateScanWithCursorIsolatesProjects(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	projA := uuid.NewString()
+	projB := uuid.NewString()
+
+	// Project A has a completed scan with a cursor for modules "xss".
+	prevA := &Scan{
+		UUID:        uuid.NewString(),
+		ProjectUUID: projA,
+		Status:      "completed",
+		Modules:     "xss",
+		CursorAt:    time.Now().Add(-time.Hour),
+		CursorUUID:  "project-a-cursor",
+		FinishedAt:  time.Now().Add(-time.Hour),
+	}
+	if err := repo.CreateScanWithCursor(ctx, prevA); err != nil {
+		t.Fatalf("CreateScanWithCursor(prevA): %v", err)
+	}
+
+	// Project B starts an incremental scan with the SAME modules but no prior scan.
+	incB := &Scan{
+		UUID:        uuid.NewString(),
+		ProjectUUID: projB,
+		Status:      "running",
+		Modules:     "xss",
+		ScanMode:    "incremental",
+	}
+	if err := repo.CreateScanWithCursor(ctx, incB); err != nil {
+		t.Fatalf("CreateScanWithCursor(incB): %v", err)
+	}
+	got, _ := repo.GetScanByUUID(ctx, incB.UUID)
+	if got.StartCursorUUID != "" || !got.StartCursorAt.IsZero() {
+		t.Errorf("project B inherited project A's cursor: uuid=%q at=%v (should start at zero)",
+			got.StartCursorUUID, got.StartCursorAt)
+	}
+}
+
 func TestScanLogs(t *testing.T) {
 	db := newTestDB(t)
 	repo := NewRepository(db)
@@ -372,5 +415,57 @@ func TestLoadEnabledScopes(t *testing.T) {
 	}
 	if len(loaded) != 1 || loaded[0].Name != "inc" {
 		t.Errorf("LoadEnabledScopes = %v, want only the enabled one", loaded)
+	}
+}
+
+// TestLoadEnabledScopesNeverLeaksAcrossProjects verifies the fallback path never
+// returns every project's scopes: when neither the requested project nor the
+// default project has enabled scopes, the result is empty rather than an
+// unscoped "all projects" query (CR-10). It also checks default-project inheritance.
+func TestLoadEnabledScopesNeverLeaksAcrossProjects(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	otherProj := uuid.NewString()
+	// A scope owned by some unrelated project. It must never surface for a
+	// different project that has none of its own.
+	if _, err := db.NewInsert().Model(&Scope{
+		ProjectUUID: otherProj, Name: "other-inc", RuleType: "include", Priority: 1, Enabled: true,
+	}).Exec(ctx); err != nil {
+		t.Fatalf("insert other-project scope: %v", err)
+	}
+
+	// Requested project has no scopes and the default project has none either.
+	emptyProj := uuid.NewString()
+	loaded, err := repo.LoadEnabledScopes(ctx, emptyProj)
+	if err != nil {
+		t.Fatalf("LoadEnabledScopes(emptyProj): %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Errorf("LoadEnabledScopes leaked %d foreign scope(s); want 0", len(loaded))
+	}
+
+	// Empty input resolves to the default project (which has no scopes), not all.
+	loaded, err = repo.LoadEnabledScopes(ctx, "")
+	if err != nil {
+		t.Fatalf(`LoadEnabledScopes(""): %v`, err)
+	}
+	if len(loaded) != 0 {
+		t.Errorf(`LoadEnabledScopes("") leaked %d scope(s); want 0`, len(loaded))
+	}
+
+	// A non-default project with no scopes inherits the DEFAULT project's scopes.
+	if _, err := db.NewInsert().Model(&Scope{
+		ProjectUUID: DefaultProjectUUID, Name: "default-inc", RuleType: "include", Priority: 1, Enabled: true,
+	}).Exec(ctx); err != nil {
+		t.Fatalf("insert default-project scope: %v", err)
+	}
+	loaded, err = repo.LoadEnabledScopes(ctx, emptyProj)
+	if err != nil {
+		t.Fatalf("LoadEnabledScopes(emptyProj, with default): %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].Name != "default-inc" {
+		t.Errorf("fallback to default project failed: got %v", loaded)
 	}
 }

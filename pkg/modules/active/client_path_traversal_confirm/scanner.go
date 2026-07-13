@@ -86,6 +86,11 @@ type Module struct {
 	RecoverCandidates func(ctx context.Context, js, sourceURL string) []Candidate
 }
 
+// Fresh implements modules.PerScanModule so the runner gives each scan its own
+// instance — the browser Budget's monotonic per-scan probe total and per-host
+// semaphore map are scan-scoped and must not carry across concurrent scans.
+func (m *Module) Fresh() any { return New() }
+
 func New() *Module {
 	m := &Module{
 		BaseActiveModule: modkit.NewBaseActiveModule(

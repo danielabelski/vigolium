@@ -118,6 +118,13 @@ const (
 	// --header/--body and their inverses. Two ? placeholders.
 	rawCorpusPredicate = "(COALESCE(CAST(r.raw_request AS TEXT), '') LIKE ? OR COALESCE(CAST(r.raw_response AS TEXT), '') LIKE ?)"
 
+	// severitySortRankExpr maps f.severity to its numeric risk rank for ORDER BY,
+	// so a severity sort ranks by risk instead of alphabetically. Mirrors
+	// severity_gate's canonical order (info<suspect<low<medium<high<critical).
+	severitySortRankExpr = "CASE f.severity" +
+		" WHEN 'critical' THEN 6 WHEN 'high' THEN 5 WHEN 'medium' THEN 4" +
+		" WHEN 'low' THEN 3 WHEN 'suspect' THEN 2 WHEN 'info' THEN 1 ELSE 0 END"
+
 	// findingSearchPredicate scans a finding's own fields plus its linked HTTP
 	// records (via the finding_records junction). The record columns sit inside
 	// EXISTS, which is boolean and never NULL, so they need no COALESCE. Twelve
@@ -769,15 +776,20 @@ func (fqb *FindingsQueryBuilder) applyFindingFilters(query *bun.SelectQuery) {
 		query.Where("f.status IN (?)", bun.List(fqb.filters.Status))
 	}
 
-	// Domain filtering (join http_records to filter by hostname via junction table)
+	// Domain filtering via associated HTTP records. Uses EXISTS (not a JOIN) so a
+	// finding linked to N records on the matching host yields ONE row, not N — a
+	// JOIN here duplicated both the listed rows and the ScanAndCount total. Matches
+	// the non-duplicating pattern used by the path/method/status/source filters below.
 	if fqb.filters.HostPattern != "" {
-		query.Join("INNER JOIN finding_records AS fr ON fr.finding_id = f.id")
-		query.Join("INNER JOIN http_records AS r ON r.uuid = fr.record_uuid")
 		if strings.Contains(fqb.filters.HostPattern, "*") {
 			pattern := strings.ReplaceAll(fqb.filters.HostPattern, "*", "%")
-			query.Where("r.hostname LIKE ?", pattern)
+			query.Where(`EXISTS (SELECT 1 FROM finding_records fr2
+				INNER JOIN http_records r ON r.uuid = fr2.record_uuid
+				WHERE fr2.finding_id = f.id AND r.hostname LIKE ?)`, pattern)
 		} else {
-			query.Where("r.hostname = ?", fqb.filters.HostPattern)
+			query.Where(`EXISTS (SELECT 1 FROM finding_records fr2
+				INNER JOIN http_records r ON r.uuid = fr2.record_uuid
+				WHERE fr2.finding_id = f.id AND r.hostname = ?)`, fqb.filters.HostPattern)
 		}
 	}
 
@@ -934,7 +946,12 @@ func (fqb *FindingsQueryBuilder) mapFindingSortColumn(name string) string {
 	case "created_at", "created":
 		return "f.created_at"
 	case "severity":
-		return "f.severity"
+		// Rank by risk, not lexically: a plain "f.severity" string sort ordered
+		// "suspect" > "medium" > "low" > "info" > "high" > "critical", which is
+		// nonsense for a severity view. Mirror severity_gate's canonical ranking
+		// (info < suspect < low < medium < high < critical). Portable across
+		// SQLite/Postgres.
+		return severitySortRankExpr
 	case "module_name", "module":
 		return "f.module_name"
 	case "module_id":

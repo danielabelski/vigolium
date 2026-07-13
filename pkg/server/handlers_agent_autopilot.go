@@ -191,7 +191,7 @@ func (h *Handlers) startAutopilotRun(c fiber.Ctx, req AgentAutopilotRequest, tim
 		return nil // 429 already sent
 	}
 
-	agenticScanUUID, err := h.registerRunningAgenticScan("autopilot", req.Agent, req.ScanUUID)
+	agenticScanUUID, err := h.registerRunningAgenticScan("autopilot", req.Agent, req.ScanUUID, projectUUID)
 	if err != nil {
 		h.releaseHeavyAgentSlotForProject(projectUUID)
 		if byokCleanup != nil {

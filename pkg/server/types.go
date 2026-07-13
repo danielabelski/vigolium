@@ -1003,8 +1003,9 @@ type ScanRecordsRequest struct {
 // AgenticScanStatusResponse is the response for GET /api/agent/status/:id and GET /api/agent/status/list.
 type AgenticScanStatusResponse struct {
 	AgenticScanUUID string        `json:"agentic_scan_uuid"`
-	Mode            string        `json:"mode"`   // "query", "autopilot", "pipeline"
-	Status          string        `json:"status"` // "running", "completed", "failed"
+	ProjectUUID     string        `json:"project_uuid,omitempty"` // owning project; scopes status/list/cancel to X-Project-UUID
+	Mode            string        `json:"mode"`                   // "query", "autopilot", "pipeline"
+	Status          string        `json:"status"`                 // "running", "completed", "failed"
 	AgentName       string        `json:"agent_name,omitempty"`
 	TemplateID      string        `json:"template_id,omitempty"`
 	FindingCount    int           `json:"finding_count,omitempty"`

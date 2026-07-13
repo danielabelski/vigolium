@@ -274,17 +274,18 @@ func (m *Module) confirmBehavioral(
 		return nil, nil
 	}
 
-	// Reconfirm on a second, independent byte: the last byte of an earlier block
-	// when the ciphertext has three or more blocks, otherwise a different byte of
-	// the penultimate block.
-	secondIdx := penultLastIdx - cand.BlockSize
-	if secondIdx < 0 {
-		secondIdx = penultLastIdx - 1
-	}
-	if secondIdx < 0 || secondIdx == penultLastIdx {
-		return nil, nil
-	}
-	clusters2, err := m.sweepByte(ctx, ip, httpClient, cand, secondIdx)
+	// Reconfirm by RE-SWEEPING the byte that actually controls the final padding —
+	// the last byte of the penultimate ciphertext block — with fresh requests.
+	//
+	// In CBC, P_n = D(C_n) XOR C_{n-1}, so ONLY the penultimate ciphertext block
+	// feeds the final plaintext block's PKCS#7 padding. The previous code
+	// reconfirmed on the last byte of an EARLIER block (penultLastIdx - BlockSize)
+	// for 3+-block ciphertexts, which changes an earlier plaintext block, not the
+	// padding — so a genuine behavioral oracle produced no invalid-padding signal
+	// on the second lane and the finding was silently dropped (false negative). A
+	// repeated, independent sweep of the same controlling byte is pad-length
+	// agnostic and confirms the oracle response is reproducible, not a fluke.
+	clusters2, err := m.sweepByte(ctx, ip, httpClient, cand, penultLastIdx)
 	if err != nil {
 		return nil, err
 	}

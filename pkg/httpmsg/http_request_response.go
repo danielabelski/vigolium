@@ -172,6 +172,13 @@ func (h *HttpRequestResponse) BuildRetryableRequest() (*retryablehttp.Request, e
 	}
 	for _, header := range h.request.Headers() {
 		req.Header.Add(header.Name, header.Value)
+		if strings.EqualFold(header.Name, "Host") {
+			// Go transmits the Host header from req.Host, not req.Header["Host"];
+			// mirror an explicit/overridden Host here so it actually reaches the
+			// wire (host-header-injection probes, captured vhost authority).
+			// The dial target stays req.URL.Host, so only the sent Host: changes.
+			req.Host = header.Value
+		}
 	}
 	return req, nil
 }

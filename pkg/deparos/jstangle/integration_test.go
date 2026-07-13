@@ -423,7 +423,12 @@ func TestIntegration_ChecksumConsistency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScanner failed: %v", err)
 	}
-	_ = scanner1.EnsureBinary()
+	// Fail loudly on a handshake/extraction error instead of swallowing it: a
+	// discarded error left Checksum() empty and surfaced as a misleading checksum
+	// mismatch that hid the real cold-start failure (CR-09).
+	if err := scanner1.EnsureBinary(); err != nil {
+		t.Fatalf("scanner1.EnsureBinary failed: %v", err)
+	}
 	checksum1 := scanner1.Checksum()
 
 	// Clear and re-create
@@ -434,7 +439,9 @@ func TestIntegration_ChecksumConsistency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScanner failed: %v", err)
 	}
-	_ = scanner2.EnsureBinary()
+	if err := scanner2.EnsureBinary(); err != nil {
+		t.Fatalf("scanner2.EnsureBinary failed: %v", err)
+	}
 	checksum2 := scanner2.Checksum()
 
 	if checksum1 != checksum2 {

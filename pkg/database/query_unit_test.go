@@ -415,10 +415,11 @@ func TestFindingsQueryBuilder_SeverityAndModuleFilter(t *testing.T) {
 func TestFindingsQueryBuilder_MapFindingSortColumn(t *testing.T) {
 	fqb := &FindingsQueryBuilder{}
 	tests := map[string]string{
-		"found":       "f.found_at",
-		"found_at":    "f.found_at",
-		"created":     "f.created_at",
-		"severity":    "f.severity",
+		"found":    "f.found_at",
+		"found_at": "f.found_at",
+		"created":  "f.created_at",
+		// severity sorts by risk rank, not lexically — see severitySortRankExpr.
+		"severity":    severitySortRankExpr,
 		"module":      "f.module_name",
 		"module_name": "f.module_name",
 		"module_id":   "f.module_id",

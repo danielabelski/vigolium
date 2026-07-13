@@ -369,29 +369,41 @@ func (db *DB) GetTopHosts(ctx context.Context, filters QueryFilters, limit int) 
 		return nil, err
 	}
 
-	// Finding counts per hostname in ONE grouped query. Clear any incoming
-	// HostPattern so every hostname is counted at once, then map back per host.
-	// COUNT(DISTINCT f.id) matches the old per-host countScopedFindings semantics:
-	// a finding linked to several records on one host counts once for that host.
+	// Finding counts per ORIGIN (scheme, hostname, port) in ONE grouped query, so
+	// the key matches the request-count rows above. Grouping by hostname alone
+	// assigned the same hostname-wide count to every origin sharing the hostname
+	// (e.g. :80 and :443, or :8080 and :3000), over-attributing findings. Clear any
+	// incoming HostPattern so every origin is counted at once. COUNT(DISTINCT f.id)
+	// counts a finding once per origin even when linked to several of that origin's
+	// records.
 	fcFilters := filters
 	fcFilters.HostPattern = ""
 	type fcRow struct {
+		Scheme   string `bun:"scheme"`
 		Hostname string `bun:"hostname"`
+		Port     int    `bun:"port"`
 		Count    int64  `bun:"fc"`
 	}
 	var fcRows []fcRow
 	if err := db.scopedFindingsQuery(fcFilters).
 		Join("INNER JOIN finding_records AS fr ON fr.finding_id = f.id").
 		Join("INNER JOIN http_records AS r ON r.uuid = fr.record_uuid").
+		ColumnExpr("r.scheme AS scheme").
 		ColumnExpr("r.hostname AS hostname").
+		ColumnExpr("r.port AS port").
 		ColumnExpr("COUNT(DISTINCT f.id) AS fc").
-		GroupExpr("r.hostname").
+		GroupExpr("r.scheme, r.hostname, r.port").
 		Scan(ctx, &fcRows); err != nil {
 		return nil, err
 	}
-	fcByHost := make(map[string]int64, len(fcRows))
+	type hostOrigin struct {
+		Scheme   string
+		Hostname string
+		Port     int
+	}
+	fcByOrigin := make(map[hostOrigin]int64, len(fcRows))
 	for _, fr := range fcRows {
-		fcByHost[fr.Hostname] = fr.Count
+		fcByOrigin[hostOrigin{fr.Scheme, fr.Hostname, fr.Port}] = fr.Count
 	}
 
 	hostStats := make([]HostStats, 0, len(rows))
@@ -401,7 +413,7 @@ func (db *DB) GetTopHosts(ctx context.Context, filters QueryFilters, limit int) 
 			Hostname:     r.Hostname,
 			Port:         r.Port,
 			RequestCount: r.RequestCount,
-			FindingCount: fcByHost[r.Hostname],
+			FindingCount: fcByOrigin[hostOrigin{r.Scheme, r.Hostname, r.Port}],
 		})
 	}
 

@@ -296,10 +296,16 @@ func drainAgentPipeToSSE(sink *sseSink, pr *io.PipeReader, onDisconnect func()) 
 // HandleAgenticScanList handles GET /api/agent/status/list — returns all agent run statuses.
 // Returns from database for historical runs, merged with in-memory status for active runs.
 func (h *Handlers) HandleAgenticScanList(c fiber.Ctx) error {
+	// Scope every result to the request's project (X-Project-UUID): the DB query is
+	// filtered and the in-memory merge only includes runs owned by that project, so
+	// a request scoped to one engagement never observes another engagement's runs
+	// (which previously leaked with their full Result/SwarmResult blobs).
+	projectUUID := getProjectUUID(c)
+
 	// Try DB first for comprehensive history
 	if h.repo != nil {
 		mode := c.Query("mode")
-		runs, _, err := h.repo.ListAgenticScans(context.Background(), "", mode, 100, 0)
+		runs, _, err := h.repo.ListAgenticScans(context.Background(), projectUUID, mode, 100, 0)
 		if err == nil && len(runs) > 0 {
 			statuses := make([]*AgenticScanStatusResponse, 0, len(runs))
 			for _, run := range runs {
@@ -310,7 +316,7 @@ func (h *Handlers) HandleAgenticScanList(c fiber.Ctx) error {
 			// so handing the live entries to c.JSON would race with those writes.
 			h.agentMu.Lock()
 			for _, memStatus := range h.agenticScanStatus {
-				if memStatus.Status == "running" {
+				if memStatus.Status == "running" && memStatus.ProjectUUID == projectUUID {
 					snapshot := *memStatus
 					found := false
 					for i, s := range statuses {
@@ -335,6 +341,9 @@ func (h *Handlers) HandleAgenticScanList(c fiber.Ctx) error {
 	h.agentMu.Lock()
 	statuses := make([]*AgenticScanStatusResponse, 0, len(h.agenticScanStatus))
 	for _, s := range h.agenticScanStatus {
+		if s.ProjectUUID != projectUUID {
+			continue
+		}
 		snapshot := *s
 		statuses = append(statuses, &snapshot)
 	}
@@ -359,6 +368,11 @@ func (h *Handlers) HandleAgenticScanStatus(c fiber.Ctx) error {
 	h.agentMu.Unlock()
 
 	if ok {
+		// Scope by project: a run owned by another engagement is reported as not
+		// found (404, not 403) so cross-project existence isn't leaked via the UUID.
+		if !inRequestProject(c, snapshot.ProjectUUID) {
+			return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{Error: ErrAgentNotFound.Error()})
+		}
 		return c.JSON(&snapshot)
 	}
 
@@ -366,6 +380,9 @@ func (h *Handlers) HandleAgenticScanStatus(c fiber.Ctx) error {
 	if h.repo != nil {
 		run, err := h.repo.GetAgenticScan(context.Background(), agenticScanUUID)
 		if err == nil {
+			if !inRequestProject(c, run.ProjectUUID) {
+				return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{Error: ErrAgentNotFound.Error()})
+			}
 			return c.JSON(agenticScanToStatusResponse(run))
 		}
 	}
@@ -385,10 +402,21 @@ func (h *Handlers) HandleAgentCancel(c fiber.Ctx) error {
 	if agenticScanUUID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "missing run uuid"})
 	}
+	// Only a run owned by the request's project may be cancelled. A run tracked
+	// in-memory but owned by another engagement is reported as not found so an
+	// operator scoped to one project can't abort another's live run via its UUID.
+	notFound := func() error {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{Error: "run not found or already finished"})
+	}
+	h.agentMu.Lock()
+	st, tracked := h.agenticScanStatus[agenticScanUUID]
+	crossProject := tracked && st != nil && !inRequestProject(c, st.ProjectUUID)
+	h.agentMu.Unlock()
+	if crossProject {
+		return notFound()
+	}
 	if !h.cancelRun(agenticScanUUID) {
-		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
-			Error: "run not found or already finished",
-		})
+		return notFound()
 	}
 	return c.JSON(AgenticScanResponse{
 		AgenticScanUUID: agenticScanUUID,
@@ -401,6 +429,7 @@ func (h *Handlers) HandleAgentCancel(c fiber.Ctx) error {
 func agenticScanToStatusResponse(run *database.AgenticScan) *AgenticScanStatusResponse {
 	resp := &AgenticScanStatusResponse{
 		AgenticScanUUID: run.UUID,
+		ProjectUUID:     run.ProjectUUID,
 		Mode:            run.Mode,
 		Status:          run.Status,
 		AgentName:       run.AgentName,
@@ -490,6 +519,13 @@ func (h *Handlers) HandleAgentSessionDetail(c fiber.Ctx) error {
 
 	run, err := h.repo.GetAgenticScan(c.Context(), agenticScanUUID)
 	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrAgentNotFound.Error(),
+		})
+	}
+	// Scope to the request's project: don't expose another engagement's session
+	// metadata (target, source path, session dir) by run UUID.
+	if !inRequestProject(c, run.ProjectUUID) {
 		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
 			Error: ErrAgentNotFound.Error(),
 		})
@@ -779,6 +815,13 @@ func (h *Handlers) resolveSessionDirForRun(c fiber.Ctx) (string, string, error) 
 	}
 	run, err := h.repo.GetAgenticScan(c.Context(), agenticScanUUID)
 	if err != nil || run == nil {
+		return "", "", c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+			Error: ErrAgentNotFound.Error(),
+		})
+	}
+	// Scope to the request's project so logs/artifacts under a run's session dir
+	// aren't readable by an operator scoped to a different engagement.
+	if !inRequestProject(c, run.ProjectUUID) {
 		return "", "", c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
 			Error: ErrAgentNotFound.Error(),
 		})

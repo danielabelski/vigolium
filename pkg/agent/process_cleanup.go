@@ -10,8 +10,20 @@ import (
 )
 
 // CleanupOrphanedProcesses scans session directories for run.pid files and
-// cleans up orphaned agent processes. For dead processes, it removes the stale
-// PID file. For alive orphans, it sends SIGTERM then SIGKILL to the process group.
+// cleans up orphaned agent processes.
+//
+// A run.pid records the OWNING vigolium process's PID/PGID. An "orphan" is a run
+// whose owner has DIED but which may have left agent subprocesses alive in its
+// process group. So:
+//
+//   - If the recorded PID is still ALIVE it is NOT an orphan — it is either a
+//     legitimately running concurrent vigolium instance or an unrelated process
+//     that reused the PID. Either way we must not kill it. (The previous logic
+//     killed alive PIDs, so starting a second run could terminate a live first
+//     run or an unrelated process after PID reuse.)
+//   - If the recorded PID is DEAD, the run is orphaned: reap any subprocesses
+//     that outlived it in its process group, then remove the stale PID file.
+//
 // Returns the number of sessions cleaned up.
 func CleanupOrphanedProcesses(sessionsDir string) int {
 	if sessionsDir == "" {
@@ -22,6 +34,7 @@ func CleanupOrphanedProcesses(sessionsDir string) int {
 		return 0
 	}
 
+	self := os.Getpid()
 	cleaned := 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -33,24 +46,29 @@ func CleanupOrphanedProcesses(sessionsDir string) int {
 			continue
 		}
 
-		if !IsProcessAlive(info.PID) {
-			// Process is dead — just remove the stale PID file.
-			_ = os.Remove(pidPath)
-			cleaned++
-			zap.L().Debug("Removed stale PID file (process dead)",
+		if info.PID == self || IsProcessAlive(info.PID) {
+			// Live (or our own) session — not an orphan. Leave it running.
+			zap.L().Debug("Skipping live session PID (not an orphan)",
 				zap.String("session", entry.Name()),
 				zap.Int("pid", info.PID))
 			continue
 		}
 
-		// Process is alive but orphaned — kill the process group.
-		zap.L().Info("Killing orphaned agent process",
-			zap.String("session", entry.Name()),
-			zap.Int("pgid", info.PGID))
-
-		if err := killProcessGroup(info.PGID); err != nil {
-			zap.L().Debug("Failed to kill orphaned process group",
-				zap.Int("pgid", info.PGID), zap.Error(err))
+		// Owner process is dead — reap any subprocesses still alive in its group,
+		// then remove the stale PID file. Killing a group whose recorded leader is
+		// confirmed dead won't touch a live concurrent run.
+		if info.PGID > 0 && info.PGID != self && procutil.IsProcessGroupAlive(info.PGID) {
+			zap.L().Info("Reaping orphaned agent subprocess group (owner dead)",
+				zap.String("session", entry.Name()),
+				zap.Int("pgid", info.PGID))
+			if err := killProcessGroup(info.PGID); err != nil {
+				zap.L().Debug("Failed to kill orphaned process group",
+					zap.Int("pgid", info.PGID), zap.Error(err))
+			}
+		} else {
+			zap.L().Debug("Removed stale PID file (process dead)",
+				zap.String("session", entry.Name()),
+				zap.Int("pid", info.PID))
 		}
 		_ = os.Remove(pidPath)
 		cleaned++

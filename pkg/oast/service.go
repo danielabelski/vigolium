@@ -85,6 +85,12 @@ type Service struct {
 	// this stays small (unlike the every-payload tracker) and needs no eviction.
 	emitMu      sync.Mutex
 	emittedRank map[string]int // emission key → strongest OAST protocol rank already emitted
+
+	// resolverMu guards resolveRequestUUID. Each executor round replaces the
+	// resolver (SetRequestUUIDResolver) while the interactsh polling goroutine can
+	// read and invoke it from originRecord — a plain func-field read/write across
+	// goroutines is a data race.
+	resolverMu sync.RWMutex
 }
 
 // New creates a new OAST service. Returns (nil, nil) if the interactsh client
@@ -274,7 +280,9 @@ func (s *Service) SetRequestUUIDResolver(fn func(string) string) {
 	if s == nil {
 		return
 	}
+	s.resolverMu.Lock()
 	s.resolveRequestUUID = fn
+	s.resolverMu.Unlock()
 }
 
 // Flush waits for the grace period and then performs a final poll to catch late callbacks.
@@ -540,9 +548,12 @@ func (s *Service) originRecord(requestHash string) (string, *database.HTTPRecord
 	if requestHash == "" {
 		return "", nil
 	}
+	s.resolverMu.RLock()
+	resolver := s.resolveRequestUUID
+	s.resolverMu.RUnlock()
 	var uuid string
-	if s.resolveRequestUUID != nil {
-		uuid = s.resolveRequestUUID(requestHash)
+	if resolver != nil {
+		uuid = resolver(requestHash)
 	}
 	if s.repo == nil {
 		return uuid, nil

@@ -172,6 +172,17 @@ func (w *FindingWriter) Close() {
 	// will start because Save sees closed==true. Safe to wake the drain.
 	w.cancel()
 	w.wg.Wait()
+
+	// Surface fire-and-forget persistence failures at shutdown. Save returns nil
+	// as soon as a finding is enqueued, so a later batch failure is otherwise
+	// invisible — the scan would complete reporting success while silently having
+	// dropped findings. This warning lands in the scan's captured stderr/log.
+	if failed := w.errors.Load(); failed > 0 {
+		zap.L().Warn("FindingWriter: some findings failed to persist and were dropped",
+			zap.Int64("dropped_findings", failed),
+			zap.Int64("written", w.written.Load()),
+			zap.Int64("enqueued", w.enqueued.Load()))
+	}
 }
 
 // flushLoop drains the channel and coalesces findings into batch transactions.

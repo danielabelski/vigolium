@@ -550,9 +550,18 @@ func (r *AuditAgenticScanner) monitor(ctx context.Context, cmd *exec.Cmd, output
 		zap.L().Info("Audit completed successfully", zap.String("harness", harnessName))
 	}
 
+	// Finalize on a detached, bounded context. On cancellation the execution ctx
+	// is already done, which would fail the finding import and the terminal status
+	// update — dropping findings and leaving the run stuck at "running" exactly
+	// when it was cancelled. WithoutCancel keeps values but not the cancellation,
+	// so finalization always lands (the "cancelled" vs "failed" distinction is
+	// preserved via r.cancelled in finalizeAgenticScan).
+	finalizeCtx, cancelFinalize := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+	defer cancelFinalize()
+
 	// Final sync and import
 	r.syncFolderFull()
-	r.importFindings(ctx)
+	r.importFindings(finalizeCtx)
 
 	// Cleanup: remove the harness output dir from source since we have a
 	// copy in session. KeepSourceOutputDir opts out (see its field doc).
@@ -584,8 +593,8 @@ func (r *AuditAgenticScanner) monitor(ctx context.Context, cmd *exec.Cmd, output
 		}
 	}
 
-	// Update AgenticScan as completed/failed
-	r.finalizeAgenticScan(ctx, err)
+	// Update AgenticScan as completed/failed/cancelled (detached ctx, see above).
+	r.finalizeAgenticScan(finalizeCtx, err)
 }
 
 // collectFallbackOutput reads key audit output files from the synced session
@@ -1500,9 +1509,24 @@ func startAuditAgentBackground(ctx context.Context, auditCfg *config.AuditAgentC
 		harness = DefaultAuditHarness()
 	}
 
-	// Clean up stale harness output dir from a previous crashed run.
-	// Safe: no new audit is running yet at this point.
+	// Serialize audits that share this source-tree output dir. The embedded audit
+	// binary writes to a fixed `<source>/<SourceFolder>` path, and both the startup
+	// cleanup below and the post-run cleanup RemoveAll it — so two concurrent audits
+	// on the same checkout (e.g. two projects) would delete each other's in-progress
+	// output. The lease makes a second same-source audit wait for the first to
+	// finish instead of clobbering it. Released when the run's monitor exits.
 	staleDir := filepath.Join(sourcePath, harness.SourceFolder)
+	releaseLease := acquireAuditSourceLease(staleDir)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(releaseLease) }
+	leaseHeld := true
+	defer func() {
+		// If we return without a live runner, drop the lease here; otherwise it is
+		// released asynchronously once the runner's monitor goroutine exits.
+		if leaseHeld {
+			release()
+		}
+	}()
 	if info, statErr := os.Stat(staleDir); statErr == nil && info.IsDir() {
 		zap.L().Info("Removing stale audit output dir from previous run",
 			zap.String("path", staleDir),
@@ -1538,10 +1562,42 @@ func startAuditAgentBackground(ctx context.Context, auditCfg *config.AuditAgentC
 	// abort a still-running audit and mark it as "cancelled" in the DB.
 	// When the parent ctx is cancelled (SIGINT/timeout), exec.CommandContext
 	// already kills the subprocess and the monitor will complete on its own.
+	// Hand the lease to the run: release it once the monitor goroutine exits,
+	// regardless of whether the caller invokes wait(). This keeps the source-tree
+	// output dir reserved for the whole run.
+	leaseHeld = false
+	go func() {
+		<-runner.Done()
+		release()
+	}()
+
 	wait := func() {
 		<-runner.Done()
 	}
 	return runner, wait, nil
+}
+
+// auditSourceLeases serializes audits that share a source-tree output directory
+// (keyed by the absolute `<source>/<SourceFolder>` path). The embedded audit
+// binary writes to a fixed path per source tree, so concurrent same-source runs
+// must not overlap or they clobber each other's output.
+var (
+	auditSourceLeasesMu sync.Mutex
+	auditSourceLeases   = map[string]*sync.Mutex{}
+)
+
+// acquireAuditSourceLease blocks until the lease for key is free, then returns a
+// release func. Callers must call the returned func exactly once.
+func acquireAuditSourceLease(key string) func() {
+	auditSourceLeasesMu.Lock()
+	m, ok := auditSourceLeases[key]
+	if !ok {
+		m = &sync.Mutex{}
+		auditSourceLeases[key] = m
+	}
+	auditSourceLeasesMu.Unlock()
+	m.Lock()
+	return m.Unlock
 }
 
 // ResolveAuditAgentConfig determines whether vigolium-audit should run.

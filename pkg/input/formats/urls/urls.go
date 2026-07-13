@@ -42,6 +42,9 @@ func (j *URLListFormat) Parse(input string, resultsCb formats.ParseReqRespCallba
 	}
 	defer func() { _ = file.Close() }()
 	sc := bufio.NewScanner(file)
+	// Grow the token buffer beyond bufio's 64 KiB default so a long URL line
+	// (data: URLs, big query strings) doesn't silently truncate the scan.
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
@@ -52,7 +55,15 @@ func (j *URLListFormat) Parse(input string, resultsCb formats.ParseReqRespCallba
 			zap.L().Warn("urls: Could not get raw request from URL", zap.String("url", line), zap.Error(err))
 			continue
 		}
-		resultsCb(rawRequest)
+		// Honor the callback's cancellation signal, matching the other input formats.
+		if !resultsCb(rawRequest) {
+			return nil
+		}
+	}
+	// Surface a scan error (e.g. a line over the buffer cap) instead of silently
+	// reporting success on a partially-read file.
+	if err := sc.Err(); err != nil {
+		return errors.Wrap(err, "failed to read url list")
 	}
 
 	return nil
@@ -68,6 +79,8 @@ func (j *URLListFormat) Count(input string) (int64, error) {
 
 	var count int64
 	sc := bufio.NewScanner(file)
+	// Match Parse's larger token buffer so Count and Parse agree on long lines.
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		if strings.TrimSpace(sc.Text()) != "" {
 			count++

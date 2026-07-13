@@ -177,7 +177,17 @@ func (m *Module) ScanPerRequest(
 	if ctx.Request().Header("Authorization") != "" {
 		return nil, nil
 	}
-	if ctx.Request().Header("Cookie") == "" {
+	// The request must carry a likely SESSION cookie: a CSRF forgery rides ambient
+	// session credentials, so a non-session cookie (preferences, analytics) gives
+	// an attacker nothing to ride. Mirrors the passive csrf_detect precondition.
+	hasSessionCookie := false
+	for _, name := range modkit.RequestCookieNames(ctx.Request().Header("Cookie")) {
+		if modkit.LikelySessionCookie(name) {
+			hasSessionCookie = true
+			break
+		}
+	}
+	if !hasSessionCookie {
 		return nil, nil
 	}
 
@@ -203,6 +213,23 @@ func (m *Module) ScanPerRequest(
 	// No CSRF token found — passive module handles this case
 	if csrfParamName == "" {
 		return nil, nil
+	}
+
+	// SameSite gate: a browser withholds a SameSite=Strict (and normally
+	// SameSite=Lax) session cookie on a cross-site state-changing POST, so a token
+	// bypass there is NOT reproducible in a browser — emitting it would be a
+	// High/Firm false positive. The verifier replays the captured Cookie verbatim,
+	// which no browser would send, so consult the recorded policy for the request's
+	// own session cookie (set on the login response, not echoed here) and drop the
+	// known-protected case.
+	scanCtx.ObserveResponseCookies(ctx)
+	for _, policy := range scanCtx.RequestCookiePolicies(ctx) {
+		if !modkit.LikelySessionCookie(policy.Name) {
+			continue
+		}
+		if policy.SameSite == "strict" || policy.SameSite == "lax" {
+			return nil, nil
+		}
 	}
 
 	// Dedup only after confirming this request actually carries a forgeable CSRF

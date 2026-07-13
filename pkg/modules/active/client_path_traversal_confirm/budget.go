@@ -18,13 +18,18 @@ const (
 // active/xss_dom_confirm rather than imported, so the two browser-confirm
 // modules stay independently tunable.
 type Budget struct {
-	maxPerScan int32
+	maxPerScan int32 // hard cap on the TOTAL browser probes launched per scan
 
 	mu             sync.Mutex
 	hostSemaphores map[string]chan struct{}
 	perHost        int
 
-	remaining atomic.Int32
+	// launched is a MONOTONIC count of probes launched this scan. It is never
+	// decremented on release, so maxPerScan bounds the total number of browser
+	// processes for the whole scan. (The previous `remaining` counter was restored
+	// on release, which made it only a per-instant concurrency limit — sequential
+	// confirmations could launch an unbounded number of browsers.)
+	launched atomic.Int32
 }
 
 // NewBudget returns a fresh budget. Pass <= 0 to use defaults.
@@ -35,25 +40,25 @@ func NewBudget(perHost, totalPerScan int) *Budget {
 	if totalPerScan <= 0 {
 		totalPerScan = defaultMaxScanProbes
 	}
-	b := &Budget{
+	return &Budget{
 		maxPerScan:     int32(totalPerScan),
 		perHost:        perHost,
 		hostSemaphores: make(map[string]chan struct{}),
 	}
-	b.remaining.Store(int32(totalPerScan))
-	return b
 }
 
 // Reserve consumes one probe slot for host. The returned release must be called
-// once the probe is done. ok=false means the global cap is exhausted or ctx
-// cancelled while waiting on the per-host semaphore.
+// once the probe is done. ok=false means the per-scan total cap is exhausted or
+// ctx was cancelled while waiting on the per-host concurrency semaphore.
 func (b *Budget) Reserve(ctx context.Context, host string) (release func(), ok bool) {
 	if b == nil {
 		return func() {}, true
 	}
 
-	if b.remaining.Add(-1) < 0 {
-		b.remaining.Add(1)
+	// Claim one of the scan's total probe tokens (monotonic). A rejected or
+	// cancelled reserve returns its token since it never actually launched a probe.
+	if b.launched.Add(1) > b.maxPerScan {
+		b.launched.Add(-1)
 		return nil, false
 	}
 
@@ -62,10 +67,11 @@ func (b *Budget) Reserve(ctx context.Context, host string) (release func(), ok b
 	case sem <- struct{}{}:
 		return func() {
 			<-sem
-			b.remaining.Add(1)
+			// Intentionally do NOT decrement launched: the probe ran and counts
+			// against the scan's total budget for good.
 		}, true
 	case <-ctx.Done():
-		b.remaining.Add(1)
+		b.launched.Add(-1) // never launched — return the total token
 		return nil, false
 	}
 }

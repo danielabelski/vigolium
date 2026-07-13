@@ -65,7 +65,11 @@ func (d *DeparosFormat) Parse(input string, resultsCb formats.ParseReqRespCallba
 	for dec.More() {
 		var result DeparosResult
 		if err := dec.Decode(&result); err != nil {
-			continue
+			// A decode error poisons json.Decoder (read position doesn't advance),
+			// so More() stays true and Decode returns the same error forever. Stop
+			// on a malformed line instead of spinning at 100% CPU.
+			zap.L().Warn("deparos: stopping parse on malformed JSON", zap.Error(err))
+			break
 		}
 
 		if result.URL == "" {
@@ -110,7 +114,8 @@ func (d *DeparosFormat) Count(input string) (int64, error) {
 	for dec.More() {
 		var obj json.RawMessage
 		if err := dec.Decode(&obj); err != nil {
-			continue
+			// Decoder-poison guard: stop on a malformed line rather than spinning.
+			break
 		}
 		count++
 	}

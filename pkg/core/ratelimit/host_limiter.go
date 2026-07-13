@@ -154,18 +154,22 @@ type HostRateLimiter struct {
 	// active-scan concurrency was reduced (the scan will pace it). It lives on the
 	// limiter — not a requester — because the limiter is the single shared object
 	// every requester feeds, so the notice fires exactly once per host no matter which
-	// requester tripped the pre-arm. Set once during setup before concurrency starts
-	// (same contract as the requester's block-notifier sink); read on the request
-	// goroutine that arms the host.
-	preArmSink func(PreArmNotice)
+	// requester tripped the pre-arm. Read on the request goroutine that arms the host;
+	// stored in an atomic pointer so a setup-time write can't race those reads.
+	preArmSink atomic.Pointer[func(PreArmNotice)]
 
-	// evictSink, when set, is invoked with the hostname each time an idle host entry
-	// is evicted. It lets a requester keep its once-per-host edge-pacing dedup in sync
+	// evictSinks are invoked with the hostname each time an idle host entry is
+	// evicted, letting each requester keep its once-per-host edge-pacing dedup in sync
 	// with the limiter's entry lifetime: after an evicted host's entry is recreated
 	// (fresh, at full rate), the requester re-fingerprints and re-arms it instead of
-	// treating it as permanently paced. Must be cheap and must NOT re-enter the limiter
-	// (it is invoked while a shard lock is held). Set once during setup.
-	evictSink func(host string)
+	// treating it as permanently paced. Every requester that shares this limiter
+	// registers its own dedup, so this is a list (not a single field): the old single
+	// field kept only the last registrant and raced the eviction goroutine that read
+	// it without synchronization. Subscriptions live for the limiter's lifetime.
+	// Guarded by evictMu. Each sink must be cheap and must NOT re-enter the limiter
+	// (it runs while a shard lock is held).
+	evictMu    sync.Mutex
+	evictSinks []func(string)
 
 	stopEvict chan struct{}
 	evictWg   conc.WaitGroup
@@ -189,22 +193,42 @@ type PreArmNotice struct {
 // goroutine, so it must be cheap and non-blocking. Call once during setup, before
 // scanning concurrency starts; a nil sink is a no-op.
 func (h *HostRateLimiter) SetPreArmNotifier(sink func(PreArmNotice)) {
-	h.preArmSink = sink
+	if sink == nil {
+		h.preArmSink.Store(nil)
+		return
+	}
+	h.preArmSink.Store(&sink)
 }
 
-// SetEvictNotifier installs a sink invoked with the hostname whenever an idle host
-// entry is evicted, so a requester can drop the host from its once-per-host
-// edge-pacing dedup and re-fingerprint/re-arm the fresh entry created later. The
+// AddEvictNotifier registers a sink invoked with the hostname whenever an idle
+// host entry is evicted. Every requester that shares this limiter registers its
+// own edge-pacing dedup, so all of them are notified (the previous single-field
+// setter kept only the last). Subscriptions live for the limiter's lifetime. The
 // sink is invoked while a shard lock is held, so it must be cheap and must NOT call
-// back into the limiter. Call once during setup; a nil sink is a no-op.
-func (h *HostRateLimiter) SetEvictNotifier(sink func(string)) {
-	h.evictSink = sink
+// back into the limiter. A nil sink is ignored.
+func (h *HostRateLimiter) AddEvictNotifier(sink func(string)) {
+	if sink == nil {
+		return
+	}
+	h.evictMu.Lock()
+	h.evictSinks = append(h.evictSinks, sink)
+	h.evictMu.Unlock()
 }
 
-// notifyEvict fires the evict sink for host, if one is installed.
+// notifyEvict fires every registered evict sink for host. Sinks are snapshotted
+// under evictMu and then invoked without it (still under the caller's shard lock,
+// per the sink contract) so a sink can never deadlock by touching the registry.
 func (h *HostRateLimiter) notifyEvict(host string) {
-	if h.evictSink != nil {
-		h.evictSink(host)
+	h.evictMu.Lock()
+	if len(h.evictSinks) == 0 {
+		h.evictMu.Unlock()
+		return
+	}
+	sinks := make([]func(string), len(h.evictSinks))
+	copy(sinks, h.evictSinks)
+	h.evictMu.Unlock()
+	for _, s := range sinks {
+		s(host)
 	}
 }
 

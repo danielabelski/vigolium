@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -471,6 +473,24 @@ func scanResultFromAnalysis(analysis *AnalysisResultV2, completion *ScanCompleti
 }
 
 func (p *WorkerPool) acquire(ctx context.Context) (*framedWorker, error) {
+	// Fast path: a worker is ready.
+	select {
+	case worker := <-p.available:
+		return worker, nil
+	default:
+	}
+	// None immediately ready. If the pool has drained to zero live workers (e.g.
+	// repeated replacement failures retired workers without respawning), try to
+	// recover one now instead of blocking until ctx expires with no worker coming.
+	p.mu.Lock()
+	live := len(p.workers)
+	closed := p.closed
+	p.mu.Unlock()
+	if !closed && live == 0 {
+		if err := p.replaceWorker(); err != nil && err != ErrServiceClosed {
+			zap.L().Warn("jstangle: on-demand worker respawn failed", zap.Error(err))
+		}
+	}
 	select {
 	case worker := <-p.available:
 		return worker, nil
@@ -484,7 +504,14 @@ func (p *WorkerPool) acquire(ctx context.Context) (*framedWorker, error) {
 func (p *WorkerPool) release(worker *framedWorker) {
 	if worker.jobs.Load() >= int64(p.config.MaxJobs) || worker.exited() || workerRSSBytes(worker.cmd.Process.Pid) > p.config.MaxRSSBytes {
 		p.retire(worker, true)
-		_ = p.replaceWorker()
+		if err := p.replaceWorker(); err != nil && err != ErrServiceClosed {
+			// A transient start/resource failure must not permanently shrink the
+			// pool: retry in the background with backoff so capacity recovers,
+			// instead of silently dropping to zero (after which acquire stalls until
+			// each caller's ctx expires).
+			zap.L().Warn("jstangle: failed to replace retired worker; scheduling retry", zap.Error(err))
+			go p.replaceWorkerWithBackoff()
+		}
 		return
 	}
 	p.mu.Lock()
@@ -529,6 +556,40 @@ func (p *WorkerPool) replaceWorker() error {
 		p.retire(worker, false)
 		return ErrServiceClosed
 	}
+}
+
+// replaceWorkerWithBackoff retries replaceWorker with bounded exponential backoff
+// after a transient failure, stopping once capacity is restored (by any path),
+// the pool is closed, or the attempt budget is exhausted. Prevents a run of
+// transient process-start/resource failures from permanently draining the pool.
+func (p *WorkerPool) replaceWorkerWithBackoff() {
+	backoff := 200 * time.Millisecond
+	for attempt := 0; attempt < 6; attempt++ {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+
+		p.mu.Lock()
+		live := len(p.workers)
+		closed := p.closed
+		p.mu.Unlock()
+		if closed {
+			return
+		}
+		if live >= p.config.Count {
+			return // capacity already restored elsewhere
+		}
+
+		if err := p.replaceWorker(); err == nil || err == ErrServiceClosed {
+			return
+		}
+		if backoff < 5*time.Second {
+			backoff *= 2
+		}
+	}
+	zap.L().Error("jstangle: worker replacement still failing after retries; JS-analysis capacity is degraded and later acquires may stall")
 }
 
 func workerRSSBytes(pid int) int64 {

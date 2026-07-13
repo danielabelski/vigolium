@@ -24,6 +24,12 @@ const (
 	prefixPending = "pending:" // pending:{timestamp}:{id} → "" (for ordered iteration)
 )
 
+// keySealed persists a segment's sealed state so it survives a restart. Without
+// it, a previously-sealed segment reloads as unsealed, so CanDelete (which
+// requires sealed) never fires and a fully-acked, non-active segment leaks its
+// empty directory across restarts.
+const keySealed = "meta:sealed"
+
 // Segment represents a single LevelDB database file containing tasks.
 // Each segment has a maximum capacity and is sealed when full.
 // marshalTask serializes a ScanTask using MessagePack for compact binary encoding.
@@ -169,10 +175,20 @@ func (s *Segment) recoverState() error {
 	s.totalTasks.Store(total)
 	s.completedTasks.Store(completed)
 
+	// Restore the persisted sealed state so a sealed-then-emptied segment can still
+	// satisfy CanDelete after a restart instead of leaking its directory forever.
+	if _, err := s.db.Get([]byte(keySealed), nil); err == nil {
+		s.sealed.Store(true)
+	} else if err != leveldb.ErrNotFound {
+		zap.L().Warn("Failed to read segment sealed marker",
+			zap.Uint64("segment_id", s.id), zap.Error(err))
+	}
+
 	zap.L().Info("Segment state recovered",
 		zap.Uint64("segment_id", s.id),
 		zap.Int64("total", total),
 		zap.Int64("completed", completed),
+		zap.Bool("sealed", s.sealed.Load()),
 		zap.Int("reset_to_pending", len(processingToReset)))
 
 	return nil
@@ -224,9 +240,14 @@ func (s *Segment) IsSealed() bool {
 	return s.sealed.Load()
 }
 
-// Seal marks the segment as read-only.
+// Seal marks the segment as read-only and persists that state so it survives a
+// restart (see keySealed).
 func (s *Segment) Seal() {
 	s.sealed.Store(true)
+	if err := s.db.Put([]byte(keySealed), []byte("1"), nil); err != nil {
+		zap.L().Warn("Failed to persist segment sealed marker",
+			zap.Uint64("segment_id", s.id), zap.Error(err))
+	}
 	zap.L().Debug("Segment sealed",
 		zap.Uint64("segment_id", s.id),
 		zap.Int64("total_tasks", s.totalTasks.Load()))

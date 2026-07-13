@@ -127,16 +127,17 @@ func (r *Repository) aggregateScanFindings(ctx context.Context, scanUUID string)
 
 // applySeverityCounts sets severity count fields on an UPDATE query builder.
 func applySeverityCounts(q *bun.UpdateQuery, sc scanSeverityCounts) *bun.UpdateQuery {
-	q = q.Set("critical_count = ?", sc.Critical).
+	// total_findings is set unconditionally alongside the severity counts: a
+	// recompute yielding zero (all findings deleted/reclassified) must be able to
+	// reset it to 0, otherwise the row keeps a stale non-zero total while every
+	// severity count reads 0 — an internally inconsistent scan record.
+	return q.Set("critical_count = ?", sc.Critical).
 		Set("high_count = ?", sc.High).
 		Set("medium_count = ?", sc.Medium).
 		Set("low_count = ?", sc.Low).
 		Set("info_count = ?", sc.Info).
-		Set("suspect_count = ?", sc.Suspect)
-	if sc.Total > 0 {
-		q = q.Set("total_findings = ?", sc.Total)
-	}
-	return q
+		Set("suspect_count = ?", sc.Suspect).
+		Set("total_findings = ?", sc.Total)
 }
 
 // CompleteScan marks a scan as completed (or failed if errMsg is non-empty)
@@ -212,40 +213,34 @@ func (r *Repository) ListScans(ctx context.Context, projectUUID string, limit, o
 }
 
 // LoadEnabledScopes loads enabled scope rules for a project, ordered by priority.
-// Falls back to the default project's scopes if no project-specific scopes exist.
+// An empty projectUUID means the default project — never "all projects". Falls
+// back to the default project's scopes when a non-default project has none, but
+// if the default project itself has no enabled scopes it returns empty rather
+// than an unscoped query that would leak every project's rules across engagements.
 func (r *Repository) LoadEnabledScopes(ctx context.Context, projectUUID string) ([]*Scope, error) {
+	projectUUID = defaultProjectUUID(projectUUID)
+
 	var scopes []*Scope
-
-	if projectUUID != "" {
-		err := r.db.NewSelect().
-			Model(&scopes).
-			Where("project_uuid = ?", projectUUID).
-			Where("enabled = ?", true).
-			Order("priority ASC").
-			Scan(ctx)
-		if err != nil {
-			zap.L().Debug("Failed to load project scopes", zap.Error(err))
-			return nil, err
-		}
-		if len(scopes) > 0 {
-			return scopes, nil
-		}
-		// Fall back to default project scopes
-		if projectUUID != DefaultProjectUUID {
-			return r.LoadEnabledScopes(ctx, DefaultProjectUUID)
-		}
-	}
-
-	// No project filter or default project — load all enabled scopes
 	err := r.db.NewSelect().
 		Model(&scopes).
+		Where("project_uuid = ?", projectUUID).
 		Where("enabled = ?", true).
 		Order("priority ASC").
 		Scan(ctx)
 	if err != nil {
-		zap.L().Debug("Failed to load scopes", zap.Error(err))
+		zap.L().Debug("Failed to load project scopes", zap.Error(err))
 		return nil, err
 	}
+	if len(scopes) > 0 {
+		return scopes, nil
+	}
+
+	// A non-default project with no scopes inherits the default project's scopes.
+	if projectUUID != DefaultProjectUUID {
+		return r.LoadEnabledScopes(ctx, DefaultProjectUUID)
+	}
+
+	// Default project has no enabled scopes — return empty, not every project's.
 	return scopes, nil
 }
 
@@ -259,11 +254,15 @@ func (r *Repository) CreateScanWithCursor(ctx context.Context, scan *Scan) error
 	scan.ProjectUUID = defaultProjectUUID(scan.ProjectUUID)
 
 	if scan.ScanMode == "incremental" && scan.Modules != "" {
-		// Find the last completed scan with the same modules to copy cursor
+		// Find the last completed scan with the same modules to copy cursor. The
+		// lookup must stay within this scan's project: a cursor is a per-tenant
+		// (created_at, uuid) position, so inheriting one from another project would
+		// make this incremental scan skip records up to that foreign timestamp.
 		var prev Scan
 		err := r.db.NewSelect().
 			Model(&prev).
 			Column("cursor_at", "cursor_uuid").
+			Where("project_uuid = ?", scan.ProjectUUID).
 			Where("status = ?", "completed").
 			Where("modules = ?", scan.Modules).
 			OrderExpr("finished_at DESC").

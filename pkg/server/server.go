@@ -107,6 +107,14 @@ func NewServer(cfg ServerConfig, q queue.Queue, db *database.DB, repo *database.
 		// own 4 MB default rejects the upload before the route exemption can run.
 		// Non-upload routes are still held to 4 MB by the middleware.
 		BodyLimit: cfg.MaxUploadBytes,
+		// Stream the request body instead of pre-buffering the whole thing into
+		// memory before any handler runs. With this off, fasthttp reads up to the
+		// full BodyLimit (512 MB) into memory for EVERY request before the 4 MB
+		// middleware can reject it, so a burst of ordinary oversized POSTs to normal
+		// JSON routes is a memory-amplification vector. Streaming lets
+		// DefaultBodyLimitMiddleware reject an oversized declared Content-Length
+		// before allocation; the large-upload routes read their stream on demand.
+		StreamRequestBody: true,
 	})
 
 	registerRoutes(app, handlers, cfg)
