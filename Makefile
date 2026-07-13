@@ -1,4 +1,4 @@
-.PHONY: build build-embedded build-all snapshot release public public-release github-release prepare-public-scripts clean test test-unit test-integration test-spitolas-browser test-e2e test-e2e-api test-e2e-agent test-e2e-postgres test-canary sanity-check smoke-autopilot-auth test-e2e-vampi test-e2e-dvwa test-e2e-juiceshop test-e2e-browser-fallback test-e2e-piolium test-benchmark test-benchmark-whitebox test-benchmark-blackbox test-benchmark-all test-benchmark-crapi test-benchmark-vuln-java test-benchmark-vuln-nginx test-benchmark-coverage test-agent-benchmark test-agent-parsing test-agent-quality test-agent-handoff test-agent-benchmark-e2e benchmark-agent-generate test-coverage coverage-gate coverage-combined test-coverage-check test-race test-ci test-xbow test-xbow-ssti test-xbow-xss test-xbow-sqli test-xbow-lfi test-xbow-cmdi test-xbow-ssrf test-xbow-xxe xbow-build lint verify-generated fmt tidy deps deps-chrome deps-chrome-update install install-gotestsum swagger help postgres-up postgres-down postgres-logs postgres-status crapi-up crapi-down crapi-logs crapi-status juiceshop-up juiceshop-down juiceshop-logs juiceshop-status vampi-up vampi-down vampi-logs vampi-status vulnerable-java-up vulnerable-java-down vulnerable-java-logs vulnerable-java-status vulnerable-nginx-up vulnerable-nginx-down vulnerable-nginx-logs vulnerable-nginx-status apps-up apps-down docker docker-build docker-build-prod docker-run docker-push docker-buildx-setup docker-publish update-jstangle ensure-jstangle sync-audit update-audit ensure-audit ensure-audit-dist restage-host-audit build-audit update-ui ssh-testbed-keygen ssh-testbed-up ssh-testbed-down ssh-testbed-status ssh-testbed-logs generate-metadata prepare-release-scripts cdn-sync bump-version npm-build npm-pack npm-publish
+.PHONY: build build-embedded build-all snapshot release public public-release github-release prepare-public-scripts clean test test-unit test-integration test-spitolas-browser test-e2e test-e2e-api test-e2e-agent test-e2e-postgres test-canary sanity-check test-e2e-vampi test-e2e-dvwa test-e2e-juiceshop test-e2e-browser-fallback test-e2e-piolium test-benchmark test-benchmark-whitebox test-benchmark-blackbox test-benchmark-all test-benchmark-crapi test-benchmark-vuln-java test-benchmark-vuln-nginx test-benchmark-coverage test-agent-benchmark test-agent-parsing test-agent-quality test-agent-handoff test-agent-benchmark-e2e benchmark-agent-generate test-coverage coverage-gate coverage-combined test-coverage-check test-race test-ci test-xbow test-xbow-ssti test-xbow-xss test-xbow-sqli test-xbow-lfi test-xbow-cmdi test-xbow-ssrf test-xbow-xxe xbow-build lint verify-generated fmt tidy deps deps-chrome deps-chrome-update install install-gotestsum swagger help postgres-up postgres-down postgres-logs postgres-status crapi-up crapi-down crapi-logs crapi-status juiceshop-up juiceshop-down juiceshop-logs juiceshop-status vampi-up vampi-down vampi-logs vampi-status vulnerable-java-up vulnerable-java-down vulnerable-java-logs vulnerable-java-status vulnerable-nginx-up vulnerable-nginx-down vulnerable-nginx-logs vulnerable-nginx-status apps-up apps-down docker docker-build docker-build-prod docker-run docker-push docker-buildx-setup docker-publish update-jstangle ensure-jstangle sync-audit update-audit ensure-audit ensure-audit-dist restage-host-audit build-audit update-ui ssh-testbed-keygen ssh-testbed-up ssh-testbed-down ssh-testbed-status ssh-testbed-logs generate-metadata prepare-release-scripts cdn-sync bump-version npm-build npm-pack npm-publish
 # Phony targets defined in their own sections below (declared here so a stray
 # same-named file can never shadow them).
 .PHONY: all build-linux build-darwin build-windows deps-chrome-cft sync-platform \
@@ -215,19 +215,6 @@ test-pg-full: install-gotestsum
 sanity-check: build
 	@echo "$(PREFIX) Running sanity-check (real-target API + storage smoke test)..."
 	@bash test/smoke-test-scripts/sanity-check.sh
-
-# Smoke test: agentic-scan auth preflight against local Juice Shop.
-# Verifies `vigolium agent autopilot --credentials --auth-required` end-to-end:
-# boots juice-shop, clones the source, runs autopilot with a pinned --scan-uuid,
-# and asserts the prepared session config + hydrated headers landed on disk and
-# in the AgenticScan row.
-#
-# Required: ~/.codex/auth.json (codex-oauth provider); docker + git + jq + curl
-# on PATH. Leaves juice-shop running for fast re-runs (tear down with
-# `make juiceshop-down`).
-smoke-autopilot-auth: build
-	@echo "$(PREFIX) Running smoke-autopilot-auth (juice-shop autopilot + --credentials)..."
-	@bash test/smoke-test-scripts/smoke-autopilot-juiceshop-auth.sh
 
 # Run E2E VAmPI tests only (SQLi testing)
 test-e2e-vampi: install-gotestsum
@@ -1360,7 +1347,6 @@ help:
 	@echo "    make test-e2e-scorecard   Ground-truth coverage scorecard canary (Docker)"
 	@echo "    make test-e2e-browser-fallback  Browser fallback test (Docker multi-arch)"
 	@echo "    make test-e2e-piolium  Piolium audit e2e (requires pi + piolium installed)"
-	@echo "    make smoke-autopilot-auth  Smoke: agent autopilot --credentials against juice-shop"
 	@echo "    make test-xbow        Run all xbow validation benchmarks (Docker + XBOW_SOURCE_DIR)"
 	@echo "    make test-xbow-ssti   Run xbow SSTI benchmarks"
 	@echo "    make test-xbow-xss    Run xbow XSS benchmarks"

@@ -9,8 +9,7 @@
 # (bring-your-own-key) coverage across the CLI + REST surfaces:
 #   • Phase 1: Native scan          → http://ginandjuice.shop/
 #   • Phase 2: Agent audit          → https://github.com/erev0s/VAmPI    (LLM)
-#                                     POST /api/agent/run/audit with driver=archon
-#                                     — equivalent to the legacy /agent/run/archon
+#                                     POST /api/agent/run/audit with driver=audit
 #   • Phase 3: Agent autopilot      → https://github.com/juice-shop/juice-shop
 #                                     against https://preview.owasp-juice.shop/  (LLM)
 #   • Phase 4: Pinned scan_uuid     → dry_run pre-create + attach native scan
@@ -64,13 +63,13 @@ set -euo pipefail
 
 # Targets
 NATIVE_TARGET="${NATIVE_TARGET:-http://ginandjuice.shop/}"
-ARCHON_SOURCE="${ARCHON_SOURCE:-https://github.com/erev0s/VAmPI}"
+AUDIT_SOURCE="${AUDIT_SOURCE:-https://github.com/erev0s/VAmPI}"
 AUTOPILOT_SOURCE="${AUTOPILOT_SOURCE:-https://github.com/juice-shop/juice-shop}"
 AUTOPILOT_TARGET="${AUTOPILOT_TARGET:-https://preview.owasp-juice.shop/}"
 
 # Polling timeouts (seconds)
 NATIVE_TIMEOUT_S="${NATIVE_TIMEOUT_S:-600}"     # 10 min
-ARCHON_TIMEOUT_S="${ARCHON_TIMEOUT_S:-1800}"    # 30 min
+AUDIT_TIMEOUT_S="${AUDIT_TIMEOUT_S:-1800}"    # 30 min
 AUTOPILOT_TIMEOUT_S="${AUTOPILOT_TIMEOUT_S:-1800}" # 30 min
 
 # ── Logging helpers ─────────────────────────────────────────────────────────
@@ -92,7 +91,7 @@ header() { printf '\n%s═══ %s ═══%s\n' "$C_BOLD" "$*" "$C_RESET" >&2
 
 # Per-phase result tracking. PENDING = not executed (filtered out via PHASES).
 NATIVE_RESULT="PENDING"
-ARCHON_RESULT="PENDING"
+AUDIT_RESULT="PENDING"
 AUTOPILOT_RESULT="PENDING"
 PINNED_RESULT="PENDING"
 CONFLICT_RESULT="PENDING"
@@ -183,7 +182,7 @@ fi
 if [[ $HAS_LLM -eq 1 ]]; then
     ok "LLM provider available: $LLM_REASON"
 else
-    warn "no LLM provider detected — archon, autopilot, BYOK phases will be skipped"
+    warn "no LLM provider detected — audit, autopilot, BYOK phases will be skipped"
 fi
 
 # Print the BYOK matrix so the operator can predict which sub-phases will run.
@@ -517,62 +516,62 @@ fi
 
 fi  # end Phase 1
 
-# ── Phase 2: Agent audit (driver=archon) → VAmPI ────────────────────────────
+# ── Phase 2: Agent audit (driver=audit) → VAmPI ────────────────────────────
 if should_run 2; then
-header "Phase 2: Agent audit (driver=archon) → $ARCHON_SOURCE"
+header "Phase 2: Agent audit (driver=audit) → $AUDIT_SOURCE"
 
 if [[ $HAS_LLM -eq 0 ]]; then
     warn "skipped (no LLM provider)"
-    ARCHON_RESULT="SKIP"
+    AUDIT_RESULT="SKIP"
 else
-    # driver=archon makes /agent/run/audit equivalent to the legacy
-    # /agent/run/archon — same auditRunPlan, same uploadAgenticResults,
+    # driver=audit runs the vigolium-audit harness — same
+    # auditRunPlan, same uploadAgenticResults,
     # same artifact set. agent=codex matches the codex auth we detected
-    # in pre-flight; without it, archon defaults to claude which fails
+    # in pre-flight; without it, audit defaults to claude which fails
     # with "Not logged in".
-    ARCHON_BODY=$(jq -n \
-        --arg src "$ARCHON_SOURCE" \
-        '{source:$src, driver:"archon", mode:"lite", agent:"codex", upload_results:true}')
+    AUDIT_BODY=$(jq -n \
+        --arg src "$AUDIT_SOURCE" \
+        '{source:$src, driver:"audit", mode:"lite", agent:"codex", upload_results:true}')
 
-    ARCHON_RESP="$(api POST /api/agent/run/audit -H 'Content-Type: application/json' -d "$ARCHON_BODY" || true)"
-    ARCHON_RUN_ID="$(jq -r '.agentic_scan_uuid // .run_id // empty' <<<"$ARCHON_RESP")"
-    if [[ -z "$ARCHON_RUN_ID" ]]; then
-        err "no agentic_scan_uuid in response: $ARCHON_RESP"
-        ARCHON_RESULT="FAIL"
+    AUDIT_RESP="$(api POST /api/agent/run/audit -H 'Content-Type: application/json' -d "$AUDIT_BODY" || true)"
+    AUDIT_RUN_ID="$(jq -r '.agentic_scan_uuid // .run_id // empty' <<<"$AUDIT_RESP")"
+    if [[ -z "$AUDIT_RUN_ID" ]]; then
+        err "no agentic_scan_uuid in response: $AUDIT_RESP"
+        AUDIT_RESULT="FAIL"
     else
-        ok "archon run started: $ARCHON_RUN_ID"
-        ARCHON_STATUS="$(wait_until_terminal "$ARCHON_TIMEOUT_S" 10 "$BASE/api/agent/status/$ARCHON_RUN_ID" "archon" || true)"
+        ok "audit run started: $AUDIT_RUN_ID"
+        AUDIT_STATUS="$(wait_until_terminal "$AUDIT_TIMEOUT_S" 10 "$BASE/api/agent/status/$AUDIT_RUN_ID" "audit" || true)"
 
-        if [[ "$ARCHON_STATUS" == "completed" ]]; then
+        if [[ "$AUDIT_STATUS" == "completed" ]]; then
             # storage_url shape via /api/agent/sessions/:id (poll briefly —
             # upload races the status flip).
-            ARCHON_EXPECTED="gs://${PROJECT_UUID}/agentic-scans/${ARCHON_RUN_ID}/results.tar.gz"
-            ARCHON_STORAGE_URL=""
+            AUDIT_EXPECTED="gs://${PROJECT_UUID}/agentic-scans/${AUDIT_RUN_ID}/results.tar.gz"
+            AUDIT_STORAGE_URL=""
             for _ in $(seq 1 30); do
-                ARCHON_SESSION="$(api GET "/api/agent/sessions/$ARCHON_RUN_ID")"
-                ARCHON_STORAGE_URL="$(jq -r '.storage_url // empty' <<<"$ARCHON_SESSION")"
-                [[ -n "$ARCHON_STORAGE_URL" ]] && break
+                AUDIT_SESSION="$(api GET "/api/agent/sessions/$AUDIT_RUN_ID")"
+                AUDIT_STORAGE_URL="$(jq -r '.storage_url // empty' <<<"$AUDIT_SESSION")"
+                [[ -n "$AUDIT_STORAGE_URL" ]] && break
                 sleep 2
             done
-            if [[ "$ARCHON_STORAGE_URL" == "$ARCHON_EXPECTED" ]]; then
-                ok "storage_url: $ARCHON_STORAGE_URL"
+            if [[ "$AUDIT_STORAGE_URL" == "$AUDIT_EXPECTED" ]]; then
+                ok "storage_url: $AUDIT_STORAGE_URL"
             else
-                err "storage_url mismatch — got: '$ARCHON_STORAGE_URL' want: '$ARCHON_EXPECTED'"
-                ARCHON_RESULT="FAIL"
+                err "storage_url mismatch — got: '$AUDIT_STORAGE_URL' want: '$AUDIT_EXPECTED'"
+                AUDIT_RESULT="FAIL"
             fi
 
             # Bundle entries per scan-with-storage.md:222. Note: audit-stream.jsonl
             # is only produced by the claude platform (claudestream); on codex
-            # the bundle has runtime.log + archon-audit-output.md only.
-            if verify_bundle "$ARCHON_RUN_ID" "archon" "runtime.log" "archon-audit-output.md"; then
-                [[ "$ARCHON_RESULT" != "FAIL" ]] && ARCHON_RESULT="PASS"
+            # the bundle has runtime.log + audit-audit-output.md only.
+            if verify_bundle "$AUDIT_RUN_ID" "audit" "runtime.log" "audit-audit-output.md"; then
+                [[ "$AUDIT_RESULT" != "FAIL" ]] && AUDIT_RESULT="PASS"
             else
-                ARCHON_RESULT="FAIL"
+                AUDIT_RESULT="FAIL"
             fi
         else
-            err "archon ended with status: $ARCHON_STATUS — fetching session logs"
-            api GET "/api/agent/sessions/$ARCHON_RUN_ID/logs" 2>/dev/null | tail -n 30 >&2 || true
-            ARCHON_RESULT="FAIL"
+            err "audit ended with status: $AUDIT_STATUS — fetching session logs"
+            api GET "/api/agent/sessions/$AUDIT_RUN_ID/logs" 2>/dev/null | tail -n 30 >&2 || true
+            AUDIT_RESULT="FAIL"
         fi
     fi
 fi
@@ -777,11 +776,11 @@ fi  # end Phase 5
 # pkg/cli/agent_audit.go.
 #
 # Production dispatch leaves --driver at its default ("both"); we pin to
-# "archon" here to keep verification deterministic on smoke hosts that may
+# "audit" here to keep verification deterministic on smoke hosts that may
 # not have the pi CLI registered. --agent codex matches the codex-oauth
 # detected in pre-flight; the CLI default ("claude") would fail.
 if should_run 6; then
-header "Phase 6: Serverless-mode (CLI + gs:// source) → $ARCHON_SOURCE"
+header "Phase 6: Serverless-mode (CLI + gs:// source) → $AUDIT_SOURCE"
 
 if [[ $HAS_LLM -eq 0 ]]; then
     warn "skipped (no LLM provider)"
@@ -809,9 +808,9 @@ else
     SERVERLESS_GS_FULL="gs://${VIGOLIUM_STORAGE_BUCKET_NAME}/${PROJECT_UUID}/${SERVERLESS_KEY}"
 
     log "pinned scan UUID: $SERVERLESS_SCAN_UUID"
-    log "cloning $ARCHON_SOURCE (depth 1)"
+    log "cloning $AUDIT_SOURCE (depth 1)"
     mkdir -p "$SERVERLESS_CLONE_DIR"
-    if ! git clone --depth 1 --quiet "$ARCHON_SOURCE" "$SERVERLESS_CLONE_DIR/vampi" 2>/dev/null; then
+    if ! git clone --depth 1 --quiet "$AUDIT_SOURCE" "$SERVERLESS_CLONE_DIR/vampi" 2>/dev/null; then
         err "git clone failed"
         SERVERLESS_RESULT="FAIL"
     elif ! tar -czf "$SERVERLESS_TGZ" -C "$SERVERLESS_CLONE_DIR" vampi; then
@@ -825,19 +824,19 @@ else
         SERVERLESS_RESULT="FAIL"
     else
         ok "source archive uploaded → $SERVERLESS_GS_FULL"
-        log "running CLI audit (intensity=balanced, driver=archon, agent=codex)"
+        log "running CLI audit (intensity=balanced, driver=audit, agent=codex)"
 
         SERVERLESS_LOG="$VIGOLIUM_HOME_DIR/serverless-audit.log"
         cli_cmd=()
         if [[ -n "$SERVERLESS_TIMEOUT_BIN" ]]; then
-            cli_cmd+=("$SERVERLESS_TIMEOUT_BIN" "$ARCHON_TIMEOUT_S")
+            cli_cmd+=("$SERVERLESS_TIMEOUT_BIN" "$AUDIT_TIMEOUT_S")
         fi
         cli_cmd+=(
             vigolium agent audit
             --project-uuid "$PROJECT_UUID"
             --scan-uuid "$SERVERLESS_SCAN_UUID"
             --source "$SERVERLESS_GS_URI"
-            --driver archon
+            --driver audit
             --agent codex
             --intensity balanced
             --upload-results
@@ -849,7 +848,7 @@ else
         set -e
 
         if [[ $SERVERLESS_RC -eq 124 ]]; then
-            err "audit CLI timed out after ${ARCHON_TIMEOUT_S}s (log: $SERVERLESS_LOG)"
+            err "audit CLI timed out after ${AUDIT_TIMEOUT_S}s (log: $SERVERLESS_LOG)"
             SERVERLESS_RESULT="FAIL"
         elif [[ $SERVERLESS_RC -ne 0 ]]; then
             err "audit CLI exited $SERVERLESS_RC (log tail follows)"
@@ -876,7 +875,7 @@ else
                 SERVERLESS_RESULT="FAIL"
             fi
 
-            if verify_bundle "$SERVERLESS_SCAN_UUID" "serverless" "runtime.log" "archon-audit-output.md"; then
+            if verify_bundle "$SERVERLESS_SCAN_UUID" "serverless" "runtime.log" "audit-audit-output.md"; then
                 [[ "$SERVERLESS_RESULT" != "FAIL" ]] && SERVERLESS_RESULT="PASS"
             else
                 SERVERLESS_RESULT="FAIL"
@@ -905,7 +904,7 @@ NEG_FAIL=0
 # 7a: REST — api_key + oauth_cred_file simultaneously → 400, "at most one".
 # Default driver=both so we don't 503 on a missing single-driver runtime;
 # validation runs after the per-driver availability probe regardless.
-NEG7A_BODY=$(jq -n --arg src "$ARCHON_SOURCE" \
+NEG7A_BODY=$(jq -n --arg src "$AUDIT_SOURCE" \
     '{source:$src, agent:"claude", api_key:"fake-key-A", oauth_cred_file:"/tmp/fake.json"}')
 NEG7A_RESP="$VIGOLIUM_HOME_DIR/neg7a-resp.json"
 NEG7A_CODE="$(curl -sS -o "$NEG7A_RESP" -w '%{http_code}' --max-time 15 \
@@ -923,7 +922,7 @@ else
 fi
 
 # 7b: REST — oauth_token + agent=codex → 400, mentions "claude".
-NEG7B_BODY=$(jq -n --arg src "$ARCHON_SOURCE" \
+NEG7B_BODY=$(jq -n --arg src "$AUDIT_SOURCE" \
     '{source:$src, agent:"codex", oauth_token:"fake-token-B"}')
 NEG7B_RESP="$VIGOLIUM_HOME_DIR/neg7b-resp.json"
 NEG7B_CODE="$(curl -sS -o "$NEG7B_RESP" -w '%{http_code}' --max-time 15 \
@@ -946,7 +945,7 @@ fi
 # the validator's.
 NEG7C_LOG="$VIGOLIUM_HOME_DIR/neg7c.log"
 set +e
-vigolium agent audit --driver=archon --source=. \
+vigolium agent audit --driver=audit --source=. \
     --api-key=fake-key-C --oauth-token=fake-token-C \
     --no-stream >"$NEG7C_LOG" 2>&1
 NEG7C_RC=$?
@@ -960,13 +959,13 @@ else
     NEG_FAIL=$((NEG_FAIL+1))
 fi
 
-# 7d: CLI — --oauth-token + --archon-provider=openai-codex-oauth → reject.
+# 7d: CLI — --oauth-token + --audit-provider=openai-codex-oauth → reject.
 # The provider override resolves to agent="codex" via ResolveAuthAgent,
 # then ValidateAuthOverride enforces oauth_token-needs-claude.
 NEG7D_LOG="$VIGOLIUM_HOME_DIR/neg7d.log"
 set +e
-vigolium agent audit --driver=archon --source=. \
-    --oauth-token=fake-token-D --archon-provider=openai-codex-oauth \
+vigolium agent audit --driver=audit --source=. \
+    --oauth-token=fake-token-D --audit-provider=openai-codex-oauth \
     --no-stream >"$NEG7D_LOG" 2>&1
 NEG7D_RC=$?
 set -e
@@ -989,14 +988,14 @@ fi
 
 fi  # end Phase 7
 
-# ── Phase 8: REST BYOK happy paths (driver=archon) ──────────────────────────
-# Three sub-phases, one per cred type. Each runs an archon audit against
+# ── Phase 8: REST BYOK happy paths (driver=audit) ──────────────────────────
+# Three sub-phases, one per cred type. Each runs an audit audit against
 # VAmPI with the cred supplied in the JSON body, then reuses Phase 2's
 # completion + bundle verification. Each sub-phase skips cleanly when its
 # specific cred isn't in the operator's env, so a typical CI env (one cred
 # type) only pays for one extra LLM round-trip.
 if should_run 8; then
-header "Phase 8: REST BYOK happy paths → $ARCHON_SOURCE"
+header "Phase 8: REST BYOK happy paths → $AUDIT_SOURCE"
 
 # 8a: oauth_cred_file (codex auth.json). Most realistic — pre-flight already
 # detected ~/.codex/auth.json; this proves the explicit BYOK passthrough
@@ -1005,10 +1004,10 @@ if [[ -z "$BYOK_CODEX_CRED" ]]; then
     warn "8a (REST oauth_cred_file): skipped (no ~/.codex/auth.json)"
     BYOK_8A_RESULT="SKIP"
 else
-    BODY_8A=$(jq -n --arg src "$ARCHON_SOURCE" --arg p "$BYOK_CODEX_CRED" \
-        '{source:$src, driver:"archon", mode:"lite", agent:"codex", oauth_cred_file:$p, upload_results:true}')
-    if run_audit_and_verify "byok-8a-codex-cred-file" "$BODY_8A" "$ARCHON_TIMEOUT_S" \
-            "runtime.log" "archon-audit-output.md"; then
+    BODY_8A=$(jq -n --arg src "$AUDIT_SOURCE" --arg p "$BYOK_CODEX_CRED" \
+        '{source:$src, driver:"audit", mode:"lite", agent:"codex", oauth_cred_file:$p, upload_results:true}')
+    if run_audit_and_verify "byok-8a-codex-cred-file" "$BODY_8A" "$AUDIT_TIMEOUT_S" \
+            "runtime.log" "audit-audit-output.md"; then
         BYOK_8A_RESULT="PASS"
     else
         BYOK_8A_RESULT="FAIL"
@@ -1017,23 +1016,23 @@ fi
 
 # 8b: api_key — anthropic→claude preferred (cleaner provider semantics);
 # fall back to openai→codex if only OPENAI_API_KEY is set.
-# Bundle artifact names differ by archon platform (per Phase 2 docstring +
-# scan-with-storage.md:222): codex produces archon-audit-output.md; claude
+# Bundle artifact names differ by audit platform (per Phase 2 docstring +
+# scan-with-storage.md:222): codex produces audit-audit-output.md; claude
 # produces audit-stream.jsonl (claudestream). runtime.log is on both.
 if [[ -n "$BYOK_ANTHROPIC_KEY" ]]; then
-    BODY_8B=$(jq -n --arg src "$ARCHON_SOURCE" --arg k "$BYOK_ANTHROPIC_KEY" \
-        '{source:$src, driver:"archon", mode:"lite", agent:"claude", api_key:$k, upload_results:true}')
-    if run_audit_and_verify "byok-8b-claude-api-key" "$BODY_8B" "$ARCHON_TIMEOUT_S" \
+    BODY_8B=$(jq -n --arg src "$AUDIT_SOURCE" --arg k "$BYOK_ANTHROPIC_KEY" \
+        '{source:$src, driver:"audit", mode:"lite", agent:"claude", api_key:$k, upload_results:true}')
+    if run_audit_and_verify "byok-8b-claude-api-key" "$BODY_8B" "$AUDIT_TIMEOUT_S" \
             "runtime.log" "audit-stream.jsonl"; then
         BYOK_8B_RESULT="PASS"
     else
         BYOK_8B_RESULT="FAIL"
     fi
 elif [[ -n "$BYOK_OPENAI_KEY" ]]; then
-    BODY_8B=$(jq -n --arg src "$ARCHON_SOURCE" --arg k "$BYOK_OPENAI_KEY" \
-        '{source:$src, driver:"archon", mode:"lite", agent:"codex", api_key:$k, upload_results:true}')
-    if run_audit_and_verify "byok-8b-codex-api-key" "$BODY_8B" "$ARCHON_TIMEOUT_S" \
-            "runtime.log" "archon-audit-output.md"; then
+    BODY_8B=$(jq -n --arg src "$AUDIT_SOURCE" --arg k "$BYOK_OPENAI_KEY" \
+        '{source:$src, driver:"audit", mode:"lite", agent:"codex", api_key:$k, upload_results:true}')
+    if run_audit_and_verify "byok-8b-codex-api-key" "$BODY_8B" "$AUDIT_TIMEOUT_S" \
+            "runtime.log" "audit-audit-output.md"; then
         BYOK_8B_RESULT="PASS"
     else
         BYOK_8B_RESULT="FAIL"
@@ -1044,14 +1043,14 @@ else
 fi
 
 # 8c: oauth_token (claude only, sourced from $VIGOLIUM_CLAUDE_OAUTH_TOKEN).
-# Claude bundle has audit-stream.jsonl, not archon-audit-output.md.
+# Claude bundle has audit-stream.jsonl, not audit-audit-output.md.
 if [[ -z "$BYOK_CLAUDE_OAUTH" ]]; then
     warn "8c (REST oauth_token): skipped (VIGOLIUM_CLAUDE_OAUTH_TOKEN unset)"
     BYOK_8C_RESULT="SKIP"
 else
-    BODY_8C=$(jq -n --arg src "$ARCHON_SOURCE" --arg t "$BYOK_CLAUDE_OAUTH" \
-        '{source:$src, driver:"archon", mode:"lite", agent:"claude", oauth_token:$t, upload_results:true}')
-    if run_audit_and_verify "byok-8c-claude-oauth-token" "$BODY_8C" "$ARCHON_TIMEOUT_S" \
+    BODY_8C=$(jq -n --arg src "$AUDIT_SOURCE" --arg t "$BYOK_CLAUDE_OAUTH" \
+        '{source:$src, driver:"audit", mode:"lite", agent:"claude", oauth_token:$t, upload_results:true}')
+    if run_audit_and_verify "byok-8c-claude-oauth-token" "$BODY_8C" "$AUDIT_TIMEOUT_S" \
             "runtime.log" "audit-stream.jsonl"; then
         BYOK_8C_RESULT="PASS"
     else
@@ -1063,11 +1062,11 @@ fi  # end Phase 8
 
 # ── Phase 9: CLI BYOK happy path (--oauth-cred-file literal path) ───────────
 # Mirrors Phase 6's CLI invocation but with explicit --oauth-cred-file so
-# the BYOK flag passthrough into archon's CLI args (--oauth-cred-file) is
+# the BYOK flag passthrough into audit's CLI args (--oauth-cred-file) is
 # exercised end-to-end. Uses --intensity quick to keep the run short since
 # Phase 6 already covers the full balanced path.
 if should_run 9; then
-header "Phase 9: CLI BYOK → $ARCHON_SOURCE (--oauth-cred-file literal)"
+header "Phase 9: CLI BYOK → $AUDIT_SOURCE (--oauth-cred-file literal)"
 
 if [[ -z "$BYOK_CODEX_CRED" ]]; then
     warn "skipped (no ~/.codex/auth.json)"
@@ -1088,15 +1087,15 @@ else
 
     cli_cmd=()
     if [[ -n "$BYOK_CLI_TIMEOUT_BIN" ]]; then
-        cli_cmd+=("$BYOK_CLI_TIMEOUT_BIN" "$ARCHON_TIMEOUT_S")
+        cli_cmd+=("$BYOK_CLI_TIMEOUT_BIN" "$AUDIT_TIMEOUT_S")
     fi
     cli_cmd+=(
         vigolium agent audit
         --project-uuid "$PROJECT_UUID"
         --scan-uuid "$BYOK_CLI_SCAN_UUID"
-        --source "$ARCHON_SOURCE"
-        --driver archon
-        --archon-provider openai-codex-oauth
+        --source "$AUDIT_SOURCE"
+        --driver audit
+        --audit-provider openai-codex-oauth
         --oauth-cred-file "$BYOK_CODEX_CRED"
         --intensity quick
         --upload-results
@@ -1109,7 +1108,7 @@ else
     set -e
 
     if [[ $BYOK_CLI_RC -eq 124 ]]; then
-        err "CLI audit timed out after ${ARCHON_TIMEOUT_S}s (log: $BYOK_CLI_LOG)"
+        err "CLI audit timed out after ${AUDIT_TIMEOUT_S}s (log: $BYOK_CLI_LOG)"
         BYOK_CLI_RESULT="FAIL"
     elif [[ $BYOK_CLI_RC -ne 0 ]]; then
         err "CLI audit exited $BYOK_CLI_RC (log tail follows)"
@@ -1133,7 +1132,7 @@ else
             BYOK_CLI_RESULT="FAIL"
         fi
 
-        if verify_bundle "$BYOK_CLI_SCAN_UUID" "byok-cli" "runtime.log" "archon-audit-output.md"; then
+        if verify_bundle "$BYOK_CLI_SCAN_UUID" "byok-cli" "runtime.log" "audit-audit-output.md"; then
             [[ "$BYOK_CLI_RESULT" != "FAIL" ]] && BYOK_CLI_RESULT="PASS"
         else
             BYOK_CLI_RESULT="FAIL"
@@ -1149,7 +1148,7 @@ fi  # end Phase 9
 # duration of the run. Beyond the standard completion/bundle verify, we
 # best-effort confirm the .vigolium-auth.lock didn't leak after cleanup.
 if should_run 10; then
-header "Phase 10: REST piolium BYOK → $ARCHON_SOURCE (auth.json staging)"
+header "Phase 10: REST piolium BYOK → $AUDIT_SOURCE (auth.json staging)"
 
 if [[ -z "$BYOK_CODEX_CRED" ]]; then
     warn "skipped (no ~/.codex/auth.json)"
@@ -1158,9 +1157,9 @@ elif ! command -v pi >/dev/null 2>&1; then
     warn "skipped (pi CLI not in PATH)"
     BYOK_PIOLIUM_RESULT="SKIP"
 else
-    BODY_10=$(jq -n --arg src "$ARCHON_SOURCE" --arg p "$BYOK_CODEX_CRED" \
+    BODY_10=$(jq -n --arg src "$AUDIT_SOURCE" --arg p "$BYOK_CODEX_CRED" \
         '{source:$src, driver:"piolium", mode:"lite", agent:"codex", oauth_cred_file:$p, upload_results:true}')
-    if run_audit_and_verify "byok-10-piolium" "$BODY_10" "$ARCHON_TIMEOUT_S" \
+    if run_audit_and_verify "byok-10-piolium" "$BODY_10" "$AUDIT_TIMEOUT_S" \
             "runtime.log"; then
         BYOK_PIOLIUM_RESULT="PASS"
     else
@@ -1186,7 +1185,7 @@ fi
 fi  # end Phase 10
 
 # ── Phase 11: REST driver=both BYOK (oauth_token, claude) ──────────────────
-# Threads a single AuthOverride through both child runs. archon receives
+# Threads a single AuthOverride through both child runs. audit receives
 # --oauth-token <value>; piolium gets CLAUDE_CODE_OAUTH_TOKEN injected on
 # the pi subprocess (PiAuthEnv at pkg/agent/auth_override.go:96). Skipped
 # if the env var is missing or pi isn't in PATH (driver=both needs both
@@ -1201,9 +1200,9 @@ elif ! command -v pi >/dev/null 2>&1; then
     warn "skipped (pi CLI not in PATH — driver=both needs both runtimes)"
     BYOK_BOTH_RESULT="SKIP"
 else
-    # Doubled timeout: archon then piolium run sequentially under one parent.
-    BOTH_TIMEOUT_S=$((ARCHON_TIMEOUT_S * 2))
-    BODY_11=$(jq -n --arg src "$ARCHON_SOURCE" --arg t "$BYOK_CLAUDE_OAUTH" \
+    # Doubled timeout: audit then piolium run sequentially under one parent.
+    BOTH_TIMEOUT_S=$((AUDIT_TIMEOUT_S * 2))
+    BODY_11=$(jq -n --arg src "$AUDIT_SOURCE" --arg t "$BYOK_CLAUDE_OAUTH" \
         '{source:$src, driver:"both", mode:"lite", agent:"claude", oauth_token:$t, upload_results:true}')
     if run_audit_and_verify "byok-11-both" "$BODY_11" "$BOTH_TIMEOUT_S" \
             "runtime.log"; then
@@ -1233,22 +1232,22 @@ if [[ "$PHASES_FLAG" != "all" ]]; then
 fi
 
 printf '  %s  Native scan        → %s\n'  "$(mark "$NATIVE_RESULT")"   "$NATIVE_TARGET"
-printf '  %s  Agent audit (archon) → %s\n'  "$(mark "$ARCHON_RESULT")"   "$ARCHON_SOURCE"
+printf '  %s  Agent audit (audit) → %s\n'  "$(mark "$AUDIT_RESULT")"   "$AUDIT_SOURCE"
 printf '  %s  Agent autopilot    → %s\n'  "$(mark "$AUTOPILOT_RESULT")" "$AUTOPILOT_TARGET"
 printf '  %s  Pinned scan_uuid   → dry_run + attach (UUID: %s)\n' "$(mark "$PINNED_RESULT")"   "${PINNED_SCAN_UUID:-<not started>}"
 printf '  %s  409 conflict guard → cross-project UUID reuse\n'    "$(mark "$CONFLICT_RESULT")"
 printf '  %s  Serverless audit   → CLI + gs:// source (UUID: %s)\n' "$(mark "$SERVERLESS_RESULT")" "${SERVERLESS_SCAN_UUID:-<not started>}"
 printf '  %s  BYOK negatives     → 7a/b REST + 7c/d CLI (no LLM)\n' "$(mark "$BYOK_NEG_RESULT")"
-printf '  %s  BYOK REST archon   → oauth_cred_file (codex)\n' "$(mark "$BYOK_8A_RESULT")"
-printf '  %s  BYOK REST archon   → api_key (anthropic|openai)\n' "$(mark "$BYOK_8B_RESULT")"
-printf '  %s  BYOK REST archon   → oauth_token (VIGOLIUM_CLAUDE_OAUTH_TOKEN)\n' "$(mark "$BYOK_8C_RESULT")"
-printf '  %s  BYOK CLI archon    → --oauth-cred-file (codex)\n' "$(mark "$BYOK_CLI_RESULT")"
+printf '  %s  BYOK REST audit   → oauth_cred_file (codex)\n' "$(mark "$BYOK_8A_RESULT")"
+printf '  %s  BYOK REST audit   → api_key (anthropic|openai)\n' "$(mark "$BYOK_8B_RESULT")"
+printf '  %s  BYOK REST audit   → oauth_token (VIGOLIUM_CLAUDE_OAUTH_TOKEN)\n' "$(mark "$BYOK_8C_RESULT")"
+printf '  %s  BYOK CLI audit    → --oauth-cred-file (codex)\n' "$(mark "$BYOK_CLI_RESULT")"
 printf '  %s  BYOK REST piolium  → oauth_cred_file → auth.json staging\n' "$(mark "$BYOK_PIOLIUM_RESULT")"
 printf '  %s  BYOK REST both     → oauth_token threaded through both drivers\n' "$(mark "$BYOK_BOTH_RESULT")"
 printf '\n  Project UUID: %s\n' "$PROJECT_UUID"
 printf '  Bucket:       gs://%s/%s/\n' "$VIGOLIUM_STORAGE_BUCKET_NAME" "$PROJECT_UUID"
 
-if [[ "$NATIVE_RESULT" == "FAIL" || "$ARCHON_RESULT" == "FAIL" || "$AUTOPILOT_RESULT" == "FAIL" \
+if [[ "$NATIVE_RESULT" == "FAIL" || "$AUDIT_RESULT" == "FAIL" || "$AUTOPILOT_RESULT" == "FAIL" \
    || "$PINNED_RESULT" == "FAIL" || "$CONFLICT_RESULT" == "FAIL" \
    || "$SERVERLESS_RESULT" == "FAIL" \
    || "$BYOK_NEG_RESULT" == "FAIL" \

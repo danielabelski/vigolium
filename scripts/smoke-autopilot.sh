@@ -22,6 +22,8 @@
 #   CREDS          login as "user/pass" (fed to --credentials AND the prompt)
 #   SESSION_DIR    pin debug artifacts here           (--session-dir)
 #   TRANSCRIPT     copy transcript.jsonl here after   (--transcript)
+#   AUTH_REQUIRED  1 = force auth/session preflight    (--auth-required)
+#   SOURCE         source tree for login discovery     (--source)
 #   SKIP_APP       1 = never start/stop the local app
 #   NO_CONFIRM     1 = skip the cost confirmation
 set -euo pipefail
@@ -120,6 +122,8 @@ CMD=( "$VIGOLIUM_BIN" agent autopilot
   --json )
 [ "$BROWSER" = "1" ] && CMD+=( --browser )
 [ -n "${CREDS:-}" ] && CMD+=( --credentials "$CREDS" )
+[ "${AUTH_REQUIRED:-}" = "1" ] && CMD+=( --auth-required )
+[ -n "${SOURCE:-}" ] && CMD+=( --source "$SOURCE" )
 [ -n "${SESSION_DIR:-}" ] && CMD+=( --session-dir "$SESSION_DIR" )
 [ -n "${TRANSCRIPT:-}" ] && CMD+=( --transcript "$TRANSCRIPT" )
 
