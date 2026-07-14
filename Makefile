@@ -4,7 +4,7 @@
 .PHONY: all build-linux build-darwin build-windows deps-chrome-cft sync-platform \
 	test-canary-postgres test-pg-full test-e2e-autonomous test-e2e-scorecard \
 	access-lab-up access-lab-down access-lab-logs access-lab-status \
-	setup-agent-codex test-smoke-autopilot test-smoke-autopilot-ginandjuice \
+	setup-agent-codex test-smoke-autopilot test-smoke-autopilot-prior test-smoke-autopilot-ginandjuice \
 	test-smoke-autopilot-crapi test-smoke-autopilot-juiceshop
 
 # Go parameters
@@ -214,7 +214,7 @@ test-pg-full: install-gotestsum
 # provider (~/.codex/auth.json, $ANTHROPIC_API_KEY, or $OPENAI_API_KEY) is set.
 sanity-check: build
 	@echo "$(PREFIX) Running sanity-check (real-target API + storage smoke test)..."
-	@bash test/smoke-test-scripts/sanity-check.sh
+	@bash test/sanity-check/sanity-check.sh
 
 # Run E2E VAmPI tests only (SQLi testing)
 test-e2e-vampi: install-gotestsum
@@ -657,13 +657,21 @@ setup-agent-codex:
 #   MODEL=gpt-5.5 MODE=shadow MAX_DURATION=8m make test-smoke-autopilot
 test-smoke-autopilot: build
 	@echo "$(PREFIX) Durable-autopilot access-lab SMOKE test (REAL, PAID agent run)..."
-	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=access-lab bash scripts/smoke-autopilot.sh
+	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=access-lab bash test/smoke-test/smoke-autopilot.sh
+
+# Prior-context / --burp-bridge-url simulation: seed the throwaway DB with a
+# native scan first, then run autopilot --no-prescan --prior-context full so it
+# mines that prior traffic instead of starting from scratch. Asserts the
+# "Prior context:" brief fired. Same cost profile as test-smoke-autopilot.
+test-smoke-autopilot-prior: build
+	@echo "$(PREFIX) Autopilot prior-context / --burp-bridge-url SMOKE test (REAL, PAID; seeds the DB first)..."
+	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=access-lab SEED_PRIOR=1 bash test/smoke-test/smoke-autopilot.sh
 
 # Live PortSwigger demo shop (external target, carlos/hunter2). Outward-facing +
 # paid — only run against a target you are authorized to test.
 test-smoke-autopilot-ginandjuice: build
 	@echo "$(PREFIX) Durable-autopilot SMOKE test against ginandjuice.shop (REAL, PAID, EXTERNAL)..."
-	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=ginandjuice bash scripts/smoke-autopilot.sh
+	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=ginandjuice bash test/smoke-test/smoke-autopilot.sh
 
 # Local OWASP crAPI (brings the stack up; provisions a login account best-effort).
 test-smoke-autopilot-crapi: build crapi-up
@@ -672,7 +680,7 @@ test-smoke-autopilot-crapi: build crapi-up
 		-H 'Content-Type: application/json' \
 		-d '{"name":"smoke","email":"smoke@crapi.test","number":"4088888888","password":"Smoke123!"}' >/dev/null 2>&1 || true
 	@echo "$(PREFIX) Durable-autopilot SMOKE test against crAPI (REAL, PAID agent run)..."
-	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=crapi CREDS=smoke@crapi.test/Smoke123! bash scripts/smoke-autopilot.sh
+	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=crapi CREDS=smoke@crapi.test/Smoke123! bash test/smoke-test/smoke-autopilot.sh
 
 # Local OWASP Juice Shop (brings it up; registers a login account best-effort).
 test-smoke-autopilot-juiceshop: build juiceshop-up
@@ -681,7 +689,7 @@ test-smoke-autopilot-juiceshop: build juiceshop-up
 		-H 'Content-Type: application/json' \
 		-d '{"email":"smoke@juice-sh.op","password":"Smoke123!","passwordRepeat":"Smoke123!"}' >/dev/null 2>&1 || true
 	@echo "$(PREFIX) Durable-autopilot SMOKE test against Juice Shop (REAL, PAID agent run)..."
-	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=juiceshop CREDS=smoke@juice-sh.op/Smoke123! bash scripts/smoke-autopilot.sh
+	VIGOLIUM_BIN=$(CURDIR)/bin/vigolium PROFILE=juiceshop CREDS=smoke@juice-sh.op/Smoke123! bash test/smoke-test/smoke-autopilot.sh
 
 # jstangle binary management
 # update-jstangle and ensure-jstangle are already declared .PHONY at the top.
@@ -1366,6 +1374,16 @@ help:
 	@echo "    make coverage-combined  Combined unit + no-Docker e2e coverage (report only, not gated)"
 	@echo "    make test-coverage-check  Enforce the COVERAGE_MIN coverage floor (default $(COVERAGE_MIN)%)"
 	@echo "    make test-ci          Run tests with JUnit XML output"
+	@echo ""
+	@echo "\033[33m  SMOKE TESTS (real targets)\033[0m"
+	@echo "    make sanity-check     Real-target REST API + GCS storage smoke test (needs jq/tar/python3 + network)"
+	@echo "    make setup-agent-codex  Point agent.olium at the codex OAuth backend (prereq for autopilot smoke tests)"
+	@echo "    make test-smoke-autopilot  Durable-autopilot access-lab smoke test  \033[31m(REAL, PAID agent run)\033[0m"
+	@echo "    make test-smoke-autopilot-prior  Seed DB, then autopilot --prior-context (--burp-bridge-url sim)  \033[31m(REAL, PAID)\033[0m"
+	@echo "    make test-smoke-autopilot-ginandjuice  Autopilot vs ginandjuice.shop  \033[31m(REAL, PAID, EXTERNAL)\033[0m"
+	@echo "    make test-smoke-autopilot-crapi        Autopilot vs OWASP crAPI       \033[31m(REAL, PAID; brings crapi up)\033[0m"
+	@echo "    make test-smoke-autopilot-juiceshop    Autopilot vs OWASP Juice Shop  \033[31m(REAL, PAID; brings juiceshop up)\033[0m"
+	@echo "                          (MODEL=/MODE=/MAX_DURATION= override; default bound 15m)"
 	@echo ""
 	@echo "\033[33m  DEVELOPMENT\033[0m"
 	@echo "    make fmt              Format code"

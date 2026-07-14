@@ -217,7 +217,7 @@ agent:
     temperature: 0.0
     max_turns: 32
     cache_size: 1024               # LRU; 0 disables
-    max_concurrent: 4              # global cap on simultaneous provider calls; 0 = unbounded
+    max_concurrent: 4              # global cap on simultaneous provider calls; default 4 (0/unset), negative = unbounded
     call_timeout_sec: 600          # per-call deadline; negative = no timeout (parent ctx only)
 ```
 

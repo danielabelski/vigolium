@@ -342,6 +342,12 @@ type ScanRequest struct {
 	ExtensionDir string   // path to generated JS extensions (empty if none)
 	IsRescan     bool     // true for triage-driven targeted rescans
 	TargetURLs   []string // optional: restrict rescan to these URLs only
+	// ScanUUID is the run-unique native scan_uuid the pipeline owns. Scan
+	// callbacks tag the native scan's findings with it so the pipeline can
+	// attribute them to this run (agentic_scan_uuid) and scope finding counts
+	// to the run instead of the whole project. Empty falls back to the
+	// callback's own configured scan_uuid.
+	ScanUUID string
 }
 
 // ScanFunc is the unified callback signature for running scans.

@@ -114,20 +114,29 @@ func (r *Repository) saveFindingIDB(ctx context.Context, idb bun.IDB, finding *F
 // SaveFindingDirect inserts a pre-built Finding directly (without ResultEvent conversion).
 // Uses INSERT ON CONFLICT for atomic dedup when finding_hash is non-empty.
 func (r *Repository) SaveFindingDirect(ctx context.Context, finding *Finding) error {
+	_, err := r.SaveFindingReported(ctx, finding)
+	return err
+}
+
+// SaveFindingReported is SaveFindingDirect that additionally reports whether a
+// new finding row was inserted (true) vs collapsed into an existing finding by
+// dedup (false). The autopilot report_finding tool uses it so its run counter
+// only tallies distinct findings.
+func (r *Repository) SaveFindingReported(ctx context.Context, finding *Finding) (bool, error) {
 	if finding == nil {
-		return fmt.Errorf("invalid Finding")
+		return false, fmt.Errorf("invalid Finding")
 	}
 
 	finding.ProjectUUID = defaultProjectUUID(finding.ProjectUUID)
 
 	inserted, err := r.saveFindingIDB(ctx, r.db, finding, finding.HTTPRecordUUIDs)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if inserted {
 		r.emitFindingSaved(finding)
 	}
-	return nil
+	return inserted, nil
 }
 
 // FindingSaveResult reports the outcome of persisting one finding in a batched

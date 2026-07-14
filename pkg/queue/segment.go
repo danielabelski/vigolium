@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -179,7 +180,7 @@ func (s *Segment) recoverState() error {
 	// satisfy CanDelete after a restart instead of leaking its directory forever.
 	if _, err := s.db.Get([]byte(keySealed), nil); err == nil {
 		s.sealed.Store(true)
-	} else if err != leveldb.ErrNotFound {
+	} else if !errors.Is(err, leveldb.ErrNotFound) {
 		zap.L().Warn("Failed to read segment sealed marker",
 			zap.Uint64("segment_id", s.id), zap.Error(err))
 	}

@@ -34,7 +34,8 @@ var (
 	swarmSource              string
 	swarmFiles               []string
 	swarmVulnType            string
-	swarmFocus               string
+	swarmPrompt              string // --prompt: free-text task guidance (same slot as the positional [prompt])
+	swarmFocus               string // internal: populated by the NL intent parser (no --focus flag)
 	swarmSkills              []string
 	swarmSkillTags           []string
 	swarmNoSkillFilter       bool
@@ -49,8 +50,7 @@ var (
 	swarmOnlyPhase           string
 	swarmSkipPhases          []string
 	swarmStartFrom           string
-	swarmInstruction         string
-	swarmInstructionFile     string
+	swarmInstruction         string // internal: populated by --plan-file and the NL intent parser (no --instruction flag)
 	swarmPlanFile            string
 	swarmPlanInputs          []string
 	swarmDiscover            bool
@@ -65,7 +65,6 @@ var (
 	swarmProbeConcurrency    int
 	swarmProbeTimeout        time.Duration
 	swarmMaxProbeBody        int
-	swarmBrowser             bool
 	swarmBrowserAuth         bool
 	swarmAuthCookies         []string
 	swarmAuthHeaders         []string
@@ -93,10 +92,17 @@ var (
 	// applyOliumOverrides helpers so swarm can't drift from the other commands.
 	swarmOliumFlags oliumOverrides
 
-	// swarmInstructionPrefix holds the verbatim natural-language prompt when
-	// swarm was invoked with a positional `<prompt>` argument. See the
+	// swarmInstructionPrefix holds the verbatim task-guidance prompt when swarm
+	// was invoked with a positional `<prompt>` argument or --prompt. See the
 	// matching autopilotInstructionPrefix comment for the rationale.
 	swarmInstructionPrefix string
+
+	// swarmIntentApplied is set once the NL intent parser has populated the swarm
+	// vars (applyIntentToSwarmFlags), so the explicit-path prompt auth-extraction
+	// is skipped on the NL re-entry (runSwarmFromPrompt re-enters with cmd != nil,
+	// unlike autopilot, so cmd alone can't distinguish the two paths). runAgentSwarm
+	// consumes (resets) it so it never leaks into a later in-process invocation.
+	swarmIntentApplied bool
 )
 
 var agentSwarmCmd = &cobra.Command{
@@ -110,17 +116,17 @@ Examples (natural-language prompt as positional arg):
   vigolium agent swarm "Hunt SSRF on https://target/api — only credentialed /v2/billing paths"
   vigolium agent swarm --plan-file ginandjuice-plan.md
 
-The prompt is forwarded verbatim to master + sub-agents (scope caveats,
-exploitation goals, false-positive rules survive unedited) and parsed for
-target/source/focus. --instruction appends extra guidance. --dry-run previews
-what the parser extracted.
+Task guidance comes from the positional [prompt] or --prompt (same slot). It is
+forwarded verbatim to master + sub-agents (scope caveats, exploitation goals,
+false-positive rules survive unedited) and parsed for target/source/focus.
+--dry-run previews what the parser extracted.
 
 Inputs (--input, auto-detected; also reads stdin when piped):
   URL · curl command · raw HTTP · Burp XML · base64 raw HTTP · record UUID
 
 --plan-file: one file mixing prose + raw HTTP request(s) split on "---" or
 fenced ` + "```http```" + ` blocks. Every request block becomes its own seed input.
-Mutually exclusive with --input/--instruction/--instruction-file.
+Mutually exclusive with --input or a prompt (--prompt / positional).
 
 Intensity presets (--intensity), explicit flags override:
   quick     — discovery + browser, no triage, 2h,  1 iteration
@@ -143,7 +149,7 @@ func init() {
 	f.StringVar(&swarmSource, "source", "", "Path to application source code for route discovery")
 	f.StringSliceVar(&swarmFiles, "files", nil, "Specific source files to include (relative to --source)")
 	f.StringVar(&swarmVulnType, "vuln-type", "", "Vulnerability type focus (e.g. sqli, xss, ssrf)")
-	f.StringVar(&swarmFocus, "focus", "", "Focus area hint for the agent (e.g. 'API injection', 'auth bypass')")
+	f.StringVar(&swarmPrompt, "prompt", "", "Free-text task guidance for the agent (same as the positional [prompt]; use --plan-file for a whole plan with seed HTTP requests)")
 	f.StringSliceVar(&swarmSkills, "skill", nil, "Force-load these skills by name into triage, bypassing planner selection (repeatable or comma-separated)")
 	f.StringSliceVar(&swarmSkillTags, "skill-tag", nil, "Force-load every skill carrying one of these tags into triage (e.g. xss,idor)")
 	f.BoolVar(&swarmNoSkillFilter, "no-skill-filter", false, "Load the full skill set into triage; ignore planner selection")
@@ -158,9 +164,7 @@ func init() {
 	f.StringVar(&swarmOnlyPhase, "only", "", "Run only this scanning phase (discovery, spidering, spa, dynamic-assessment, external-harvest)")
 	f.StringSliceVar(&swarmSkipPhases, "skip", nil, "Skip specific phases (recon, discovery, spidering, spa, dynamic-assessment, external-harvest, triage, rescan)")
 	f.StringVar(&swarmStartFrom, "start-from", "", "Resume from a specific phase (native-normalize, source-analysis, code-audit, native-discover, native-recon, plan, native-extension, native-scan, triage)")
-	f.StringVar(&swarmInstruction, "instruction", "", "Custom instruction to guide the agent (appended to prompts)")
-	f.StringVar(&swarmInstructionFile, "instruction-file", "", "Path to a file containing custom instructions")
-	f.StringVar(&swarmPlanFile, "plan-file", "", "Path to a plan file mixing free-text guidance and raw HTTP request(s). Every request block becomes a seed input; cannot be combined with --input/--instruction/--instruction-file")
+	f.StringVar(&swarmPlanFile, "plan-file", "", "Path to a plan file mixing free-text guidance and raw HTTP request(s). Every request block becomes a seed input; cannot be combined with --input or a prompt (--prompt / positional)")
 	f.BoolVar(&swarmDiscover, "discover", false, "Run discovery+spidering before master agent planning to expand attack surface")
 	f.BoolVar(&swarmCodeAudit, "code-audit", false, "Enable AI security code audit phase (on by default when --source is provided, use --code-audit=false to disable)")
 	// Hidden alias for pipeline backward compatibility
@@ -178,11 +182,12 @@ func init() {
 	f.BoolVar(&swarmTriage, "triage", false, "Enable AI triage and rescan phases. Intensity preset overrides this: balanced/deep enable triage by default; quick disables it. Use --triage=false to force-disable on balanced/deep.")
 	f.BoolVar(&swarmForceExtensions, "with-extensions", false, "Force the extension agent to run even when the planner decides built-in modules are sufficient (no effect with --dry-run)")
 
-	// Browser automation
-	f.BoolVar(&swarmBrowser, "browser", false, "Enable agent-browser for browser-based auth capture and interaction")
-	f.BoolVar(&swarmHeaded, "headed", false, "Show the browser window: applies to the native --discover spidering; additionally applies to in-process probes (browser_probe, web_fetch mode=browser) and agent-browser subprocesses when --browser is enabled. Sets VIGOLIUM_BROWSER_HEADED=1 for the duration of the run.")
-	f.BoolVar(&swarmBrowserAuth, "browser-auth", false, "Run browser-based auth phase before discovery (requires --browser)")
-	f.StringVar(&swarmCredentials, "credentials", "", "Credentials for browser auth phase (e.g. 'username=admin,password=secret')")
+	// Browser automation. The browser is always available (agent.browser.enable
+	// defaults to true), so there is no --browser flag; credentials for the auth
+	// phase are taken from the prompt (e.g. swarm "log in as admin/admin123 ...").
+	f.BoolVar(&swarmHeaded, "headed", false, "Show the browser window during the run (native --discover spidering, in-process probes, and agent-browser subprocesses); sets VIGOLIUM_BROWSER_HEADED=1 for the run. Debugging aid.")
+	_ = f.MarkHidden("headed")
+	f.BoolVar(&swarmBrowserAuth, "browser-auth", false, "Run the browser-based auth phase before discovery")
 
 	// Direct auth injection — bypass the browser when you already have a session.
 	f.StringArrayVar(&swarmAuthCookies, "cookie", nil, "Session cookie name=value pair (repeatable; e.g. --cookie 'session=abc123'). Injected into recon, discovery, and scan as Cookie: header. Commas are literal.")
@@ -215,29 +220,29 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 	defer syncLogger()
 	defer closeDatabaseOnExit()
 
-	// Natural-language prompt handling. With no explicit structured flags, the
-	// positional prompt drives the run through the LLM intent parser. With
-	// structured flags present, the positional prompt is preserved verbatim as
-	// instruction context (prepended ahead of --instruction) rather than silently
-	// discarded; explicit flags still win for structured fields.
-	positionalPrompt, err := resolvePositionalPrompt(args, swarmPlanFile)
+	// Natural-language prompt handling. The task guidance comes from either the
+	// positional [prompt] or --prompt (same slot). With no explicit structured
+	// flags, it drives the run through the LLM intent parser. With
+	// structured flags present, the prompt is preserved verbatim as instruction
+	// context rather than silently discarded; explicit flags still win for
+	// structured fields.
+	rawPrompt, err := resolveRawPrompt(args, swarmPrompt, swarmPlanFile)
 	if err != nil {
 		return err
 	}
 	hasExplicitFlags := swarmTarget != "" || swarmInput != "" || len(swarmRecordUUIDs) > 0 || swarmAllRecords || swarmRecordsFrom != "" || swarmSource != "" || swarmPlanFile != ""
-	if positionalPrompt != "" && !hasExplicitFlags {
-		return runSwarmFromPrompt(cmd, positionalPrompt)
+	if rawPrompt != "" && !hasExplicitFlags {
+		return runSwarmFromPrompt(cmd, rawPrompt)
 	}
-	if positionalPrompt != "" {
-		swarmInstructionPrefix = positionalPrompt
+	if rawPrompt != "" {
+		swarmInstructionPrefix = rawPrompt
 	}
 
-	// Resolve --plan-file into --instruction + seed inputs before the input
+	// Resolve --plan-file into an instruction + seed inputs before the input
 	// guards run. Swarm is multi-seed: every request block in the plan file
 	// becomes an independent seed input (appended in buildSwarmInputs).
 	if swarmPlanFile != "" {
-		planInstruction, planRequests, perr := resolvePlanFile(
-			swarmPlanFile, swarmInput, swarmInstruction, swarmInstructionFile)
+		planInstruction, planRequests, perr := resolvePlanFile(swarmPlanFile, swarmInput)
 		if perr != nil {
 			return perr
 		}
@@ -268,8 +273,6 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 		return fmt.Errorf("--source-analysis-only requires --source")
 	}
 
-	// --browser-auth requires --browser (checked after intensity resolution below)
-
 	// Resolve intensity preset — apply before other flag processing
 	intensity, intensityErr := agent.ValidateIntensity(swarmIntensity)
 	if intensityErr != nil {
@@ -286,7 +289,6 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 			"master-batch-size": cmd.Flags().Changed("master-batch-size"),
 			"batch-concurrency": cmd.Flags().Changed("batch-concurrency"),
 			"probe-concurrency": cmd.Flags().Changed("probe-concurrency"),
-			"browser":           cmd.Flags().Changed("browser"),
 			"browser-auth":      cmd.Flags().Changed("browser-auth"),
 			"swarm-duration":    cmd.Flags().Changed("max-duration"),
 		}
@@ -300,9 +302,10 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 			MasterBatchSize:  swarmMasterBatchSize,
 			BatchConcurrency: swarmBatchConcurrency,
 			ProbeConcurrency: swarmProbeConcurrency,
-			Browser:          swarmBrowser,
-			Auth:             swarmBrowserAuth,
-			SwarmDuration:    swarmMaxDuration,
+			// Browser is not overridable from the CLI (always on), so it is
+			// omitted — the preset's Browser:true wins and the result is unused.
+			Auth:          swarmBrowserAuth,
+			SwarmDuration: swarmMaxDuration,
 		}, changed)
 		swarmDiscover = intensityResult.Discover
 		swarmCodeAudit = intensityResult.CodeAudit
@@ -313,7 +316,6 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 		swarmMasterBatchSize = intensityResult.MasterBatchSize
 		swarmBatchConcurrency = intensityResult.BatchConcurrency
 		swarmProbeConcurrency = intensityResult.ProbeConcurrency
-		swarmBrowser = intensityResult.Browser
 		swarmBrowserAuth = intensityResult.Auth
 		swarmMaxDuration = intensityResult.SwarmDuration
 
@@ -335,11 +337,6 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
-	// --browser-auth requires --browser
-	if swarmBrowserAuth && !swarmBrowser {
-		return fmt.Errorf("--browser-auth requires --browser (browser automation must be enabled for auth capture)")
-	}
-
 	// Enable code-audit by default when --source is provided (unless intensity already set it)
 	if swarmSource != "" && !cmd.Flags().Changed("code-audit") && !cmd.Flags().Changed("intensity") {
 		swarmCodeAudit = true
@@ -358,11 +355,7 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 	// reads settings.Agent.Olium directly), same as agent query/triage.
 	applyOliumOverrides(settings, &swarmOliumFlags)
 
-	// --browser CLI flag overrides config
-	if cmd.Flags().Changed("browser") {
-		enabled := swarmBrowser
-		settings.Agent.Browser.Enable = &enabled
-	}
+	forceSwarmBrowserOn(settings)
 
 	if swarmHeaded {
 		_ = os.Setenv(spitolas.EnvBrowserHeaded, "1")
@@ -418,11 +411,20 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 		return err
 	}
 
-	instruction, instrErr := resolveInstruction(swarmInstruction, swarmInstructionFile)
-	if instrErr != nil {
-		return instrErr
+	// swarmInstruction is populated only by --plan-file (above); the raw prompt
+	// (--prompt / positional) is layered in front as the verbatim prefix.
+	instruction := prependVerbatimPrompt(swarmInstruction, swarmInstructionPrefix)
+
+	// Explicit-flag path: the prompt was passed verbatim (never parsed), so pull
+	// any credentials / auth intent out of it here. Skipped when the NL intent
+	// parser already populated the auth vars, and under --dry-run so a preview
+	// never makes a live LLM call. Consume the flag (reset it) so it can't leak
+	// into a later in-process run — it's a per-invocation signal, not global state.
+	nlApplied := swarmIntentApplied
+	swarmIntentApplied = false
+	if !nlApplied && !swarmDryRun {
+		extractPromptAuthIntentSwarm(settings, repo, swarmInstructionPrefix)
 	}
-	instruction = prependVerbatimPrompt(instruction, swarmInstructionPrefix)
 
 	// Build inputs list (resolves --all-records / --records-from against the DB)
 	inputs, err := buildSwarmInputs(ctx, repo, projectUUID)
@@ -443,6 +445,12 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 	// Create session directory upfront so callbacks can write to it.
 	// --scan-uuid pins the run for cross-node sync; otherwise mint fresh.
 	swarmAgenticScanUUID := pinnedOrNewUUID(globalScanUUID)
+	// Resolve a concrete, run-unique native scan_uuid. When --scan-uuid is
+	// pinned we honor it (cross-node sync); otherwise mint a fresh one so the
+	// native scan's findings are tagged with a UUID this run owns. The pipeline
+	// later stamps agentic_scan_uuid onto those findings and scopes all
+	// finding counts to the run instead of the whole project.
+	swarmScanUUID := pinnedOrNewUUID(globalScanUUID)
 	sessionDir, sdErr := agent.EnsureSessionDir(settings.Agent.EffectiveSessionsDir(), swarmAgenticScanUUID)
 	if sdErr != nil {
 		zap.L().Warn("Failed to create session dir", zap.Error(sdErr))
@@ -506,7 +514,7 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
-	// --focus is a fallback for --vuln-type
+	// The intent-parsed focus is a fallback for --vuln-type
 	if swarmFocus != "" && swarmVulnType == "" {
 		swarmVulnType = swarmFocus
 	}
@@ -562,7 +570,7 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 		SessionDir:         sessionDir,
 		AgenticScanUUID:    swarmAgenticScanUUID,
 		ProjectUUID:        projectUUID,
-		ScanUUID:           globalScanUUID,
+		ScanUUID:           swarmScanUUID,
 		MasterBatchSize:    swarmMasterBatchSize,
 		ProbeConcurrency:   swarmProbeConcurrency,
 		ProbeTimeout:       swarmProbeTimeout,
@@ -584,7 +592,10 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 
 	// --start-from: build a synthetic checkpoint with all prior phases marked completed
 	if swarmStartFrom != "" {
-		syntheticCP := buildSyntheticCheckpoint(swarmStartFrom)
+		syntheticCP, scErr := buildSyntheticCheckpoint(swarmStartFrom)
+		if scErr != nil {
+			return scErr
+		}
 		if syntheticCP != nil {
 			_ = agent.WriteCheckpointToDir(sessionDir, syntheticCP)
 			cfg.ResumeDir = sessionDir
@@ -632,7 +643,7 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 	phaseCfg := swarmNativePhaseConfig{
 		Target:      swarmTarget,
 		ProjectUUID: projectUUID,
-		ScanUUID:    globalScanUUID,
+		ScanUUID:    swarmScanUUID,
 		ConfigPath:  globalConfig,
 		Verbose:     globalVerbose,
 	}
@@ -769,7 +780,7 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 	// Tips
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "  %s %s %s %s\n",
-		terminal.TipPrefix(), terminal.Gray("Use"), terminal.Cyan("--instruction \"focus on ...\""), terminal.Gray("to tell the agent to focus on a specific area (e.g. auth bypass, IDOR, SQLi)"))
+		terminal.TipPrefix(), terminal.Gray("Use"), terminal.Cyan("--prompt \"focus on ...\""), terminal.Gray("to tell the agent to focus on a specific area (e.g. auth bypass, IDOR, SQLi)"))
 	fmt.Fprintf(os.Stderr, "  %s %s %s %s\n",
 		terminal.TipPrefix(), terminal.Gray("Use"), terminal.Cyan("--discover"), terminal.Gray("to run discovery+spidering before planning to expand the attack surface"))
 	fmt.Fprintln(os.Stderr)
@@ -921,7 +932,10 @@ func buildAgentSwarmScanFunc(settings *config.Settings, repo *database.Repositor
 	return func(ctx context.Context, req agent.ScanRequest) error {
 		opts := types.DefaultOptions()
 		opts.Targets = []string{phaseCfg.Target}
-		opts.ScanUUID = phaseCfg.ScanUUID
+		// The pipeline owns the run-unique scan_uuid and passes it via the
+		// ScanRequest so it can attribute these findings to the run; fall back
+		// to the configured one for any caller that doesn't set it.
+		opts.ScanUUID = firstNonEmptyString(req.ScanUUID, phaseCfg.ScanUUID)
 		opts.ProjectUUID = phaseCfg.ProjectUUID
 		opts.ConfigPath = phaseCfg.ConfigPath
 		opts.HeuristicsCheck = "none"
@@ -1106,15 +1120,18 @@ func splitFocusArea(area string) (string, string) {
 	return area, ""
 }
 
-// buildSyntheticCheckpoint creates a checkpoint with all phases before the target marked as completed.
-// This enables --start-from to skip earlier phases without a real resume directory.
-func buildSyntheticCheckpoint(startFrom string) *agent.SwarmCheckpoint {
+// buildSyntheticCheckpoint creates a checkpoint with all phases before the
+// target marked as completed. This enables --start-from to skip earlier phases
+// without a real resume directory. Returns an error for an unknown phase rather
+// than silently marking every phase complete (which would skip the whole run).
+func buildSyntheticCheckpoint(startFrom string) (*agent.SwarmCheckpoint, error) {
 	// Ordered swarm phases
 	allPhases := []string{
 		agent.SwarmPhaseNormalize,
 		agent.SwarmPhaseSourceAnalysis,
 		agent.SwarmPhaseCodeAudit,
 		agent.SwarmPhaseDiscover,
+		agent.SwarmPhaseRecon,
 		agent.SwarmPhasePlan,
 		agent.SwarmPhaseExtension,
 		agent.SwarmPhaseScan,
@@ -1122,21 +1139,28 @@ func buildSyntheticCheckpoint(startFrom string) *agent.SwarmCheckpoint {
 	}
 
 	var completed []string
+	found := false
 	for _, p := range allPhases {
 		if p == startFrom {
+			found = true
 			break
 		}
 		completed = append(completed, p)
 	}
 
+	if !found {
+		return nil, fmt.Errorf("unknown --start-from phase %q; valid phases: %s",
+			startFrom, strings.Join(allPhases, ", "))
+	}
 	if len(completed) == 0 {
-		return nil
+		// --start-from is the first phase: nothing to skip.
+		return nil, nil
 	}
 
 	return &agent.SwarmCheckpoint{
 		CompletedPhases: completed,
 		Timestamp:       time.Now(),
-	}
+	}, nil
 }
 
 func truncateSwarmInput(s string, maxLen int) string {
@@ -1186,8 +1210,55 @@ func runSwarmFromPrompt(cmd *cobra.Command, prompt string) error {
 	return runMultiAppSwarm(context.Background(), cmd, engine, settings, repo, intent)
 }
 
+// applyAuthIntentToSwarm copies auth/browser signals extracted by the LLM intent
+// parser into the swarm vars, without overwriting values already set. Shared by
+// the NL-prompt path (applyIntentToSwarmFlags) and the explicit-flag path
+// (extractPromptAuthIntentSwarm) now that swarm has no --credentials flag.
+func applyAuthIntentToSwarm(app agent.AppIntent) {
+	if app.AuthRequired || app.RequiresBrowser || app.Credentials != "" || len(app.CredentialSets) > 0 {
+		swarmBrowserAuthRequired = true
+	}
+	if app.RequiresBrowser {
+		swarmRequiresBrowser = true
+		swarmBrowserAuth = true
+	}
+	if app.Credentials != "" && swarmCredentials == "" {
+		swarmCredentials = app.Credentials
+	}
+	if len(app.CredentialSets) > 0 && len(swarmCredentialSets) == 0 {
+		swarmCredentialSets = append([]agent.IntentCredentialSet(nil), app.CredentialSets...)
+	}
+	if app.BrowserStartURL != "" && swarmBrowserStartURL == "" {
+		swarmBrowserStartURL = app.BrowserStartURL
+	}
+	if len(app.FocusRoutes) > 0 && len(swarmFocusRoutes) == 0 {
+		swarmFocusRoutes = append([]string(nil), app.FocusRoutes...)
+	}
+}
+
+// extractPromptAuthIntentSwarm pulls auth/browser signals out of the prompt on
+// the explicit-flag path (where the prompt is passed verbatim and not parsed),
+// mirroring autopilot's extractPromptAuthIntent. Best-effort: parse failures are
+// logged and the run continues.
+func extractPromptAuthIntentSwarm(settings *config.Settings, repo *database.Repository, prompt string) {
+	if app, ok := parsePromptFirstApp(settings, repo, prompt, "swarm", swarmTarget, swarmSource); ok {
+		applyAuthIntentToSwarm(app)
+	}
+}
+
+// forceSwarmBrowserOn makes the browser unconditionally available for swarm
+// (auth capture + --discover spidering), overriding the agent.browser.enable
+// config default. Called from every swarm entry leg — single-app runAgentSwarm
+// and multi-app runMultiAppSwarm — so the "always on" truth lives in one place
+// (the two legs don't share a downstream chokepoint the way autopilot does).
+func forceSwarmBrowserOn(settings *config.Settings) {
+	enabled := true
+	settings.Agent.Browser.Enable = &enabled
+}
+
 // applyIntentToSwarmFlags populates swarm package-level flags from an AppIntent.
 func applyIntentToSwarmFlags(cmd *cobra.Command, app agent.AppIntent) {
+	swarmIntentApplied = true // NL path owns auth extraction; skip the explicit-path parse
 	swarmTarget = app.Target
 	swarmSource = app.SourcePath
 	if app.Discover {
@@ -1214,28 +1285,8 @@ func applyIntentToSwarmFlags(cmd *cobra.Command, app agent.AppIntent) {
 	if len(app.Files) > 0 && len(swarmFiles) == 0 {
 		swarmFiles = app.Files
 	}
-	if app.Browser || app.RequiresBrowser {
-		swarmBrowser = true
-	}
-	if app.AuthRequired || app.RequiresBrowser || app.Credentials != "" || len(app.CredentialSets) > 0 {
-		swarmBrowserAuthRequired = true
-	}
-	if app.RequiresBrowser {
-		swarmRequiresBrowser = true
-		swarmBrowserAuth = true
-	}
-	if app.Credentials != "" && swarmCredentials == "" {
-		swarmCredentials = app.Credentials
-	}
-	if len(app.CredentialSets) > 0 && len(swarmCredentialSets) == 0 {
-		swarmCredentialSets = append([]agent.IntentCredentialSet(nil), app.CredentialSets...)
-	}
-	if app.BrowserStartURL != "" && swarmBrowserStartURL == "" {
-		swarmBrowserStartURL = app.BrowserStartURL
-	}
-	if len(app.FocusRoutes) > 0 && len(swarmFocusRoutes) == 0 {
-		swarmFocusRoutes = append([]string(nil), app.FocusRoutes...)
-	}
+	// Browser is always on for swarm, so app.Browser is a no-op here.
+	applyAuthIntentToSwarm(app)
 	if app.Intensity != "" && !cmd.Flags().Changed("intensity") {
 		swarmIntensity = app.Intensity
 	}

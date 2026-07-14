@@ -23,7 +23,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/terminal"
 )
 
-// Smoke tests guarding the intensity → profile → strategy → phase chain
+// E2E tests guarding the intensity → profile → strategy → phase chain
 // against the regression where applying a profile silently zeroed
 // Lite/Balanced/Deep phase tables (user-visible: "intensity:deep ran no
 // phases"). Both entry points are exercised: the CLI binary via subprocess,
@@ -36,7 +36,7 @@ func repoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	require.True(t, ok, "runtime.Caller failed")
-	// file lives at .../vigolium/test/e2e/scan_intensity_smoke_test.go
+	// file lives at .../vigolium/test/e2e/scan_intensity_test.go
 	return filepath.Dir(filepath.Dir(filepath.Dir(file)))
 }
 
@@ -61,19 +61,19 @@ func installBundledProfiles(t *testing.T) string {
 }
 
 var (
-	smokeBinaryOnce sync.Once
-	smokeBinaryPath string
-	smokeBinaryErr  error
+	vigoliumBinaryOnce sync.Once
+	vigoliumBinaryPath string
+	vigoliumBinaryErr  error
 )
 
 // buildVigoliumBinary compiles ./cmd/vigolium into a tempdir once per test
 // process so subprocess invocations exercise the source under test.
 func buildVigoliumBinary(t *testing.T) string {
 	t.Helper()
-	smokeBinaryOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "vigolium-smoke-bin-")
+	vigoliumBinaryOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "vigolium-e2e-bin-")
 		if err != nil {
-			smokeBinaryErr = fmt.Errorf("mkdir tempdir: %w", err)
+			vigoliumBinaryErr = fmt.Errorf("mkdir tempdir: %w", err)
 			return
 		}
 		bin := filepath.Join(dir, "vigolium")
@@ -82,15 +82,15 @@ func buildVigoliumBinary(t *testing.T) string {
 		var stderr strings.Builder
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
-			smokeBinaryErr = fmt.Errorf("go build: %w (stderr: %s)", err, stderr.String())
+			vigoliumBinaryErr = fmt.Errorf("go build: %w (stderr: %s)", err, stderr.String())
 			return
 		}
-		smokeBinaryPath = bin
+		vigoliumBinaryPath = bin
 	})
-	if smokeBinaryErr != nil {
-		t.Fatalf("buildVigoliumBinary: %v", smokeBinaryErr)
+	if vigoliumBinaryErr != nil {
+		t.Fatalf("buildVigoliumBinary: %v", vigoliumBinaryErr)
 	}
-	return smokeBinaryPath
+	return vigoliumBinaryPath
 }
 
 // startJuiceShopContainer launches juice-shop and returns the BaseURL.
@@ -113,13 +113,13 @@ func startJuiceShopContainer(t *testing.T) *VulnerableApp {
 	return app
 }
 
-// TestSmoke_NativeScan_CLI_IntensityDeep runs `vigolium scan -t <juice>
+// TestNativeScan_CLI_IntensityDeep runs `vigolium scan -t <juice>
 // --intensity deep` and asserts the runner banner reports Strategy: deep
 // and Profile: full — the user-facing signal that intensity flowed through
 // the CLI without the profile-clobber regression.
-func TestSmoke_NativeScan_CLI_IntensityDeep(t *testing.T) {
+func TestNativeScan_CLI_IntensityDeep(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping smoke test in short mode")
+		t.Skip("Skipping e2e test in short mode")
 	}
 
 	juice := startJuiceShopContainer(t)
@@ -167,13 +167,13 @@ database:
 		"expected banner to show Profile: full")
 }
 
-// TestSmoke_NativeScan_API_IntensityDeep mirrors the user's curl repro
+// TestNativeScan_API_IntensityDeep mirrors the user's curl repro
 // (POST /api/scans/run, intensity=deep) against juice-shop, then asserts
 // the runtime.log written by the in-process runner shows the right
 // strategy/profile banner.
-func TestSmoke_NativeScan_API_IntensityDeep(t *testing.T) {
+func TestNativeScan_API_IntensityDeep(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping smoke test in short mode")
+		t.Skip("Skipping e2e test in short mode")
 	}
 
 	juice := startJuiceShopContainer(t)

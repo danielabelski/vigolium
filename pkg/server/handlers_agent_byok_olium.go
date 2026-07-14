@@ -104,7 +104,12 @@ func (h *Handlers) oliumConfigForRequest(byok AgentBYOK) (config.OliumConfig, fu
 func (h *Handlers) engineForRequest(byok AgentBYOK) (*agent.Engine, func(), error) {
 	overlay, cleanup, err := h.oliumConfigForRequest(byok)
 	if errors.Is(err, errNoByokOverride) {
-		return h.agentEngine, func() {}, nil
+		// No BYOK overlay — but still hand back a per-request engine rather than
+		// the shared h.agentEngine. A swarm/autopilot run replaces the engine's
+		// contextCache pointer and accumulates token usage on it; sharing one
+		// engine across concurrent requests races on that state and cross-bills
+		// tokens. The process-wide provider semaphore still bounds parallelism.
+		return agent.NewEngine(h.settings, h.repo), func() {}, nil
 	}
 	if err != nil {
 		return nil, cleanup, err

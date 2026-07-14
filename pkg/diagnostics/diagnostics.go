@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vigolium/vigolium/internal/config"
@@ -234,12 +235,31 @@ func Run(deps Deps) *Report {
 	}
 
 	r.SessionsDir = checkSessionsDir(settings)
+
+	// The two embedded-binary probes and the piolium probe each block on a
+	// subprocess (jstangle extraction + JS probe, `vigolium-audit list`, and
+	// `pi -h`). Run serially they sum to ~10s on a machine that has all three
+	// installed; run concurrently the wall time is bounded by the slowest single
+	// probe. Each goroutine writes only its own local, so the shared Report and
+	// its maps are populated single-threaded after the join — no data race.
+	var (
+		probeWG       sync.WaitGroup
+		jstangleCheck *CheckResult
+		auditBinCheck *CheckResult
+		pioliumCheck  *CheckResult
+	)
+	probeWG.Add(3)
+	go func() { defer probeWG.Done(); jstangleCheck = checkJSTangleBinary() }()
+	go func() { defer probeWG.Done(); auditBinCheck = checkAuditBinary() }()
+	go func() { defer probeWG.Done(); pioliumCheck = checkPiolium() }()
+	probeWG.Wait()
+
 	r.EmbeddedBinaries = map[string]*CheckResult{
-		"jstangle":         checkJSTangleBinary(),
-		"vigolium-audit": checkAuditBinary(),
+		"jstangle":       jstangleCheck,
+		"vigolium-audit": auditBinCheck,
 	}
 	r.Audit = checkAudit(settings, r.EmbeddedBinaries["vigolium-audit"])
-	r.Piolium = checkPiolium()
+	r.Piolium = pioliumCheck
 	// When claude (Path A) is available, frame a missing piolium as optional
 	// rather than a problem to fix — the user already has a working audit
 	// driver. The status stays as-is (still reflects whether piolium itself

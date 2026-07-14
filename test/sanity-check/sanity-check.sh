@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# test/smoke-test-scripts/sanity-check.sh
+# test/sanity-check/sanity-check.sh
 #
 # End-to-end smoke test for the REST API + GCS storage upload flow documented
 # in docs/api-references/scan-with-storage.md.
@@ -589,8 +589,8 @@ else
     # juice-shop is a 156-record Express app; without a tight instruction the
     # autopilot burns through `quick`'s 30-turn cap before converging (we hit
     # `autopilot engine: exceeded max turns (30)` on the unscoped run). Mirror
-    # smoke-autopilot-juiceshop-auth.sh's pattern: scope the agent to a single
-    # spot-check so the smoke confirms the wiring rather than a full audit.
+    # test/smoke-test/smoke-autopilot.sh's pattern: scope the agent to a single
+    # spot-check so the check confirms the wiring rather than a full audit.
     AUTOPILOT_BODY=$(jq -n \
         --arg t "$AUTOPILOT_TARGET" \
         --arg s "$AUTOPILOT_SOURCE" \

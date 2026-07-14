@@ -45,6 +45,13 @@ type LaunchParams struct {
 	// "deep"). Empty inherits the settings default.
 	ScanningStrategy string
 
+	// ScanMaxDuration caps total wall-clock time for the whole native scan.
+	// Zero leaves the scan unbounded (it runs until ctx cancellation) — which
+	// is a foot-gun for library callers like the autopilot pre-scan that share
+	// a long-lived ctx: an unbounded scan will consume the entire budget and
+	// starve whatever runs after it. Set a bounded value for such callers.
+	ScanMaxDuration time.Duration
+
 	// EnableDiscovery turns on the discovery phase. Default false — most
 	// agent invocations want a targeted dynamic-assessment-only scan.
 	EnableDiscovery bool
@@ -235,6 +242,9 @@ func buildLaunchOptions(params LaunchParams) *types.Options {
 	opts.DiscoverEnabled = params.EnableDiscovery
 	opts.SpideringEnabled = params.EnableSpidering
 	opts.ScanningStrategy = params.ScanningStrategy
+	if params.ScanMaxDuration > 0 {
+		opts.ScanMaxDuration = params.ScanMaxDuration
+	}
 	opts.OnlyPhase = params.OnlyPhase
 	if len(params.SkipPhases) > 0 {
 		opts.SkipPhases = append(opts.SkipPhases, params.SkipPhases...)

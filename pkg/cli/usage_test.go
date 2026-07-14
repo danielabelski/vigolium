@@ -77,25 +77,21 @@ func ungroupedVisibleFlags(fs *pflag.FlagSet, groups []flagGroup) []string {
 
 // TestFlagGroups_CoverAllVisibleFlags guards that every command's visible flags
 // are assigned to a group, so the "Other:" help section only ever holds cobra's
-// --help. The four native-scan commands share scanFlagGroups (their local flags);
-// the root's persistent flags feed the inherited "Global Flags:" block via
-// globalFlagGroups. A new ungrouped flag fails here instead of silently appearing
-// under "Other".
+// --help. It is driven from the production commandFlagGroups map — the same
+// wiring the renderer uses — so it validates the actual command→table pairing
+// (a command wired to the wrong table fails here), not a parallel copy that could
+// drift. A command's LocalFlags() is exactly the set the renderer groups (it
+// excludes the inherited global flags, which render separately). root is the one
+// exception: it is deliberately absent from the map, and its grouped block is the
+// inherited "Global Flags:", fed by its persistent flags against globalFlagGroups.
 func TestFlagGroups_CoverAllVisibleFlags(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		flags  *pflag.FlagSet
-		groups []flagGroup
-	}{
-		{"scan", scanCmd.Flags(), scanFlagGroups},
-		{"run", runCmd.Flags(), scanFlagGroups},
-		{"scan-url", scanURLCmd.Flags(), scanFlagGroups},
-		{"scan-request", scanRequestCmd.Flags(), scanFlagGroups},
-		{"root (global)", rootCmd.PersistentFlags(), globalFlagGroups},
-	} {
-		if missing := ungroupedVisibleFlags(tc.flags, tc.groups); len(missing) > 0 {
-			t.Errorf("%s: visible flags missing from groups (would fall into \"Other:\"): %v", tc.name, missing)
+	for cmd, groups := range commandFlagGroups {
+		if missing := ungroupedVisibleFlags(cmd.LocalFlags(), groups); len(missing) > 0 {
+			t.Errorf("%s: visible flags missing from groups (would fall into \"Other:\"): %v", cmd.CommandPath(), missing)
 		}
+	}
+	if missing := ungroupedVisibleFlags(rootCmd.PersistentFlags(), globalFlagGroups); len(missing) > 0 {
+		t.Errorf("root (global): visible flags missing from groups (would fall into \"Other:\"): %v", missing)
 	}
 }
 

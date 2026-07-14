@@ -1095,8 +1095,9 @@ func CountFindingsByAgenticScans(ctx context.Context, db *DB, agenticScanUUIDs [
 	return result, nil
 }
 
-// CountFindingsByModule returns finding counts grouped by module_id.
-func CountFindingsByModule(ctx context.Context, db *DB, projectUUID string) (map[string]int64, error) {
+// CountFindingsByModule returns finding counts grouped by module_id, scoped to
+// one agentic-scan run when agenticScanUUID is non-empty (empty = all rows).
+func CountFindingsByModule(ctx context.Context, db *DB, agenticScanUUID string) (map[string]int64, error) {
 	var rows []struct {
 		ModuleID string `bun:"module_id"`
 		Count    int64  `bun:"count"`
@@ -1105,8 +1106,8 @@ func CountFindingsByModule(ctx context.Context, db *DB, projectUUID string) (map
 		Model((*Finding)(nil)).
 		ColumnExpr("module_id, COUNT(*) AS count").
 		Where("(record_kind IS NULL OR record_kind = '' OR record_kind = ?)", RecordKindFinding)
-	if projectUUID != "" {
-		q = q.Where("project_uuid = ?", projectUUID)
+	if agenticScanUUID != "" {
+		q = q.Where("agentic_scan_uuid = ?", agenticScanUUID)
 	}
 	if err := q.GroupExpr("module_id").Scan(ctx, &rows); err != nil {
 		return nil, err
@@ -1120,9 +1121,10 @@ func CountFindingsByModule(ctx context.Context, db *DB, projectUUID string) (map
 	return result, nil
 }
 
-// CountFindingsByURL returns finding counts grouped by URL. Findings with
-// an empty URL are skipped — they aren't endpoint-attributable anyway.
-func CountFindingsByURL(ctx context.Context, db *DB, projectUUID string) (map[string]int64, error) {
+// CountFindingsByURL returns finding counts grouped by URL, scoped to one
+// agentic-scan run when agenticScanUUID is non-empty (empty = all rows).
+// Findings with an empty URL are skipped — they aren't endpoint-attributable.
+func CountFindingsByURL(ctx context.Context, db *DB, agenticScanUUID string) (map[string]int64, error) {
 	var rows []struct {
 		URL   string `bun:"url"`
 		Count int64  `bun:"count"`
@@ -1132,8 +1134,8 @@ func CountFindingsByURL(ctx context.Context, db *DB, projectUUID string) (map[st
 		ColumnExpr("url, COUNT(*) AS count").
 		Where("url IS NOT NULL AND url != ''").
 		Where("(record_kind IS NULL OR record_kind = '' OR record_kind = ?)", RecordKindFinding)
-	if projectUUID != "" {
-		q = q.Where("project_uuid = ?", projectUUID)
+	if agenticScanUUID != "" {
+		q = q.Where("agentic_scan_uuid = ?", agenticScanUUID)
 	}
 	if err := q.GroupExpr("url").Scan(ctx, &rows); err != nil {
 		return nil, err

@@ -176,7 +176,7 @@ AI-driven scanning where agents autonomously plan, execute, and triage vulnerabi
 ```bash
 # Autopilot: autonomous AI-driven scanning (in-process olium engine)
 vigolium agent autopilot -t https://example.com
-vigolium agent autopilot -t https://example.com --source ./src --focus "auth bypass"
+vigolium agent autopilot -t https://example.com --source ./src --prompt "focus on auth bypass"
 vigolium agent autopilot -t https://example.com --diff main...feature/auth   # diff-focused
 vigolium agent autopilot -t https://example.com --intensity deep             # preset bundle
 
@@ -393,7 +393,7 @@ Agentic Scan (vigolium agent autopilot / swarm / query):
       --oauth-cred         OAuth/SA file path (openai-codex-oauth, google-vertex)
       --llm-api-key        API key (anthropic-api-key, openai-api-key)
       --vuln-type          Vulnerability type focus (sqli, xss, ssrf, ...)
-      --focus              Focus area for the agentic scan
+      --prompt             Free-text task guidance (same as the positional [prompt])
       --intensity          Preset bundle: quick, balanced, deep
       --diff               Diff range / PR URL / HEAD~N for change-focused scans
       --last-commits       Shorthand for --diff HEAD~N

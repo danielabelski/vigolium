@@ -66,19 +66,42 @@ Output (on success):
 
 **Usage:** `vigolium import <path>`
 
-Import scan data into the current project's database. Two input formats are supported (auto-detected by path type):
+Import scan data into the current project's database. The input is **auto-detected** from the path (`[path|gs://...] [more-paths...]`), and multiple sources can be imported in one run:
 
-- **Audit output folder** (directory): produced by `vigolium agent audit` (vigolium-audit or piolium leg) — contains `audit-state.json` and `findings-draft/`. Creates a new `agentic_scan` row plus all findings; severity breakdown is printed on completion.
-- **JSONL file** (regular file): each line is a JSON object wrapped in an envelope like `{"type": "http_record", "data": {...}}` or `{"type": "finding", "data": {...}}`. This matches the output of `vigolium export --format jsonl`. Records are saved via `SaveRecordsBatch` (batch size 500); findings are deduplicated on save.
+- **Audit output folder** (directory): produced by `vigolium agent audit` (vigolium-audit or piolium leg) — contains `audit-state.json` and `findings-draft/`. Creates a new `agentic_scan` row plus all findings.
+- **JSONL export** (file): each line is an envelope like `{"type": "http_record", "data": {...}}` or `{"type": "finding", "data": {...}}` — the output of `vigolium export --format jsonl`. Findings are deduplicated on save.
+- **Vigolium SQLite database** (`.sqlite`/`.sqlite3`/`.db`, detected by header): a **lossless, idempotent SQLite→SQLite merge** of the scan-result tables, deduped on natural keys (re-importing the same DB is a no-op). Merged rows keep their **original** `project_uuid`. Requires a SQLite destination.
+- **Archive** (`.tar.gz`/`.tgz`/`.zip`) containing any of the above.
+- **`gs://<project-uuid>/<key>` URL** to any of the above (downloaded, then imported).
 
 ```bash
 vigolium import /path/to/vigolium-results/         # audit output folder
 vigolium import scan-results.jsonl                 # JSONL export
-vigolium import /tmp/demo/juice-shop.jsonl
+vigolium import other-vigolium-scan.sqlite         # merge an external scan DB
+vigolium import bundle.tar.gz                      # archive (also .tgz, .zip)
+vigolium import gs://<project-uuid>/<key>          # cloud-storage object
+
+# Merge several scans into one destination DB (positional, or via --glob-db)
+vigolium import --db combined.sqlite scan-a.sqlite scan-b.sqlite
+vigolium import --db combined.sqlite --glob-db 'scans/*.sqlite'
 
 # After an interactive audit (`agent audit -i`), turn the on-disk results into a report:
 vigolium import ./src/vigolium-results --format html -o audit-report.html
 ```
+
+> To **read** a colleague's export without merging it into your DB, open it in place with `-S --db <file>.sqlite` or `--glob-db '<glob>'` on `finding` / `traffic` / `export` instead (see those commands).
+
+### import flags
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--format` | — | string | — | Also write a report after import: `html`, `report`, `pdf`, or `markdown` (`md`). Mirrors `vigolium export --format` |
+| `--output` | `-o` | string | — | Report output path or `gs://<project>/<key>` URL (required when `--format` is set; supports `{ts}`) |
+| `--glob-db` | — | string | — | Glob of local files to import alongside any positional paths (one format per run) |
+| `--burp-bridge-url` | — | string | `$VIGOLIUM_BURP_BRIDGE_URL` | Import live Burp Proxy history from this loopback bridge URL |
+| `--upload` / `--upload-key` | — | bool / string | — | Upload the import source to cloud storage after import (optional explicit key) |
+| `--severity` / `--search` | — | string | — | Filter the emitted report's findings |
+| `--report-title` / `--report-target` / `--report-duration` / `--report-generated-at` / `--report-url` | — | string | — | HTML report metadata |
 
 Notes:
 - Imported findings inherit the current project's UUID and default `finding_source = "import"` when the field is empty.
@@ -109,6 +132,7 @@ The legacy `run.log` filename is also resolved for older sessions. Agent audit c
 | `--full` | — | bool | `false` | Show the full log (shortcut for `--tail -1`) |
 | `--follow` | `-f` | bool | `false` | Follow log output as it is written (tail -f). Auto-enabled when the session is still running, unless `--follow=false` is set explicitly |
 | `--strip-ansi` | — | bool | `false` | Strip ANSI color codes from output |
+| `--raw` | — | bool | `false` | For agentic sessions, print the raw transcript JSONL verbatim instead of the rendered replay |
 | `--tui` / `--no-tui` | — | bool | — | Enable / force-disable interactive picker (affects `log ls` behaviour) |
 
 ### log ls
@@ -162,16 +186,16 @@ Manage database records. Parent command for `clean`, `export`, `list` (`ls`), `s
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--table` | string | — | Database table: http_records, findings, scans |
+| `--table` | string | — | Database table: http_records, findings, scans. **Deprecated for `db list`** — prefer the positional table name (`db ls findings`); still used by `db clean --table` |
 | `--search` | string | — | Quick search across record fields |
 
 ---
 
 ## db list
 
-**Usage:** `vigolium db list [flags]` (aliases: `ls`)
+**Usage:** `vigolium db list [table] [flags]` (aliases: `ls`)
 
-List database records with filtering, sorting, and display options.
+List database records with filtering, sorting, and display options. The target table is a **positional** argument (`db ls findings`), defaulting to `http_records`; the `--table` flag is a deprecated alias.
 
 ### Display flags
 
@@ -193,8 +217,7 @@ List database records with filtering, sorting, and display options.
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--columns` | []string | — | Columns to include |
-| `--exclude-columns` | []string | — | Columns to exclude |
+| `--columns` | []string | — | Columns to include (`db ls` has no `--exclude-columns`) |
 
 ### Filter flags
 
@@ -209,7 +232,8 @@ List database records with filtering, sorting, and display options.
 | `--min-risk` | int | `0` | Show only records with risk score at or above this value |
 | `--remark` | string | — | Filter records containing this text in remarks |
 | `--module-type` | string | — | Filter findings by module type (active, passive, nuclei, agent, source-tools, oast, extension) |
-| `--finding-source` | string | — | Filter findings by source (audit, spa, agent, oast, source-tools, extension) |
+| `--finding-source` | string | — | Filter findings by source (dynamic-assessment, spa, agent, oast, source-tools, extension) |
+| `--record-kind` | string | `finding` | Filter findings table by record kind (finding, candidate, observation; comma-separated) |
 | `--from` | string | — | Records after date (YYYY-MM-DD or RFC3339) |
 | `--to` | string | — | Records before date (YYYY-MM-DD or RFC3339) |
 | `--header` | string | — | Search within HTTP header names and values |
@@ -226,9 +250,9 @@ List database records with filtering, sorting, and display options.
 
 ```bash
 vigolium db ls
-vigolium db ls --table findings
-vigolium db ls --table scans
-vigolium db ls --table findings --severity critical,high
+vigolium db ls findings
+vigolium db ls scans
+vigolium db ls findings --severity critical,high
 vigolium db ls --host example.com --method POST --status 200
 vigolium db ls --list-tables
 vigolium db ls --list-columns --table findings
@@ -273,7 +297,8 @@ Export database records in various formats.
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--format` | `-f` | string | `jsonl` | Export format: jsonl, json, raw, csv, markdown, markdown-table, `fs` (flat traffic/finding tree, honors these filters) |
+| `--format` | `-f` | string | `jsonl` | Export format: jsonl, json, raw, csv, markdown, markdown-table, `bundle`, `fs` (flat traffic/finding tree, honors these filters) |
+| `--report-url` | — | string | — | URL for the "Raw Report URL" button in HTML reports |
 | `--output` | `-o` | string | stdout | Output file path |
 | `--host` | — | string | — | Filter by hostname pattern |
 | `--method` | — | []string | — | Filter by HTTP method |
@@ -367,10 +392,12 @@ Browse vulnerability findings with fuzzy search, filtering, raw display, and col
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--severity` | — | string | — | Filter by severity (comma-separated: critical,high,medium,low,info) |
+| `--severity` | — | string | — | Filter by severity: `critical,high,medium,low,suspect,info` (comma-separated; shorthands OK, e.g. `h,c`). Alias: `--sev` |
+| `--confidence` | — | string | — | Filter by confidence: `certain,firm,tentative` (comma-separated) |
+| `--record-kind` | — | string | `finding` | Filter by record kind: `finding`, `candidate`, `observation` (comma-separated) |
 | `--scan-uuid` | — | string | — | Filter by scan session ID |
 | `--module-type` | — | string | — | Filter by module type (active, passive, nuclei, agent, source-tools, oast, extension) |
-| `--finding-source` | — | string | — | Filter by finding source (audit, spa, agent, oast, source-tools, extension) |
+| `--finding-source` | — | string | — | Filter by finding source (dynamic-assessment, spa, agent, oast, source-tools, extension) |
 | `--id` | — | int | `0` | Filter by finding ID |
 | `--min-severity` | — | string | — | Show findings at/above this severity (`info`,`suspect`,`low`,`medium`,`high`,`critical`); ignored when `--severity` is set |
 | `--agentic-scan` | — | string | — | Findings from an agent run; one root UUID expands to the whole run tree (audit driver legs / swarm sub-runs) |
@@ -381,8 +408,12 @@ Browse vulnerability findings with fuzzy search, filtering, raw display, and col
 |------|------|---------|-------------|
 | `--raw` | bool | `false` | Show full raw HTTP request and response for each finding |
 | `--burp` | bool | `false` | Display in Burp Suite-style format (colored request/response) |
+| `--tree` | bool | `false` | Display as a host/path hierarchy tree (repeated titles collapse into one node) |
+| `--markdown` | bool | `false` | Render the matched findings as Markdown (evidence + request/response in fenced blocks) to stdout |
+| `--pick` | string | — | Select finding(s) by 1-based position after filters + sort (e.g. `2`, `1,3`, `2-4`) |
 | `--columns` | []string | — | Columns to show (comma-separated, e.g. ID,SEVERITY,MODULE) |
 | `--exclude-columns` | []string | — | Columns to hide (comma-separated) |
+| `--stateless` / `-S` + `--glob-db` | bool / string | — | Read from a `.jsonl`/`.sqlite` export (or a glob merged into one temp DB) with project scoping off |
 
 ### Pagination and sorting flags
 
@@ -395,7 +426,7 @@ Browse vulnerability findings with fuzzy search, filtering, raw display, and col
 
 ### Additional filter flags
 
-Also accepts: `--host`, `--method`, `--status`, `--path`, `--from`, `--to`, `--search`, `--header`, `--body`, `--source`.
+Also accepts: `--host`, `--method`, `--status`, `--path`, `--from`, `--to`, `--source`, plus `--search` (repeatable, AND-combined; searches module metadata, matched location, and the linked request/response), `--header`, `--body`, and their inverses `--exclude-search` (repeatable), `--exclude-header`, `--exclude-body`.
 
 ### Agent JSON output flags
 
@@ -424,13 +455,13 @@ vigolium finding
 vigolium finding --severity high,critical
 vigolium finding --search "sql injection"
 vigolium finding --module-type active
-vigolium finding --finding-source audit
+vigolium finding --finding-source dynamic-assessment
 vigolium finding --id 42
 vigolium finding --burp
 vigolium finding --raw
 vigolium finding --columns ID,SEVERITY,MODULE,MATCHED_AT,TAGS
 vigolium finding --sort severity --asc
-vigolium finding --watch 5s
+vigolium db ls findings --watch 5s   # --watch is on the db command, not finding
 vigolium finding -j --min-severity high --with-records
 vigolium finding -j --agentic-scan 550e8400-e29b-41d4-a716-446655440000
 ```
@@ -462,11 +493,16 @@ Top-level export command. Exports database tables and module registry as JSONL, 
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--format` | — | string | `jsonl` | Export format: jsonl, html, `fs` (flat traffic/finding tree → `<base>-traffic/` + `<base>-findings/`) |
-| `--output` | `-o` | string | — | Output file (required for html) |
+| `--format` | — | string | `jsonl` | Format: `html`, `report`, `pdf`, `jsonl`, `markdown` (alias `md`), `bundle` (alias `gz`), `fs` (flat request/response + finding tree) |
+| `--output` | `-o` | string | — | Output file or `gs://<project>/<key>` URL (required for html); supports `{ts}`/`{project-uuid}` placeholders |
 | `--only` | — | []string | all | Export only these tables (repeatable: http, findings, scans, modules, oast, source-repos, scopes) |
+| `--exclude` | — | []string | `[module]` | Exclude items by type (comma-separated, e.g. `module,scan`) |
 | `--omit-response` | — | bool | `false` | Omit raw HTTP request/response bytes from output (keeps metadata, smaller files) |
 | `--search` | — | string | — | Fuzzy search filter across URLs, paths, hostnames, methods, content types, and sources |
+| `--severity` | — | string | — | Filter findings by severity (comma-separated) |
+| `--scan-uuid` | — | []string | — | Agentic scan UUID(s) whose session dirs to include in `--format bundle` (repeatable) |
+| `--report-title` / `--report-target` / `--report-duration` / `--report-generated-at` / `--report-url` | — | string | — | HTML report metadata |
+| `--stateless` / `-S` + `--glob-db` | — | bool / string | — | Read from `--db` (a standalone `.sqlite`/`.jsonl` export, or a glob merged into one temp DB) |
 | `--limit` | — | int | `0` (unlimited) | Max records per table |
 
 ### Examples
@@ -547,9 +583,10 @@ Manage JavaScript extensions for custom scanning logic.
 
 ### ext ls flags
 
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--type` | string | `all` | Filter: all, active, passive, pre_hook, post_hook |
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--type` | — | string | `all` | Filter: all, active, passive, pre_hook, post_hook |
+| `--verbose` | `-v` | bool | `false` | Show long description / details |
 
 ### ext docs flags
 
@@ -559,9 +596,11 @@ Manage JavaScript extensions for custom scanning logic.
 
 ### ext lint flags
 
+`ext lint` takes a **positional** file or directory to validate (e.g. `ext lint custom-check.js`), or reads from stdin. There is no `--ext-file` on lint (that flag is `eval`-only).
+
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--ext-file` | string | — | Path to extension file to validate |
+| `--stdin` | bool | `false` | Read extension source from stdin |
 
 ### ext eval flags
 
@@ -698,7 +737,7 @@ vigolium config ls
 vigolium config ls scope           # filter by section
 vigolium config ls scanning_pace
 vigolium config ls server          # view server config
-vigolium config ls --force         # show sensitive values (unredacted)
+vigolium config ls --show-secrets  # reveal sensitive values (API keys, tokens) unredacted
 
 vigolium config set scanning_strategy.default_strategy deep
 vigolium config set scope.origin.mode strict
@@ -815,17 +854,20 @@ Manage projects for multi-tenancy scan data scoping.
 | Command | Aliases | Description |
 |---------|---------|-------------|
 | `project config` | — | View or update project configuration |
-| `project create` | — | Create a new project |
+| `project create <name>` | — | Create a new project (positional name; `--description` optional) |
 | `project list` | `ls` | List all projects |
-| `project use` | — | Switch to a project |
+| `project use <name-or-uuid>` | — | Switch to a project (`--name`/`--description` used only when auto-creating) |
+| `project delete <uuid>` | `rm`, `remove` | Delete a project and its data (`--keep-config` retains `~/.vigolium/projects/<uuid>`) |
 
 ### Examples
 
 ```bash
 vigolium project list
-vigolium project create --name my-project
+vigolium project create my-project                 # positional name (no --name flag on create)
+vigolium project create my-project --description "Q4 engagement"
 vigolium project use my-project
 vigolium project config
+vigolium project delete <project-uuid>             # aliases: rm, remove
 ```
 
 ---
@@ -984,20 +1026,14 @@ vigolium storage rm ugc/a.pdf ugc/b.pdf -F
 
 **Usage:** `vigolium strategy [flags]` (aliases: `st`, `phase`)
 
-Display scanning strategies and their phase configurations.
-
-### Subcommands
-
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| `strategy ls` | `list` | List available strategies |
+Display scanning strategies and their phase configurations. `strategy` takes **no subcommands** — running it (or its `st` / `phase` aliases) with no args prints the strategy table directly. There is no `strategy ls`.
 
 ### Examples
 
 ```bash
 vigolium strategy
-vigolium strategy ls
 vigolium phase              # alias for strategy
+vigolium st                 # alias for strategy
 ```
 
 ---

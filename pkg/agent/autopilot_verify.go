@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -78,6 +79,15 @@ func VerifyCandidates(ctx context.Context, cfg VerifyCandidatesConfig) (*VerifyC
 		return nil, nil
 	}
 	if cfg.Repo == nil || cfg.Provider == nil || cfg.AgenticScanUUID == "" {
+		return nil, nil
+	}
+
+	// An explicit user cancellation (Ctrl-C → context.Canceled) means "stop
+	// now" — don't spin up a fresh verify pass the operator is trying to abort.
+	// A deadline/budget expiry (DeadlineExceeded) is different: it's just the
+	// operator's wall-clock running out, after which post-halt cleanup should
+	// still run. Only the former short-circuits.
+	if errors.Is(context.Cause(ctx), context.Canceled) {
 		return nil, nil
 	}
 
@@ -195,7 +205,10 @@ func verifyOneCandidate(ctx context.Context, cfg VerifyCandidatesConfig, cand *d
 	sink := &verdictSink{}
 
 	tools := otool.NewRegistry()
-	otool.RegisterBuiltins(tools, nil)
+	// Strictly read-only: the verifier investigates evidence (read files, grep,
+	// fetch, replay, probe) but must never run bash or write/edit the source
+	// tree. RegisterReadOnlyBuiltins omits bash/write_file/edit_file.
+	otool.RegisterReadOnlyBuiltins(tools)
 	sessCtx := &vigtool.SessionsContext{Repo: cfg.Repo, ProjectUUID: cfg.ProjectUUID}
 	tools.Register(vigtool.NewQueryRecordsTool(sessCtx))
 	tools.Register(vigtool.NewInspectRecordTool(sessCtx))

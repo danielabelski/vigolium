@@ -356,11 +356,15 @@ func TestCountFindingsByModule(t *testing.T) {
 	repo := NewRepository(db)
 	ctx := context.Background()
 
-	saveFinding(t, repo, "sqli", SeverityHigh)
-	saveFinding(t, repo, "sqli", SeverityMedium)
-	saveFinding(t, repo, "xss", SeverityLow)
+	// CountFindingsByModule scopes to one agentic-scan run. Two findings
+	// belong to this run; a third (unattributed) must not be counted.
+	agUUID := uuid.NewString()
+	saveFindingFull(t, repo, &Finding{ModuleID: "sqli", ModuleName: "sqli", Severity: SeverityHigh, AgenticScanUUID: agUUID})
+	saveFindingFull(t, repo, &Finding{ModuleID: "sqli", ModuleName: "sqli", Severity: SeverityMedium, AgenticScanUUID: agUUID})
+	saveFindingFull(t, repo, &Finding{ModuleID: "xss", ModuleName: "xss", Severity: SeverityLow, AgenticScanUUID: agUUID})
+	saveFinding(t, repo, "sqli", SeverityHigh) // different run (no agentic_scan_uuid)
 
-	counts, err := CountFindingsByModule(ctx, db, DefaultProjectUUID)
+	counts, err := CountFindingsByModule(ctx, db, agUUID)
 	if err != nil {
 		t.Fatalf("CountFindingsByModule: %v", err)
 	}

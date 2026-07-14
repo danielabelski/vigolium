@@ -226,16 +226,195 @@ var scanFlagGroups = []flagGroup{
 	{"Stateless & Parallel", []string{"stateless", "split-by-host", "db-isolate", "parallel", "resume"}},
 }
 
-// localFlagUsages renders local flags. For the root command (which contains
-// global flags), it applies grouping. For subcommands, it renders a flat list.
-func localFlagUsages(fs *pflag.FlagSet) string {
-	// Detect root command by checking for well-known global flags
-	if fs.Lookup("verbose") != nil && fs.Lookup("target") != nil {
-		return renderGroupedFlags(fs, "Flags:", globalFlagGroups)
-	}
-	// Detect scan command by checking for a well-known scan-only flag
-	if fs.Lookup("spider") != nil {
-		return renderGroupedFlags(fs, "Flags:", scanFlagGroups)
+// --- Agent-subcommand flag groups ---
+//
+// Each table mirrors scanFlagGroups: it is the union of one agent subcommand's
+// visible local flags, rendered as titled sub-sections in that command's
+// "Flags:" block. A flag absent on the command is skipped by renderGroupedFlags,
+// so a shared table serves both an `agent <cmd>` and its top-level alias
+// (olium/audit). Every visible local flag must land in exactly one group — guarded
+// by TestFlagGroups_CoverAllVisibleFlags — so the trailing "Other:" section only
+// ever holds cobra's auto-added --help.
+
+// agentQueryFlagGroups categorizes `vigolium agent query`.
+var agentQueryFlagGroups = []flagGroup{
+	{"Prompt & Input", []string{"prompt", "stdin", "prompt-template", "prompt-file", "append", "instruction", "instruction-file"}},
+	{"Source Code", []string{"source", "files", "source-label"}},
+	{"AI Provider", []string{"provider", "model", "oauth-cred", "oauth-token", "llm-api-key", "gcp-project", "gcp-location", "base-url"}},
+	{"Execution", []string{"agent-label", "max-duration", "dry-run", "show-prompt"}},
+	{"Output", []string{"output", "verbose", "upload-results"}},
+}
+
+// agentAutopilotFlagGroups categorizes `vigolium agent autopilot`.
+var agentAutopilotFlagGroups = []flagGroup{
+	{"Target & Input", []string{"prompt", "target", "input", "record-uuid", "burp-bridge-url", "prior-context", "knowledge-base", "knowledge-base-raw", "plan-file"}},
+	{"Source & Audit", []string{"source", "files", "audit", "piolium", "diff", "last-commits"}},
+	{"AI Provider", []string{"provider", "model", "oauth-cred", "oauth-token", "llm-api-key"}},
+	{"Scan Behavior", []string{"intensity", "skill", "skill-tag", "no-skill-filter", "no-prescan", "no-preflight-discovery", "no-post-halt-verify", "post-halt-gap-threshold", "triage", "disable-guardrail", "max-duration"}},
+	{"Execution", []string{"dry-run", "show-prompt", "system-prompt", "system-prompt-file", "resume", "headed"}},
+	{"Output", []string{"verbose", "upload-results", "session-dir", "transcript", "db-isolate"}},
+}
+
+// agentSwarmFlagGroups categorizes `vigolium agent swarm`.
+var agentSwarmFlagGroups = []flagGroup{
+	{"Target & Input", []string{"prompt", "target", "input", "record-uuid", "all-records", "records-from", "plan-file"}},
+	{"Source & Audit", []string{"source", "files", "audit", "piolium", "diff", "last-commits", "code-audit", "source-analysis-only"}},
+	{"AI Provider", []string{"provider", "model", "oauth-cred", "oauth-token", "llm-api-key", "gcp-project", "gcp-location", "base-url"}},
+	{"Module & Phase Selection", []string{"modules", "vuln-type", "skill", "skill-tag", "no-skill-filter", "only", "skip", "start-from", "profile", "discover", "with-extensions"}},
+	{"Scan Behavior", []string{"intensity", "triage", "max-iterations", "max-duration", "disable-guardrail"}},
+	{"Authentication", []string{"browser-auth", "cookie", "header", "login-curl", "auth-config"}},
+	{"Concurrency & Probing", []string{"batch-concurrency", "max-master-retries", "sub-agent-concurrency", "max-plan-records", "master-batch-size", "probe-concurrency", "probe-timeout", "max-probe-body"}},
+	{"Execution", []string{"agent-label", "dry-run", "show-prompt", "headed"}},
+	{"Output", []string{"verbose", "upload-results", "db-isolate"}},
+}
+
+// agentOliumFlagGroups categorizes `vigolium agent olium` and its `vigolium
+// olium` alias (shared flag set via registerOliumFlags).
+var agentOliumFlagGroups = []flagGroup{
+	{"AI Provider", []string{"provider", "model", "oauth-cred", "oauth-token", "llm-api-key", "claude-bin", "bridge-bin", "gcp-project", "gcp-location", "base-url"}},
+	{"Prompt", []string{"system", "prompt", "stdin"}},
+}
+
+// agentAuditFlagGroups categorizes `vigolium agent audit` and its `vigolium
+// audit` alias (shared flag set via registerAuditFlags).
+var agentAuditFlagGroups = []flagGroup{
+	{"Source & Driver", []string{"source", "driver", "commit-depth"}},
+	{"Mode & Intensity", []string{"intensity", "mode", "modes", "list-modes"}},
+	{"Agent (audit leg)", []string{"provider", "agent"}},
+	{"Piolium Leg", []string{"pi-provider", "pi-model", "plm-scan-limit", "plm-scan-since", "plm-phase-retries", "plm-command-retries", "plm-longshot-limit", "plm-longshot-timeout", "plm-longshot-langs"}},
+	{"Authentication (BYOK)", []string{"api-key", "oauth-token", "oauth-cred-file"}},
+	{"Preflight", []string{"no-preflight", "preflight-timeout"}},
+	{"Execution", []string{"interactive", "no-stream", "show-thinking", "no-dedup", "keep-raw", "clean-raw"}},
+	{"Output", []string{"stateless", "output", "output-dir", "upload-results"}},
+}
+
+// agentTriageFlagGroups categorizes `vigolium agent triage`.
+var agentTriageFlagGroups = []flagGroup{
+	{"AI Provider", []string{"provider", "model", "oauth-cred", "oauth-token", "llm-api-key", "gcp-project", "gcp-location", "base-url"}},
+	{"Execution", []string{"max-duration", "dry-run", "show-prompt", "verbose"}},
+}
+
+// agentSessionFlagGroups categorizes `vigolium agent session`.
+var agentSessionFlagGroups = []flagGroup{
+	{"Filter", []string{"mode", "limit", "offset"}},
+	{"Output", []string{"tail", "full", "tui", "no-tui"}},
+}
+
+// --- Data-command flag groups ---
+//
+// These follow the same union-table pattern as scanFlagGroups: each table is the
+// union of one (or a family of) command's visible local flags, and TestFlagGroups_
+// CoverAllVisibleFlags guards that every visible flag lands in a group. Global
+// flags (--json, --db, …) render in the separate "Global Flags:" block, so they
+// are not listed here even when a description mentions them.
+
+// listQueryFlagGroups categorizes the record/finding browse commands — `vigolium
+// finding`, `vigolium traffic`, and `vigolium db ls`. It is the union of their
+// local flags; a flag absent on a given command is skipped, so one table serves
+// all three (e.g. the Replay group only materializes for traffic, the schema
+// flags only for db ls).
+var listQueryFlagGroups = []flagGroup{
+	{"Filter", []string{"host", "method", "status", "path", "source", "scan-uuid", "module-type", "finding-source", "record-kind", "severity", "min-severity", "confidence", "agentic-scan", "id", "min-risk", "remark"}},
+	{"Search", []string{"search", "header", "body", "exclude-search", "exclude-header", "exclude-body"}},
+	{"Date Range", []string{"from", "to"}},
+	{"Display", []string{"tree", "raw", "burp", "markdown", "columns", "exclude-columns", "tui", "no-tui"}},
+	{"Output", []string{"fields", "compact", "full-body", "with-records"}},
+	{"Pagination & Sort", []string{"limit", "offset", "sort", "asc", "pick", "all"}},
+	{"Data Source", []string{"stateless", "glob-db", "table", "list-tables", "list-columns"}},
+	{"Replay", []string{"replay", "concurrency", "with-browser", "burp-bridge-url", "save-to-vigolium-db", "save-to-burp", "in-replace", "timeout"}},
+}
+
+// replayFlagGroups categorizes `vigolium replay`.
+var replayFlagGroups = []flagGroup{
+	{"Input & Selection", []string{"input", "input-file", "raw-request", "raw-request-file", "record-uuid", "finding-id", "target"}},
+	{"Bulk Filter", []string{"host", "method", "status", "path", "source", "search", "body", "limit", "all"}},
+	{"Mutation", []string{"mutate"}},
+	{"Request Options", []string{"header", "auth-session", "session-id", "no-cookies", "no-redirects", "timeout", "concurrency"}},
+	{"Output", []string{"output", "pretty", "in-replace", "save-to-burp", "burp-bridge-url", "stateless"}},
+}
+
+// ingestFlagGroups categorizes `vigolium ingest`.
+var ingestFlagGroups = []flagGroup{
+	{"Target & Input", []string{"target", "target-file", "input", "input-mode", "input-read-timeout"}},
+	{"Spec Options", []string{"spec-url", "spec-header", "spec-var", "spec-default"}},
+	{"Module Selection", []string{"modules", "module-tag", "no-tech-filter"}},
+	{"Ingestion", []string{"server", "scan-on-receive", "full-native-scan-on-receive", "disable-fetch-response", "scope-origin", "intensity"}},
+	{"Speed Control", []string{"timeout", "concurrency", "rate-limit", "max-per-host", "max-host-error", "max-findings-per-module", "no-clustering", "no-waf-pacing"}},
+}
+
+// serverFlagGroups categorizes `vigolium server`.
+var serverFlagGroups = []flagGroup{
+	{"Network", []string{"host", "service-port", "ingest-proxy-port", "timeout"}},
+	{"Ingestion", []string{"scan-on-receive", "full-native-scan-on-receive", "passive-only", "mem-buffer", "catchup-threads", "disable-catchup", "disable-warm-session"}},
+	{"Proxy & Bridge", []string{"burp-bridge-url", "proxy-insecure", "proxy-mitm", "export-ca"}},
+	{"Access Control", []string{"no-auth", "alternative-ingest-key", "view-only", "demo-only", "no-agent", "no-swagger"}},
+	{"Output", []string{"output", "mirror-fs"}},
+}
+
+// exportFlagGroups categorizes `vigolium export`.
+var exportFlagGroups = []flagGroup{
+	{"Output Format", []string{"format", "output", "omit-response"}},
+	{"Filter", []string{"search", "exclude", "severity", "scan-uuid", "only", "limit"}},
+	{"Report Metadata", []string{"report-title", "report-target", "report-duration", "report-generated-at", "report-url"}},
+	{"Data Source", []string{"db", "stateless", "glob-db"}},
+}
+
+// importFlagGroups categorizes `vigolium import`.
+var importFlagGroups = []flagGroup{
+	{"Output Format", []string{"format", "output"}},
+	{"Filter", []string{"search", "severity"}},
+	{"Report Metadata", []string{"report-title", "report-target", "report-duration", "report-generated-at", "report-url"}},
+	{"Source & Upload", []string{"glob-db", "upload", "upload-key", "burp-bridge-url"}},
+}
+
+// commandFlagGroups maps a command to the flag-group table used to render its
+// local "Flags:" block. Commands absent from the map render a flat, ungrouped
+// list (the default for simple read/list commands). Keying by command pointer
+// (rather than sniffing a signature flag out of the flag set) means help
+// rendering can't misattribute a command whose local flags overlap another's;
+// the shared tables (olium/audit and their top-level aliases, the scan and
+// list-query families) let several commands point at one table.
+//
+// This is a package-level literal: Go initializes it after the command vars and
+// group-table vars it references (dependency order), and it only stores pointers,
+// so the commands' flags need not be registered yet — they're resolved to flag
+// sets lazily at render time. TestFlagGroups_CoverAllVisibleFlags iterates this
+// map, so it also guards the wiring itself, not just the tables.
+var commandFlagGroups = map[*cobra.Command][]flagGroup{
+	scanCmd:        scanFlagGroups,
+	runCmd:         scanFlagGroups,
+	scanURLCmd:     scanFlagGroups,
+	scanRequestCmd: scanFlagGroups,
+
+	agentQueryCmd:     agentQueryFlagGroups,
+	agentAutopilotCmd: agentAutopilotFlagGroups,
+	agentSwarmCmd:     agentSwarmFlagGroups,
+	agentOliumCmd:     agentOliumFlagGroups,
+	oliumCmd:          agentOliumFlagGroups,
+	agentAuditCmd:     agentAuditFlagGroups,
+	auditCmd:          agentAuditFlagGroups,
+	agentTriageCmd:    agentTriageFlagGroups,
+	agentSessionCmd:   agentSessionFlagGroups,
+
+	findingCmd: listQueryFlagGroups,
+	trafficCmd: listQueryFlagGroups,
+	dbListCmd:  listQueryFlagGroups,
+	replayCmd:  replayFlagGroups,
+	ingestCmd:  ingestFlagGroups,
+	serverCmd:  serverFlagGroups,
+	exportCmd:  exportFlagGroups,
+	importCmd:  importFlagGroups,
+}
+
+// localFlagUsages renders a command's local flags. Commands registered in
+// commandFlagGroups (the native-scan family and the agent subcommands) get their
+// flags grouped into titled sub-sections; every other command renders a flat
+// list. Keying off the command itself avoids the old flag-set sniffing, which
+// mis-grouped agent subcommands that happen to register a local target/verbose.
+func localFlagUsages(cmd *cobra.Command) string {
+	fs := cmd.LocalFlags()
+	if groups, ok := commandFlagGroups[cmd]; ok {
+		return renderGroupedFlags(fs, "Flags:", groups)
 	}
 	return terminal.BoldYellow("Flags:") + "\n" + strings.TrimRight(fs.FlagUsages(), "\n")
 }
@@ -295,7 +474,7 @@ var coloredUsageTemplate = `{{if .HasAvailableInheritedFlags}}{{.InheritedFlags 
 {{ styleHeading "Additional Commands:" }}{{range $cmds}}{{if (and (eq .GroupID "") (or .IsAvailableCommand (eq .Name "help")))}}
   {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{end}}{{end}}{{if .HasAvailableLocalFlags}}
 
-{{.LocalFlags | localFlagUsages}}{{end}}{{with (or .Long .Short)}}
+{{. | localFlagUsages}}{{end}}{{with (or .Long .Short)}}
 
 {{ styleHeading "Description:" }}
 {{. | trimTrailingWhitespaces}}{{end}}{{if .HasExample}}

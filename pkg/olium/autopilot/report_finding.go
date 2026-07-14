@@ -25,9 +25,10 @@ const (
 
 // FindingSink is the subset of the database repository the report_finding
 // tool needs. Keeping this narrow lets us swap in a test double and keeps
-// the tool's import surface tight.
+// the tool's import surface tight. SaveFindingReported reports whether a new
+// row was inserted (vs a dedup) so the tool only counts distinct findings.
 type FindingSink interface {
-	SaveFindingDirect(ctx context.Context, finding *database.Finding) error
+	SaveFindingReported(ctx context.Context, finding *database.Finding) (inserted bool, err error)
 }
 
 // ReportFindingContext pins the scope under which findings are recorded.
@@ -246,10 +247,25 @@ func (c *ReportFindingContext) PersistFromArgs(ctx context.Context, args map[str
 		FoundAt:         time.Now().UTC(),
 	}
 
-	if err := c.Repo.SaveFindingDirect(ctx, finding); err != nil {
+	inserted, err := c.Repo.SaveFindingReported(ctx, finding)
+	if err != nil {
 		return PersistResult{
 			Message: fmt.Sprintf("failed to save finding: %v", err),
 			IsError: true,
+		}
+	}
+	if !inserted {
+		// Deduplicated against an existing finding. Don't bump the counter — it
+		// tracks distinct findings and feeds the soft-warn / hard-cap gates.
+		n := c.Count.Load()
+		return PersistResult{
+			Message: fmt.Sprintf("Finding deduplicated (hash=%s) — already recorded; not re-counted", finding.FindingHash[:12]),
+			Count:   n,
+			Details: map[string]any{
+				"deduplicated": true,
+				"severity":     severity,
+				"title":        title,
+			},
 		}
 	}
 

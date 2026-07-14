@@ -19,14 +19,14 @@ func newFakeCandidateSink() *fakeCandidateSink {
 	return &fakeCandidateSink{seen: map[string]bool{}}
 }
 
-func (f *fakeCandidateSink) SaveCandidate(_ context.Context, cand *database.AgentFindingCandidate) error {
+func (f *fakeCandidateSink) SaveCandidate(_ context.Context, cand *database.AgentFindingCandidate) (bool, error) {
 	key := cand.AgenticScanUUID + "\x00" + cand.DedupHash
 	if f.seen[key] {
-		return nil // dedup: mirror ON CONFLICT DO NOTHING
+		return false, nil // dedup: mirror ON CONFLICT DO NOTHING
 	}
 	f.seen[key] = true
 	f.saved = append(f.saved, cand)
-	return nil
+	return true, nil
 }
 
 func TestProposeCandidatePersistsAndDedups(t *testing.T) {
@@ -79,13 +79,16 @@ func TestProposeCandidatePersistsAndDedups(t *testing.T) {
 		t.Errorf("verification notes not folded into description: %q", got.Description)
 	}
 
-	// Re-propose the identical candidate — deduped, count still increments (the
-	// tool tracks proposal attempts) but no second row is saved.
+	// Re-propose the identical candidate — deduped: no second row is saved and
+	// the distinct-candidate counter must NOT increment.
 	if _, err := tool.Execute(context.Background(), args, nil); err != nil {
 		t.Fatalf("Execute (dup): %v", err)
 	}
 	if len(sink.saved) != 1 {
 		t.Errorf("after dup: saved = %d, want 1", len(sink.saved))
+	}
+	if pctx.Count.Load() != 1 {
+		t.Errorf("after dup: count = %d, want 1 (dedups must not be counted)", pctx.Count.Load())
 	}
 
 	// A genuinely different candidate lands.

@@ -62,9 +62,9 @@ type SwarmConfig struct {
 	ShowPrompt         bool   // print rendered prompts to stderr before executing
 	SourceAnalysisOnly bool   // run only source analysis phase and exit
 	CodeAudit          bool   // enable AI security code audit phase (--code-audit)
-	Browser            bool   // enable agent-browser integration (--browser)
-	Auth               bool   // run browser-based auth phase before discovery (--browser-auth, requires Browser)
-	Credentials        string // optional credentials for browser auth phase (--credentials)
+	Browser            bool   // enable agent-browser integration (always on for swarm; no --browser flag)
+	Auth               bool   // run browser-based auth phase before discovery (--browser-auth)
+	Credentials        string // optional credentials for the browser auth phase (extracted from the prompt)
 	CredentialSets     []agenttypes.IntentCredentialSet
 	AuthRequired       bool
 	RequiresBrowser    bool
@@ -293,6 +293,14 @@ func (s *SwarmRunner) Run(ctx context.Context, cfg SwarmConfig) (*SwarmResult, e
 	agenticScanUUID := cfg.AgenticScanUUID
 	if agenticScanUUID == "" {
 		agenticScanUUID = uuid.New().String()
+	}
+	// Ensure a run-unique native scan_uuid. Scan callbacks receive it via
+	// ScanRequest.ScanUUID and tag the native scan's findings with it, so the
+	// pipeline can stamp agentic_scan_uuid onto exactly this run's findings and
+	// scope its finding counts to the run rather than the whole project. Empty
+	// slips through when a caller (e.g. the server) didn't pin one.
+	if cfg.ScanUUID == "" {
+		cfg.ScanUUID = uuid.New().String()
 	}
 	agenticScan := &database.AgenticScan{
 		UUID:        agenticScanUUID,

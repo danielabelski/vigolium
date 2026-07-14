@@ -44,6 +44,13 @@ type swarmPipelineState struct {
 	batchProv        *BatchProvenance
 	stop             bool
 
+	// sourceAnalysisOK is set when the source-analysis phase ran and returned a
+	// usable result — i.e. the tech stack was actually inferred from source.
+	// reconSwarmStep only suppresses the live recon sweep when this is true; a
+	// failed (or absent) source analysis falls back to live recon rather than
+	// leaving the plan agent with no stack context at all.
+	sourceAnalysisOK bool
+
 	// techStack is the reconnaissance sweep result for the target host,
 	// populated by reconSwarmStep when running in black-box mode (no --source).
 	// nil when source-analysis ran, when the user passed --skip recon, or when
@@ -139,6 +146,42 @@ func (s *SwarmRunner) newSwarmPipelineState(ctx context.Context, cfg SwarmConfig
 		checkpoint:   checkpoint,
 		phaseTimings: make(map[string]time.Duration),
 	}, cleanup, nil
+}
+
+// attributeRunFindings stamps agentic_scan_uuid onto every finding this run's
+// native scan produced (matched by the run-unique scan_uuid), so downstream
+// finding counts — and the `finding --agentic-scan` view — can scope to the
+// run instead of the whole project. Best-effort and idempotent: a failure is
+// logged and the caller's count simply reflects whatever is currently stamped.
+func (ps *swarmPipelineState) attributeRunFindings(ctx context.Context) {
+	if ps.runner.repo == nil {
+		return
+	}
+	if err := ps.runner.repo.AttributeScanToAgenticScan(ctx, ps.cfg.ScanUUID, ps.agenticScan.UUID); err != nil {
+		zap.L().Debug("Failed to attribute scan findings to agentic scan", zap.Error(err))
+	}
+}
+
+// runFindingCounts counts the findings attributed to this run, returning the
+// total and the per-severity breakdown. It does NOT stamp — callers that just
+// produced new findings (scan, finalize) call attributeRunFindings first;
+// read-only gates (replan) call this directly. Returns zero values when there's
+// no repo or the query fails.
+func (ps *swarmPipelineState) runFindingCounts(ctx context.Context) (int, map[string]int) {
+	if ps.runner.repo == nil {
+		return 0, nil
+	}
+	counts, err := database.CountFindingsByAgenticScan(ctx, ps.runner.repo.DB(), ps.agenticScan.UUID)
+	if err != nil {
+		return 0, nil
+	}
+	total := 0
+	sev := make(map[string]int, len(counts))
+	for s, c := range counts {
+		total += int(c)
+		sev[s] = int(c)
+	}
+	return total, sev
 }
 
 func (ps *swarmPipelineState) startPhase(ctx context.Context, phase string, emit bool) time.Time {
@@ -292,6 +335,9 @@ func (sourceAnalysisSwarmStep) Run(ctx context.Context, ps *swarmPipelineState) 
 		zap.L().Warn("Source analysis failed, continuing with input records only", zap.Error(saErr))
 		ps.runner.addWarning(ps.result, "source analysis failed: %v", saErr)
 	} else if saResult != nil {
+		// Source analysis produced a usable result — the stack was inferred from
+		// source, so the live recon sweep can be skipped downstream.
+		ps.sourceAnalysisOK = true
 		printPhaseLine("source-analysis", fmt.Sprintf("result: %d http_records, %d extensions  has_session_config=%v",
 			len(saResult.HTTPRecords), len(saResult.Extensions), saResult.SessionConfig != nil))
 
@@ -515,12 +561,18 @@ func (reconSwarmStep) Run(ctx context.Context, ps *swarmPipelineState) error {
 		return nil
 	}
 	if ps.cfg.SourcePath != "" {
-		// Source-analysis already inferred the stack; an extra recon sweep
-		// would just double-spend the prompt budget. Logged at debug so
-		// users running with --source aren't surprised by missing recon
-		// console output.
-		zap.L().Debug("Skipping recon phase (source path provided)")
-		return nil
+		if ps.sourceAnalysisOK {
+			// Source-analysis already inferred the stack; an extra recon sweep
+			// would just double-spend the prompt budget. Logged at debug so
+			// users running with --source aren't surprised by missing recon
+			// console output.
+			zap.L().Debug("Skipping recon phase (source path provided, source analysis succeeded)")
+			return nil
+		}
+		// --source was set but source analysis didn't produce a usable result
+		// (failed, or the deployment differs from the source). Fall back to a
+		// live recon sweep so the plan agent still gets stack context.
+		zap.L().Info("Running recon phase despite --source: source analysis produced no usable stack context")
 	}
 	if phaseCompleted(ps.checkpoint, SwarmPhaseRecon) {
 		return nil
@@ -759,7 +811,7 @@ func (scanSwarmStep) Run(ctx context.Context, ps *swarmPipelineState) error {
 		return nil
 	}
 	started := ps.startPhase(ctx, SwarmPhaseScan, true)
-	scanReq := ScanRequest{ExtensionDir: ps.extensionDir}
+	scanReq := ScanRequest{ExtensionDir: ps.extensionDir, ScanUUID: ps.cfg.ScanUUID}
 	if ps.plan != nil {
 		scanReq.ModuleTags = ps.plan.ModuleTags
 		scanReq.ModuleIDs = ps.plan.ModuleIDs
@@ -773,15 +825,9 @@ func (scanSwarmStep) Run(ctx context.Context, ps *swarmPipelineState) error {
 	if ps.runner.engine != nil {
 		ps.runner.engine.InvalidateContextCache()
 	}
-	scanFindings := 0
-	if ps.runner.repo != nil {
-		counts, err := database.CountFindingsBySeverity(ctx, ps.runner.repo.DB(), ps.cfg.ProjectUUID)
-		if err == nil {
-			for _, c := range counts {
-				scanFindings += int(c)
-			}
-		}
-	}
+	// Stamp this run's freshly-produced findings, then count them run-scoped.
+	ps.attributeRunFindings(ctx)
+	scanFindings, _ := ps.runFindingCounts(ctx)
 	summary := fmt.Sprintf("completed — %d findings in %s", scanFindings, ps.phaseTimings[SwarmPhaseScan].Round(time.Second))
 	if ps.extensionDir != "" {
 		summary += " (custom extensions loaded)"
@@ -808,15 +854,10 @@ func (replanOnEmptySwarmStep) Run(ctx context.Context, ps *swarmPipelineState) e
 	if PhaseSkipped(ps.cfg.SkipPhases, SwarmPhaseTriage) {
 		return nil
 	}
-	counts, err := database.CountFindingsBySeverity(ctx, ps.runner.repo.DB(), ps.cfg.ProjectUUID)
-	if err != nil {
-		return nil
-	}
-	totalFindings := 0
-	for _, c := range counts {
-		totalFindings += int(c)
-	}
-	if totalFindings > 0 {
+	// Scope to this run, not the project: a project with prior findings must
+	// not suppress the supplemental pass when THIS scan found nothing. The scan
+	// step already stamped, so count-only here (no redundant re-stamp).
+	if total, _ := ps.runFindingCounts(ctx); total > 0 {
 		return nil
 	}
 	if !replanWorthwhile(ps.techStack, ps.records) {
@@ -845,7 +886,7 @@ func (replanOnEmptySwarmStep) Run(ctx context.Context, ps *swarmPipelineState) e
 		writeSessionArtifact(filepath.Join(ps.sessionDir, "master-replan-output.md"), []byte(suppRaw))
 	}
 
-	scanReq := ScanRequest{ExtensionDir: ps.extensionDir, ModuleTags: ps.plan.ModuleTags, ModuleIDs: ps.plan.ModuleIDs}
+	scanReq := ScanRequest{ExtensionDir: ps.extensionDir, ModuleTags: ps.plan.ModuleTags, ModuleIDs: ps.plan.ModuleIDs, ScanUUID: ps.cfg.ScanUUID}
 	if err := ps.cfg.ScanFunc(ctx, scanReq); err != nil {
 		zap.L().Warn("replanOnEmpty: rescan failed", zap.Error(err))
 		ps.runner.addWarning(ps.result, "replan-on-empty rescan failed: %v", err)
@@ -907,21 +948,16 @@ type finalizeSwarmStep struct{}
 
 func (finalizeSwarmStep) Run(ctx context.Context, ps *swarmPipelineState) error {
 	if ps.runner.repo != nil {
-		counts, err := database.CountFindingsBySeverity(ctx, ps.runner.repo.DB(), ps.cfg.ProjectUUID)
-		if err == nil {
-			total := 0
-			sevCounts := make(map[string]int, len(counts))
-			for sev, c := range counts {
-				total += int(c)
-				sevCounts[sev] = int(c)
-			}
-			ps.result.TotalFindings = total
-			ps.result.SeverityCounts = sevCounts
-		}
+		// Stamp any late (triage-rescan) findings before the final tally, then
+		// count run-scoped so totals reflect THIS run, not the whole project.
+		ps.attributeRunFindings(ctx)
+		total, sevCounts := ps.runFindingCounts(ctx)
+		ps.result.TotalFindings = total
+		ps.result.SeverityCounts = sevCounts
 	}
 	ps.result.PhaseTimings = ps.phaseTimings
 	if ps.sessionDir != "" {
-		byModule, byEndpoint := findingAggregatesFromDB(ctx, ps.runner.repo, ps.cfg.ProjectUUID)
+		byModule, byEndpoint := findingAggregatesFromDB(ctx, ps.runner.repo, ps.agenticScan.UUID)
 		report := BuildSwarmCoverageReport(CoverageReportInputs{
 			AgenticScanUUID:    ps.agenticScan.UUID,
 			TargetURL:          ps.targetURL,
@@ -1108,7 +1144,7 @@ func printPlanPhaseSummary(cfg SwarmConfig, plan *SwarmPlan, elapsed time.Durati
 		fmt.Fprintf(os.Stderr, "  %s pass %s to force the extension agent to run anyway\n",
 			terminal.TipPrefix(), terminal.HiCyan("--with-extensions"))
 		fmt.Fprintf(os.Stderr, "  %s pass %s to steer the planner toward custom checks\n",
-			terminal.TipPrefix(), terminal.HiCyan("--instruction \"...\""))
+			terminal.TipPrefix(), terminal.HiCyan("--prompt \"...\""))
 
 	case phase2Errored:
 		// Case C: requested but generation failed.

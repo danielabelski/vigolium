@@ -225,11 +225,13 @@ func TestFindingCountAggregations(t *testing.T) {
 		t.Errorf("CountFindingsByAgenticScan(empty) = %v, %v", m, err)
 	}
 
-	byURL, err := CountFindingsByURL(ctx, db, DefaultProjectUUID)
+	// CountFindingsByURL is run-scoped: only the two findings attributed to
+	// agUUID (both on /a) are counted; the unattributed /b finding is excluded.
+	byURL, err := CountFindingsByURL(ctx, db, agUUID)
 	if err != nil {
 		t.Fatalf("CountFindingsByURL: %v", err)
 	}
-	if byURL["https://x.example.com/a"] != 2 || byURL["https://x.example.com/b"] != 1 {
+	if byURL["https://x.example.com/a"] != 2 || byURL["https://x.example.com/b"] != 0 {
 		t.Errorf("byURL = %v", byURL)
 	}
 

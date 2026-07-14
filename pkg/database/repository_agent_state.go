@@ -118,7 +118,7 @@ func (r *Repository) ListCandidates(ctx context.Context, agenticScanUUID string,
 	q := r.db.NewSelect().Model(&cands).
 		Where("agentic_scan_uuid = ?", agenticScanUUID)
 	if len(statuses) > 0 {
-		q = q.Where("status IN (?)", bun.In(statuses))
+		q = q.Where("status IN (?)", bun.List(statuses))
 	}
 	if err := q.OrderExpr("id ASC").Scan(ctx); err != nil {
 		return nil, fmt.Errorf("ListCandidates: %w", err)

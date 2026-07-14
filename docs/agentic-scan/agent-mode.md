@@ -38,13 +38,13 @@ The parent `vigolium agent` command itself only supports `--list-templates` and 
 - **File:** `pkg/cli/agent_autopilot.go`
 - **Use for:** pentest-style engagements where you want the agent to be creative and decide what to do.
 - **How it works:** one long-running LLM session with full CLI tool access until the agent calls `halt_scan` or hits limits.
-- **Key flags:** `-t/--target`, `--input` (curl/raw HTTP/Burp XML/URL/stdin), `--plan-file`, `--source` (auto-runs audit), `--focus`, `--max-commands`, `--max-duration`, `--intensity {quick|balanced|deep}`, `--audit` (`lite|balanced|deep|off`), `--browser`, `--credentials`, `--diff`, `--last-commits`.
+- **Key flags:** `[prompt]`/`--prompt` (free-text task guidance — credentials and auth intent are extracted from it; the browser is always on), `-t/--target`, `--input` (curl/raw HTTP/Burp XML/URL/stdin), `--burp-bridge-url` (pull live Burp Proxy history into the project DB before the run, so the operator mines it + prior findings), `--prior-context {auto|summary|off}` (front-load a bounded summary of the project's existing traffic + findings), `--plan-file`, `--source` (auto-runs audit), `--max-commands`, `--max-duration`, `--intensity {quick|balanced|deep}`, `--audit` (`lite|balanced|deep|off`), `--diff`, `--last-commits`.
 
 ### `swarm` — AI-guided multi-phase scan
 - **File:** `pkg/cli/agent_swarm.go`
 - **Use for:** target-specific scanning when you want structure (planning → native scan → triage), source-aware route discovery, or verification loops.
 - **How it works:** 10-phase pipeline — normalize → auth (opt) → source-analysis (opt) → code-audit (opt) → discover (opt) → plan (AI) → extension (opt) → native scan → triage (opt) → rescan (opt).
-- **Key flags:** `-t/--target` (required with `--source`), `--input`, `--plan-file`, `--record-uuid`, `--source`, `--discover`, `--code-audit`, `--triage`, `--max-iterations`, `-m/--modules`, `--vuln-type`, `--focus`, `--audit {lite|balanced|deep|off}`, `--intensity`, `--only`/`--skip`/`--start-from`.
+- **Key flags:** `[prompt]`/`--prompt` (free-text task guidance), `-t/--target` (required with `--source`), `--input`, `--plan-file`, `--record-uuid`, `--source`, `--discover`, `--code-audit`, `--triage`, `--max-iterations`, `-m/--modules`, `--vuln-type`, `--audit {lite|balanced|deep|off}`, `--intensity`, `--only`/`--skip`/`--start-from`.
 
 ### Plan file (`--plan-file`)
 Both `autopilot` and `swarm` accept `--plan-file <path>`: a single file that mixes free-text guidance and raw HTTP request(s) — exactly what you'd paste into a terminal. No frontmatter or schema.
@@ -54,7 +54,7 @@ Both `autopilot` and `swarm` accept `--plan-file <path>`: a single file that mix
 - `autopilot` is single-seed: the first request is the live seed; any extra blocks are folded into the instruction as labelled context.
 - `swarm` is multi-seed: every request block is fed as an independent seed input.
 - A file with no request line is treated as instruction-only (then supply `--target`/`--source`).
-- `--plan-file` owns both the instruction and the seed input, so it **cannot** be combined with `--input`, `--instruction`, or `--instruction-file` (autopilot also rejects `--record-uuid`).
+- `--plan-file` owns both the instruction and the seed input, so it **cannot** be combined with `--input` or a prompt (`--prompt` / positional `[prompt]`) (autopilot also rejects `--record-uuid`).
 
 ```
 Here are the order IDs 0254685 and 0254774 — focus on IDOR.

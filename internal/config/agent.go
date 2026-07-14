@@ -70,7 +70,7 @@ type OliumConfig struct {
 	Temperature         float64              `yaml:"temperature"`           // default 0.0
 	MaxTurns            int                  `yaml:"max_turns"`             // default 32. Applies to short non-autopilot engine uses (swarm phases, source analysis, query). Autopilot ignores this and uses its own pkg/olium/autopilot.DefaultAutopilotMaxTurns (200); override autopilot via --max-commands or the API MaxCommands field.
 	CacheSize           int                  `yaml:"cache_size"`            // LRU entries; default 1024, 0 disables
-	MaxConcurrent       int                  `yaml:"max_concurrent"`        // global cap on simultaneous in-flight provider calls; default 4, 0 disables (unbounded)
+	MaxConcurrent       int                  `yaml:"max_concurrent"`        // global cap on simultaneous in-flight provider calls; default 4 (0/unset), negative disables the cap (unbounded)
 	CallTimeoutSec      int                  `yaml:"call_timeout_sec"`      // per-call deadline in seconds (default 600 = 10m). Negative = inherit only the parent ctx (no enforced timeout).
 	AlwaysOnSkills      []string             `yaml:"always_on_skills"`      // skills always loaded regardless of planner selection (autopilot/swarm); empty = built-in default [triage-finding, write-jsext]
 
@@ -393,9 +393,11 @@ func (c *OliumConfig) EffectiveCallTimeout() time.Duration {
 	return 10 * time.Minute
 }
 
-// EffectiveMaxConcurrent returns MaxConcurrent or the default (4). Use 0 in
-// config to explicitly disable the cap (unbounded parallelism — only
-// sensible if the upstream provider has no rate limit, which is rare).
+// EffectiveMaxConcurrent returns the provider-call concurrency cap. A positive
+// value is used as-is; 0 (unset) resolves to the default of 4; a NEGATIVE value
+// disables the cap entirely (unbounded parallelism — only sensible if the
+// upstream provider has no rate limit, which is rare). Note: 0 does NOT mean
+// unbounded — use a negative value for that.
 func (c *OliumConfig) EffectiveMaxConcurrent() int {
 	if c.MaxConcurrent < 0 {
 		return 0

@@ -560,7 +560,8 @@ func (e *Engine) RunSourceAnalysisParallel(ctx context.Context, cfg SourceAnalys
 		exploreContext = exploreContext[:maxExploreBytes] + "\n\n... (truncated)"
 	}
 
-	// --- Wave 2: Format + Extensions in parallel (3 goroutines) ---
+	// --- Wave 2: Format + Extensions in parallel (up to 3 goroutines, capped
+	// by cfg.MaxConcurrency) ---
 	// streamGroup gives each parallel sub-agent a tagged, line-buffered
 	// writer. Without this, three providers streaming tokens at once
 	// produce unreadable per-character interleave on the user's terminal.
@@ -583,6 +584,17 @@ func (e *Engine) RunSourceAnalysisParallel(ctx context.Context, cfg SourceAnalys
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
+	// Bound the format/extension sub-agents to the configured concurrency
+	// (cfg.MaxConcurrency, from --swarm-subagent-concurrency / SAMaxConcurrency).
+	// 0 or an out-of-range value keeps the historical behavior of running all
+	// three at once. This is a per-wave cap, stricter than and independent of
+	// the process-wide provider semaphore.
+	saConcurrency := cfg.MaxConcurrency
+	if saConcurrency <= 0 || saConcurrency > 3 {
+		saConcurrency = 3
+	}
+	saSem := make(chan struct{}, saConcurrency)
+
 	printPhasePromptLine("source-analysis", formatRoutesTemplate, ResolveTemplatePath(formatRoutesTemplate, e.settings.Agent.TemplatesDir))
 	printPhasePromptLine("source-analysis", formatSessionTemplate, ResolveTemplatePath(formatSessionTemplate, e.settings.Agent.TemplatesDir))
 	printPhasePromptLine("source-analysis", extensionsTemplate, ResolveTemplatePath(extensionsTemplate, e.settings.Agent.TemplatesDir))
@@ -592,6 +604,8 @@ func (e *Engine) RunSourceAnalysisParallel(ctx context.Context, cfg SourceAnalys
 	// Call 2a: Format routes (route notes → JSONL http_records)
 	go func() {
 		defer wg.Done()
+		saSem <- struct{}{}
+		defer func() { <-saSem }()
 
 		opts := Options{
 			AgentName: cfg.AgentName,
@@ -651,6 +665,8 @@ func (e *Engine) RunSourceAnalysisParallel(ctx context.Context, cfg SourceAnalys
 	// Call 2b: Format session (auth notes → session_config JSON)
 	go func() {
 		defer wg.Done()
+		saSem <- struct{}{}
+		defer func() { <-saSem }()
 
 		opts := Options{
 			AgentName: cfg.AgentName,
@@ -709,6 +725,8 @@ func (e *Engine) RunSourceAnalysisParallel(ctx context.Context, cfg SourceAnalys
 	// Call 3: Extensions (notes → JS scanner extensions, single call)
 	go func() {
 		defer wg.Done()
+		saSem <- struct{}{}
+		defer func() { <-saSem }()
 
 		extOpts := Options{
 			AgentName: cfg.AgentName,

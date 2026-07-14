@@ -56,17 +56,13 @@ func resolveInstruction(instruction, instructionFile string) (string, error) {
 //
 // --plan-file is the single-file front end for "prose guidance + raw
 // request(s)". It owns both the instruction and the seed input, so combining
-// it with the flags that would otherwise supply those is rejected up front to
-// avoid ambiguity over which value wins. Returns an error if the file is
-// missing/unreadable or yields neither an instruction nor a request.
-func resolvePlanFile(path, input, instruction, instructionFile string) (planInstruction string, requests []string, err error) {
-	switch {
-	case input != "":
+// it with --input (which would supply the seed) is rejected up front to avoid
+// ambiguity over which value wins; combining it with a prompt (--prompt /
+// positional) is rejected earlier in resolveRawPrompt. Returns an error if the
+// file is missing/unreadable or yields neither an instruction nor a request.
+func resolvePlanFile(path, input string) (planInstruction string, requests []string, err error) {
+	if input != "" {
 		return "", nil, fmt.Errorf("--plan-file cannot be combined with --input")
-	case instruction != "":
-		return "", nil, fmt.Errorf("--plan-file cannot be combined with --instruction")
-	case instructionFile != "":
-		return "", nil, fmt.Errorf("--plan-file cannot be combined with --instruction-file")
 	}
 	data, rerr := os.ReadFile(path)
 	if rerr != nil {
@@ -216,6 +212,58 @@ func parsePromptIntent(settings *config.Settings, prompt string) (*agent.ScanInt
 	return intent, engine, repo, nil
 }
 
+// parsePromptFirstApp runs the LLM intent parser on prompt purely to recover its
+// first AppIntent — used by autopilot/swarm on the explicit-flag path to pull
+// auth/browser signals out of a prompt that is otherwise forwarded verbatim.
+// Unlike parsePromptIntent it uses ParseScanIntent (no target resolution) and
+// the already-open repo.
+//
+// The intent parser is instructed to return {"apps":[]} when it finds no target
+// or source in the text, so a credential-only prompt (e.g. "log in as
+// admin/admin123, focus on /admin") on an explicit -t/--source run would yield
+// nothing and the credentials would be silently dropped. targetHint/sourceHint
+// (the already-resolved explicit-flag target/source) are woven in as an anchor
+// so the parser still emits an app carrying the extracted auth/browser signals;
+// only those signals are consumed by the caller — the target/source stay owned
+// by the explicit flags. Returns ok=false for an empty prompt, a parse error
+// (logged under label), or when no apps were extracted.
+func parsePromptFirstApp(settings *config.Settings, repo *database.Repository, prompt, label, targetHint, sourceHint string) (agent.AppIntent, bool) {
+	if strings.TrimSpace(prompt) == "" {
+		return agent.AppIntent{}, false
+	}
+	engine := agent.NewEngine(settings, repo)
+	intent, err := agent.ParseScanIntent(context.Background(), engine, anchorIntentPrompt(prompt, targetHint, sourceHint),
+		agent.WithSessionsDir(settings.Agent.EffectiveSessionsDir()))
+	if err != nil || intent == nil || len(intent.Apps) == 0 {
+		if err != nil {
+			zap.L().Debug(label+": prompt auth extraction failed", zap.Error(err))
+		}
+		return agent.AppIntent{}, false
+	}
+	return intent.Apps[0], true
+}
+
+// anchorIntentPrompt prefixes prompt with the resolved target/source so the
+// intent parser has a target to anchor on and does not bail with {"apps":[]}
+// for a credential-only prompt. The "Scan target:"/"Source path:" labels keep
+// the combined text from tripping ParseScanIntent's structured-input fast path
+// (DetectInputType only matches a bare URL/curl/HTTP/base64 prefix).
+func anchorIntentPrompt(prompt, targetHint, sourceHint string) string {
+	var b strings.Builder
+	if t := strings.TrimSpace(targetHint); t != "" {
+		b.WriteString("Scan target: ")
+		b.WriteString(t)
+		b.WriteByte('\n')
+	}
+	if s := strings.TrimSpace(sourceHint); s != "" {
+		b.WriteString("Source path: ")
+		b.WriteString(s)
+		b.WriteByte('\n')
+	}
+	b.WriteString(prompt)
+	return b.String()
+}
+
 // guardOrRefuseFromPrompt loads settings and runs the prompt-safety classifier
 // (unless disabled). On refusal it prints the verdict + bypass tip and returns
 // a wrapped agent.ErrPromptRefused. On allow (or skip) it returns the loaded
@@ -271,29 +319,64 @@ func runMultiAppFanOut(ctx context.Context, intent *agent.ScanIntent, runFn func
 	var errs []string
 	for r := range results {
 		if r.err != nil {
-			app := intent.Apps[r.index]
-			label := app.SourcePath
-			if label == "" {
-				label = app.Target
-			}
-			errs = append(errs, fmt.Sprintf("[%s] %v", label, r.err))
-			fmt.Fprintf(os.Stderr, "%s App %q failed: %v\n",
-				terminal.ErrorSymbol(), label, r.err)
+			errs = recordAppError(errs, intent.Apps[r.index], r.err)
 		}
 	}
+	return summarizeMultiAppResults(errs, len(intent.Apps))
+}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("%d/%d apps failed:\n  %s", len(errs), len(intent.Apps), strings.Join(errs, "\n  "))
+// runMultiAppSequential runs runFn for each app in the intent one at a time,
+// aggregating errors the same way runMultiAppFanOut does. Unlike the parallel
+// fan-out, this never runs two apps concurrently — callers that override shared
+// package-level flags per app (autopilot) require serialization to avoid a race
+// that would cross-contaminate targets/sources. Stops launching new apps once
+// the context is cancelled/timed out.
+func runMultiAppSequential(ctx context.Context, intent *agent.ScanIntent, runFn func(ctx context.Context, idx int, app agent.AppIntent) error) error {
+	var errs []string
+	for i, app := range intent.Apps {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, fmt.Sprintf("[app %d] skipped: %v", i+1, err))
+			continue
+		}
+		if err := runFn(ctx, i, app); err != nil {
+			errs = recordAppError(errs, app, err)
+		}
 	}
+	return summarizeMultiAppResults(errs, len(intent.Apps))
+}
 
-	fmt.Fprintf(os.Stderr, "\n%s All %d runs complete\n",
-		terminal.SuccessSymbol(), len(intent.Apps))
+// appLabel is the operator-facing name for an app in multi-app output —
+// its source path if any, else its target URL.
+func appLabel(app agent.AppIntent) string {
+	if app.SourcePath != "" {
+		return app.SourcePath
+	}
+	return app.Target
+}
+
+// recordAppError prints a per-app failure line and appends a labeled entry to
+// errs, returning the extended slice. Shared by the parallel and sequential
+// multi-app schedulers.
+func recordAppError(errs []string, app agent.AppIntent, err error) []string {
+	label := appLabel(app)
+	fmt.Fprintf(os.Stderr, "%s App %q failed: %v\n", terminal.ErrorSymbol(), label, err)
+	return append(errs, fmt.Sprintf("[%s] %v", label, err))
+}
+
+// summarizeMultiAppResults renders the final multi-app outcome: an aggregate
+// error when any app failed, otherwise an "all complete" line and nil.
+func summarizeMultiAppResults(errs []string, total int) error {
+	if len(errs) > 0 {
+		return fmt.Errorf("%d/%d apps failed:\n  %s", len(errs), total, strings.Join(errs, "\n  "))
+	}
+	fmt.Fprintf(os.Stderr, "\n%s All %d runs complete\n", terminal.SuccessSymbol(), total)
 	return nil
 }
 
-// mergeIntentInstruction merges base instruction with app-specific instruction.
-func mergeIntentInstruction(base, instructionFile string, app agent.AppIntent) string {
-	instruction, _ := resolveInstruction(base, instructionFile)
+// mergeIntentInstruction merges the base instruction with the app-specific
+// instruction extracted by the natural-language intent parser.
+func mergeIntentInstruction(base string, app agent.AppIntent) string {
+	instruction := base
 	if app.Instruction != "" {
 		if instruction != "" {
 			instruction += "\n\n"
@@ -305,8 +388,8 @@ func mergeIntentInstruction(base, instructionFile string, app agent.AppIntent) s
 
 // prependVerbatimPrompt puts the verbatim natural-language prompt in front of
 // the resolved instruction. The verbatim prompt comes first because it carries
-// the user's primary intent (and any exploitation hints they wrote); explicit
-// --instruction / --instruction-file content layers on top of that.
+// the user's primary intent (and any exploitation hints they wrote); the
+// resolved instruction (--plan-file / intent-parsed) layers on top of that.
 func prependVerbatimPrompt(instruction, verbatim string) string {
 	if verbatim == "" {
 		return instruction
@@ -317,20 +400,27 @@ func prependVerbatimPrompt(instruction, verbatim string) string {
 	return verbatim + "\n\n" + instruction
 }
 
-// resolvePositionalPrompt trims the optional positional prompt (args[0]) shared
-// by `agent autopilot` and `agent swarm`, and rejects combining it with
-// --plan-file, which owns the instruction channel. It returns the trimmed prompt
+// resolveRawPrompt returns the single free-text task-guidance string shared by
+// `agent autopilot` and `agent swarm`. The guidance can come from either the
+// positional [prompt] argument or the --prompt flag (two spellings of the same
+// input); supplying both is an error. It rejects combining a prompt with
+// --plan-file, which owns the instruction channel. Returns the trimmed prompt
 // ("" when none). The caller decides — from its own hasExplicitFlags — whether
-// the prompt drives the run through the intent parser or is preserved verbatim
-// as instruction context (a non-empty planFile always implies explicit flags, so
-// the guard fires only in the explicit-flags branch).
-func resolvePositionalPrompt(args []string, planFile string) (string, error) {
-	prompt := ""
+// the prompt drives the run through the natural-language intent parser or is
+// preserved verbatim as instruction context (a non-empty planFile always
+// implies explicit flags, so the guard fires only in the explicit-flags branch).
+func resolveRawPrompt(args []string, promptFlag, planFile string) (string, error) {
+	prompt := strings.TrimSpace(promptFlag)
 	if len(args) > 0 {
-		prompt = strings.TrimSpace(args[0])
+		if pos := strings.TrimSpace(args[0]); pos != "" {
+			if prompt != "" {
+				return "", fmt.Errorf("pass the task guidance once: use the positional [prompt] or --prompt, not both")
+			}
+			prompt = pos
+		}
 	}
 	if prompt != "" && planFile != "" {
-		return "", fmt.Errorf("positional prompt cannot be combined with --plan-file (the plan file owns the instruction channel); fold the guidance into the plan file instead")
+		return "", fmt.Errorf("--plan-file cannot be combined with a prompt (--prompt / positional): the plan file owns the instruction channel; fold the guidance into the plan file instead")
 	}
 	return prompt, nil
 }

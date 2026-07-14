@@ -60,7 +60,21 @@ Stateless mode is great for ephemeral CI/CD runs — it creates a temp SQLite fi
 | `--auth-file` | []string | — | Path to auth file (YAML/JSON, single session or `sessions:` bundle), or bare name resolved against session_dir. Repeatable. |
 | `--auth` | []string | — | Inline session in `name:Header:value` format. Repeatable. |
 | `--oast-url` | string | — | Fixed out-of-band callback URL (overrides auto-generated interactsh URL) |
-| `--pilot` | bool | `false` | Enable AI pilot-driven crawling |
+
+### Parallel, DB & module flags (scan & run)
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--parallel` | `-P` | int | `1` | Scan up to N targets concurrently as isolated child processes (requires `-S -T --split-by-host`, OR `--db-isolate -T`) |
+| `--db-isolate` | — | bool | `false` | Scan into a private temp DB, then merge into `--db` at the end (SQLite only, not with `--stateless`) |
+| `--resume` | — | bool | `false` | Resume a prior `-S -T --split-by-host -P` run from its `<output>.progress.json` manifest |
+| `--follow-subdomains` | — | bool | `false` | Pull in-scope subdomains found in responses into the scan (auto-on at `--intensity deep`) |
+| `--module-id` | — | []string | — | Run exactly these module IDs (exact match against **both** active + passive registries; unlike `-m`, also selects passive) — **scan/scan-url/scan-request only, not `run`** |
+| `--passive-only` | — | bool | `false` | Run only passive modules (no active scan traffic) — **scan/scan-url/scan-request only, not `run`** |
+| `--print-finding` / `--print-traffic` / `--print-traffic-tree` | — | bool | `false` | After the scan, print findings / raw traffic / traffic tree to stdout (pairs with `-S`/`--silent`) |
+| `--report-url` | — | string | — | URL for the "Raw Report URL" button in HTML reports |
+| `--no-waf-pacing` | — | bool | `false` | Disable proactive CDN/WAF-edge pacing |
+| `--no-tech-filter` | — | bool | `false` | Disable tech-stack fingerprint gating of modules |
 
 ### Content Discovery flags (scan & run)
 
@@ -268,7 +282,7 @@ Read a raw HTTP request from file or stdin and run scanner modules against it. D
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--input` | `-i` | string | `-` (stdin) | Input file or stdin |
-| `--target` | — | string | — | Override target URL (scheme://host) |
+| `--target` | `-t` | string | — | Override target URL (scheme://host) |
 | `--known-issue-scan` | — | bool | `false` | Run known issue scan |
 | `--no-passive` | — | bool | `false` | Skip passive modules |
 
@@ -310,7 +324,7 @@ Run a single scan phase directly. Equivalent to `vigolium scan --only <phase>`.
 | `dynamic-assessment` | `audit`, `dast`, `assessment` |
 | `extension` | `ext` |
 
-The `run` command accepts the same flag groups as `scan`: Spidering, Discovery, Harvest, KnownIssueScan, Input Format, Request, Output, and Other (--oast-url, --pilot).
+The `run` command accepts the same flag groups as `scan` (Spidering, Discovery, Harvest, KnownIssueScan, Input Format, Request, Output, and `--oast-url`), **except** the module-selection flags `--module-id` / `--passive-only`, which are only on `scan` / `scan-url` / `scan-request`.
 
 ### Examples
 

@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/agent"
+	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/piolium"
@@ -24,23 +25,28 @@ import (
 
 // agent autopilot flags
 var (
-	autopilotTarget           string
-	autopilotInput            string
-	autopilotRecordUUID       string
-	autopilotSource           string
-	autopilotFiles            []string
-	autopilotFocus            string
-	autopilotSkills           []string
-	autopilotSkillTags        []string
-	autopilotNoSkillFilter    bool
-	autopilotMaxDuration      time.Duration
-	autopilotDryRun           bool
-	autopilotShowPrompt       bool
-	autopilotMaxCommands      int
-	autopilotInstruction      string
-	autopilotInstructionFile  string
-	autopilotPlanFile         string
-	autopilotBrowser          bool
+	autopilotTarget        string
+	autopilotInput         string
+	autopilotRecordUUID    string
+	autopilotBurpBridgeURL string
+	autopilotPriorContext  string
+	autopilotSource        string
+	autopilotFiles         []string
+	autopilotPrompt        string // --prompt: free-text task guidance (same slot as the positional [prompt])
+	autopilotFocus         string // internal: populated by the NL intent parser (no --focus flag)
+	autopilotSkills        []string
+	autopilotSkillTags     []string
+	autopilotNoSkillFilter bool
+	autopilotMaxDuration   time.Duration
+	autopilotDryRun        bool
+	autopilotShowPrompt    bool
+	autopilotMaxCommands   int
+	autopilotInstruction   string // internal: populated by --plan-file and the NL intent parser (no --instruction flag)
+	autopilotPlanFile      string
+	// Auth/browser signals below have no CLI flags — the browser is always
+	// available for autopilot, and credentials/auth intent are extracted from
+	// the prompt (NL path via applyIntentToAutopilotFlags, explicit path via
+	// extractPromptAuthIntent).
 	autopilotCredentials      string
 	autopilotAuthRequired     bool
 	autopilotRequiresBrowser  bool
@@ -70,10 +76,12 @@ var (
 	autopilotResume           string
 	autopilotSessionDir       string
 	autopilotTranscript       string
+	autopilotKnowledgeBase    string
+	autopilotKnowledgeBaseRaw bool
 
-	// autopilotInstructionPrefix holds the verbatim natural-language prompt
-	// when autopilot was invoked with a positional `<prompt>` argument. It is
-	// prepended in front of any --instruction / --instruction-file content so
+	// autopilotInstructionPrefix holds the verbatim task-guidance prompt when
+	// autopilot was invoked with a positional `<prompt>` argument or --prompt. It
+	// is prepended in front of any --plan-file / intent-parsed instruction so
 	// nuanced guidance the user typed (e.g. exploitation hints, origin
 	// constraints) reaches the operator agent unaltered. Structured fields
 	// (target/source/focus/audit/intensity) are still extracted by the LLM
@@ -93,16 +101,21 @@ Examples (natural-language prompt as positional arg):
   vigolium agent autopilot --plan-file ginandjuice-plan.md
   vigolium agent autopilot -t https://target --no-prescan   # skip native pre-scan, hand the operator a cold target
 
-The prompt is forwarded verbatim to the operator (hints, caveats, scope rules
-all reach it word-for-word) and parsed for target/source/focus. --instruction
-appends extra guidance. --dry-run previews what the parser extracted.
+Task guidance comes from the positional [prompt] or --prompt (same slot). It is
+forwarded verbatim to the operator (hints, caveats, scope rules all reach it
+word-for-word) and parsed for target/source/focus. --dry-run previews what the
+parser extracted.
 
 Inputs (--input, auto-detected; also reads stdin when piped):
   URL · curl command · raw HTTP · Burp XML · base64 raw HTTP
 
+--burp-bridge-url http://127.0.0.1:9009 pulls live Burp Proxy history into the
+project DB before the run, so the operator mines that traffic (and prior
+findings) instead of only what a fresh scan produces.
+
 --plan-file: one file mixing prose + raw HTTP request(s) split on "---" or
 fenced ` + "```http```" + ` blocks. First request is the live seed; rest fold into
-context. Mutually exclusive with --input/--instruction/--instruction-file.
+context. Mutually exclusive with --input or a prompt (--prompt / positional).
 
 --source enables whitebox: vigolium-audit prepares a context bundle + plan
 before the operator launches. Disable with --audit=off.
@@ -127,6 +140,8 @@ func init() {
 	f.StringVar(&autopilotInput, "input", "", "Raw input (curl command, raw HTTP, Burp XML, URL). Reads from stdin if piped")
 	f.BoolVar(&globalDBIsolate, "db-isolate", false, dbIsolateAgentFlagUsage)
 	f.StringVar(&autopilotRecordUUID, "record-uuid", "", "Use an HTTP record from the database as the seed input (looked up by UUID)")
+	f.StringVar(&autopilotBurpBridgeURL, "burp-bridge-url", burpbridge.URLFromEnvironment(), "Pull live Burp Proxy history into the project DB before the run (e.g. http://127.0.0.1:9009), so the pre-scan and operator can mine it alongside prior traffic. Also honors $VIGOLIUM_BURP_BRIDGE_URL")
+	f.StringVar(&autopilotPriorContext, "prior-context", "auto", "Front-load a bounded summary of the traffic + findings already in the project DB so the operator mines them instead of starting from scratch: auto (default; the bounded table when prior data exists), summary (one-line pointer), off")
 	f.StringVar(&autopilotOliumProvider, "provider", "", oliumProviderFlagUsage)
 	f.StringVar(&autopilotOliumModel, "model", "", "Olium model id override (falls back to agent.olium.model)")
 	f.StringVar(&autopilotSystemPrompt, "system-prompt", "", "Replace the built-in autopilot system prompt with this value (full replace; browser section is not auto-appended)")
@@ -136,23 +151,20 @@ func init() {
 	f.StringVar(&autopilotOliumLLMAPIKey, "llm-api-key", "", "Olium API key for key-based providers (falls back to agent.olium.llm_api_key or provider env var)")
 	f.StringVar(&autopilotSource, "source", "", "Path to application source code for source-aware scanning")
 	f.StringSliceVar(&autopilotFiles, "files", nil, "Specific files to include (relative to --source)")
-	f.StringVar(&autopilotFocus, "focus", "", "Focus area hint (e.g. 'API injection', 'auth bypass')")
+	f.StringVar(&autopilotPrompt, "prompt", "", "Free-text task guidance for the agent (same as the positional [prompt]; use --plan-file for a whole plan with seed HTTP requests)")
 	f.StringSliceVar(&autopilotSkills, "skill", nil, "Force-load these skills by name, bypassing the pre-flight selection (repeatable or comma-separated)")
 	f.StringSliceVar(&autopilotSkillTags, "skill-tag", nil, "Force-load every skill carrying one of these tags (e.g. xss,idor)")
 	f.BoolVar(&autopilotNoSkillFilter, "no-skill-filter", false, "Load the full skill set; skip the pre-flight skill selection")
 	f.DurationVar(&autopilotMaxDuration, "max-duration", 6*time.Hour, "Maximum wall-clock duration for the autopilot session (e.g. 1h, 6h)")
 	f.BoolVar(&autopilotDryRun, "dry-run", false, "Render the system prompt without launching the agent")
 	f.BoolVar(&autopilotShowPrompt, "show-prompt", false, "Print rendered prompt to stderr before executing")
-	f.StringVar(&autopilotInstruction, "instruction", "", "Custom instruction to guide the agent (appended to prompt)")
-	f.StringVar(&autopilotInstructionFile, "instruction-file", "", "Path to a file containing custom instructions")
-	f.StringVar(&autopilotPlanFile, "plan-file", "", "Path to a plan file mixing free-text guidance and raw HTTP request(s). Owns the instruction + seed input; cannot be combined with --input/--instruction/--instruction-file")
-	f.BoolVar(&autopilotBrowser, "browser", false, "Enable agent-browser for browser-based interactions")
-	f.BoolVar(&autopilotHeaded, "headed", false, "Show the browser window: applies to the native pre-scan spidering when the pre-scan runs (i.e. not with --no-prescan or --source); additionally applies to in-process probes (browser_probe, web_fetch mode=browser) and agent-browser subprocesses when --browser is enabled. Sets VIGOLIUM_BROWSER_HEADED=1 for the duration of the run.")
-	f.StringVar(&autopilotCredentials, "credentials", "", "Credentials for auth preflight (e.g. 'admin/admin123, compare user/user123')")
-	f.BoolVar(&autopilotAuthRequired, "auth-required", false, "Require auth/session preparation before the autonomous operator starts")
-	f.BoolVar(&autopilotRequiresBrowser, "requires-browser", false, "Require browser-assisted auth/setup instead of HTTP-only preflight")
-	f.StringVar(&autopilotBrowserStartURL, "browser-start-url", "", "Explicit browser/login start URL for auth preflight")
-	f.StringSliceVar(&autopilotFocusRoutes, "focus-routes", nil, "Protected or browser-focused routes to prioritize after auth")
+	f.StringVar(&autopilotPlanFile, "plan-file", "", "Path to a plan file mixing free-text guidance and raw HTTP request(s). Owns the instruction + seed input; cannot be combined with --input or a prompt (--prompt / positional)")
+	// The browser is always available for autopilot (agent.browser.enable defaults
+	// to true), so there is no --browser flag. Credentials and the auth-preflight
+	// signals (auth-required, browser-start-url, focus routes) are taken from the
+	// prompt — e.g. `autopilot "log in as admin/admin123, focus on /admin"`.
+	f.BoolVar(&autopilotHeaded, "headed", false, "Show the browser window during the run (native pre-scan spidering, in-process probes, and agent-browser subprocesses); sets VIGOLIUM_BROWSER_HEADED=1 for the run. Debugging aid.")
+	_ = f.MarkHidden("headed")
 	f.StringVar(&autopilotAudit, "audit", "lite", "vigolium-audit mode: lite (3-phase), balanced (9-phase), deep (12-phase), mock (sample output), or off (disable). Default: lite when --source is set")
 	f.StringVar(&autopilotPiolium, "piolium", "", "Piolium audit mode: lite, balanced, deep, longshot, etc. Default: empty triggers auto-pick (piolium when pi is installed, else audit). Set explicitly to force piolium; set --audit=off alongside to disable audit")
 	f.StringVar(&autopilotDiff, "diff", "", "Focus on changed code: PR URL (github.com/.../pull/123), git ref range (main...branch), or HEAD~N")
@@ -170,31 +182,43 @@ func init() {
 	f.StringVar(&autopilotResume, "resume", "", "Resume a previous durable-autopilot run by its agentic-scan UUID: reuses its session dir, project, target, and durable scratchpad/candidates; skips pre-scan and audit re-prep (requires agent.olium.autopilot_mode != legacy)")
 	f.StringVar(&autopilotSessionDir, "session-dir", "", "Explicit session directory for this run's debug artifacts (transcript.jsonl, runtime.log, scratchpad, tool-results). Default: <agent.sessions_dir>/<run-uuid>. Pin it to know exactly where to look when debugging (e.g. alongside -S/--stateless scans).")
 	f.StringVar(&autopilotTranscript, "transcript", "", "After the run, also copy the session's transcript.jsonl to this path. The in-session copy is always kept; this is a convenience for debugging (e.g. keep the transcript when the DB is throwaway).")
+	f.StringVar(&autopilotKnowledgeBase, "knowledge-base", "", "Path to a markdown file or directory of docs describing the app (auth model, login flows, roles, business logic). An LLM distills it into a compact brief + document index that's front-loaded into the operator; the full docs stay on disk and are read on demand, so a big docs tree never floods the context. Works blackbox and whitebox.")
+	f.BoolVar(&autopilotKnowledgeBaseRaw, "knowledge-base-raw", false, "Skip the LLM distillation of --knowledge-base: front-load a deterministic document index only (offline / reproducible). No-op without --knowledge-base.")
 }
 
 func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 	defer syncLogger()
 	defer closeDatabaseOnExit()
 
-	// Natural-language prompt handling. With no explicit structured flags, the
-	// positional prompt drives the run through the LLM intent parser (extracts
-	// target/source/focus). With structured flags present, the positional prompt
-	// is NOT discarded — it is preserved verbatim as instruction context (scope
-	// rules, exploitation hints) prepended ahead of --instruction, while explicit
-	// flags still win for structured fields.
-	positionalPrompt, err := resolvePositionalPrompt(args, autopilotPlanFile)
+	// Natural-language prompt handling. The task guidance comes from either the
+	// positional [prompt] or --prompt (same slot). With no explicit structured
+	// flags, it drives the run through the LLM intent parser (extracts
+	// target/source/focus). With structured flags present, the prompt is NOT
+	// discarded — it is preserved verbatim as instruction context (scope rules,
+	// exploitation hints), while explicit flags still win for structured fields.
+	rawPrompt, err := resolveRawPrompt(args, autopilotPrompt, autopilotPlanFile)
 	if err != nil {
 		return err
 	}
-	hasExplicitFlags := autopilotTarget != "" || autopilotInput != "" || autopilotRecordUUID != "" || autopilotSource != "" || autopilotPlanFile != ""
-	if positionalPrompt != "" && !hasExplicitFlags {
-		return runAutopilotFromPrompt(positionalPrompt)
+	// --resume counts as explicit input: the run's target/source is restored from
+	// the stored AgenticScan later, so a bare guidance prompt (`--resume <uuid>
+	// --prompt "focus on the remaining IDOR"`) must not be routed through target
+	// extraction — it carries no target and would either abort or overwrite the
+	// resumed one. It is preserved verbatim as instruction context instead.
+	hasExplicitFlags := autopilotTarget != "" || autopilotInput != "" || autopilotRecordUUID != "" || autopilotSource != "" || autopilotPlanFile != "" || autopilotResume != ""
+	if rawPrompt != "" && !hasExplicitFlags {
+		return runAutopilotFromPrompt(rawPrompt)
 	}
-	if positionalPrompt != "" {
-		autopilotInstructionPrefix = positionalPrompt
+	if rawPrompt != "" {
+		autopilotInstructionPrefix = rawPrompt
 	}
 
 	intensity, err := agent.ValidateIntensity(autopilotIntensity)
+	if err != nil {
+		return err
+	}
+
+	autopilotPriorContext, err = validatePriorContextMode(autopilotPriorContext)
 	if err != nil {
 		return err
 	}
@@ -211,14 +235,14 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 			"timeout":    cmd.Flags().Changed("max-duration"),
 			"audit-mode": auditChanged,
 			"no-audit":   auditChanged && noAudit,
-			"browser":    cmd.Flags().Changed("browser"),
 			"no-prescan": cmd.Flags().Changed("no-prescan"),
 		}
+		// Browser is not overridable from the CLI (always on), so it is omitted
+		// here — the preset's Browser:true wins and the result's Browser is unused.
 		intensityResult := agent.ResolveAutopilotIntensity(intensity, agent.AutopilotIntensityPreset{
 			MaxCommands:     autopilotMaxCommands,
 			Timeout:         autopilotMaxDuration,
 			AuditDriverMode: auditModeLocal,
-			Browser:         autopilotBrowser,
 			NoPrescan:       autopilotNoPrescan,
 		}, changed)
 		autopilotMaxCommands = intensityResult.MaxCommands
@@ -226,7 +250,6 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 		if !noAudit {
 			autopilotAudit = intensityResult.AuditDriverMode
 		}
-		autopilotBrowser = intensityResult.Browser
 		autopilotNoPrescan = intensityResult.NoPrescan
 
 		// Audit-harness auto-pick: when neither flag is explicit, prefer
@@ -251,12 +274,6 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 	// Layer the global --ext / --ext-dir flags so user-supplied extensions
 	// run alongside anything the autopilot produces.
 	applyGlobalExtFlagsToSettings(settings)
-
-	// --browser flag overrides config
-	if autopilotBrowser {
-		enabled := true
-		settings.Agent.Browser.Enable = &enabled
-	}
 
 	if autopilotHeaded {
 		_ = os.Setenv(spitolas.EnvBrowserHeaded, "1")
@@ -310,7 +327,9 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 	// source / project / session identity from the stored AgenticScan so the
 	// operator re-enters seeded from the durable scratchpad + candidate ledger.
 	// Mutually exclusive with the seed-input flags (resume reuses the original
-	// target, not a fresh seed).
+	// target, not a fresh seed). Runs before the Burp import so the resumed
+	// project is settled first; prepareAutopilotResume pins it authoritatively
+	// (clicommon.PinProjectUUID), so scoping no longer depends on this ordering.
 	if autopilotResume != "" {
 		if autopilotInput != "" || autopilotRecordUUID != "" || autopilotPlanFile != "" {
 			return fmt.Errorf("--resume cannot be combined with --input/--record-uuid/--plan-file")
@@ -320,20 +339,45 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
-	// Resolve --plan-file into --instruction/--input before the generic
+	// --burp-bridge-url: pull live Burp Proxy history into the project DB before
+	// the pre-scan and operator start, so the agent mines that traffic (and any
+	// prior findings) instead of only what a fresh scan produces. Idempotent
+	// (insert new, refresh changed, skip unchanged). Non-fatal on failure. Kept
+	// after the resume block so it imports into the resumed project (which resume
+	// has already pinned via clicommon.PinProjectUUID).
+	if bridge := strings.TrimSpace(autopilotBurpBridgeURL); bridge != "" && repo != nil {
+		validated, verr := burpbridge.ValidateURL(bridge)
+		if verr != nil {
+			return fmt.Errorf("--burp-bridge-url: %w", verr)
+		}
+		projectUUID, _ := resolveProjectUUID()
+		fmt.Fprintf(os.Stderr, "%s Importing live Burp traffic from %s ...\n",
+			terminal.InfoSymbol(), terminal.Cyan(validated))
+		res, ierr := importBurpTrafficToDB(context.Background(), repo, validated,
+			burpbridge.Query{Location: "proxy_history"}, projectUUID)
+		if ierr != nil {
+			fmt.Fprintf(os.Stderr, "%s Burp bridge import failed: %v — continuing without it\n",
+				terminal.WarningSymbol(), ierr)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s Imported Burp traffic: %d stored (%d new, %d updated, %d unchanged)\n",
+				terminal.SuccessSymbol(), res.Stored(), res.Inserted, res.Updated, res.Unchanged)
+		}
+	}
+
+	// Resolve --plan-file into an instruction + --input before the generic
 	// resolvers run. Autopilot is single-seed: the first request block is the
 	// live seed, the rest become labelled context in the instruction.
 	if autopilotPlanFile != "" {
-		// resolvePlanFile owns the --input/--instruction/--instruction-file
-		// conflicts; --record-uuid is checked here because it's autopilot-only
-		// (it resolves to a single seed, which the plan file already supplies).
-		// Swarm has no equivalent: its --record-uuid is multi-valued and just
-		// adds more seeds alongside the plan's, so combining is allowed there.
+		// resolvePlanFile owns the --input conflict (the prompt conflict is
+		// caught earlier in resolveRawPrompt); --record-uuid is checked here
+		// because it's autopilot-only (it resolves to a single seed, which the
+		// plan file already supplies). Swarm has no equivalent: its --record-uuid
+		// is multi-valued and just adds more seeds alongside the plan's, so
+		// combining is allowed there.
 		if autopilotRecordUUID != "" {
 			return fmt.Errorf("--plan-file cannot be combined with --record-uuid")
 		}
-		planInstruction, planRequests, perr := resolvePlanFile(
-			autopilotPlanFile, autopilotInput, autopilotInstruction, autopilotInstructionFile)
+		planInstruction, planRequests, perr := resolvePlanFile(autopilotPlanFile, autopilotInput)
 		if perr != nil {
 			return perr
 		}
@@ -370,11 +414,9 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 		return fmt.Errorf("target is required: use --target, --input, --record-uuid, --source, or pipe via stdin\n\nOr use a natural language prompt:\n  vigolium agent autopilot \"scan source at ~/src/app on localhost:3005\"")
 	}
 
-	instruction, err := resolveInstruction(autopilotInstruction, autopilotInstructionFile)
-	if err != nil {
-		return err
-	}
-	instruction = prependVerbatimPrompt(instruction, autopilotInstructionPrefix)
+	// autopilotInstruction is populated only by --plan-file (above); the raw
+	// prompt (--prompt / positional) is layered in front as the verbatim prefix.
+	instruction := prependVerbatimPrompt(autopilotInstruction, autopilotInstructionPrefix)
 
 	// Auto-cleanup:
 	//   - stale run.pid files from prior crashed olium runs (and, in the
@@ -416,7 +458,34 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
-	return runAutopilotOlium(settings, repo, instruction)
+	// --knowledge-base: validate the path up front so a typo fails fast rather
+	// than surfacing deep in the run. Expanded to an absolute path here; the
+	// docs are gathered + distilled later in runAutopilotOlium (which has the
+	// resolved provider + session dir) and folded into the operator's brief.
+	if autopilotKnowledgeBase != "" {
+		expanded := config.ExpandPath(autopilotKnowledgeBase)
+		if _, statErr := os.Stat(expanded); statErr != nil {
+			return fmt.Errorf("--knowledge-base %q: %w", autopilotKnowledgeBase, statErr)
+		}
+		autopilotKnowledgeBase = expanded
+	}
+
+	// Explicit-flag path: the prompt was passed verbatim (never parsed), so pull
+	// any credentials / auth intent out of it here. cmd != nil distinguishes this
+	// from the NL re-entry (runAutopilotFromPrompt → runAgentAutopilot(nil, nil)),
+	// which already populated the auth vars via applyIntentToAutopilotFlags.
+	// Skipped under --dry-run so a preview never makes a live LLM call.
+	if cmd != nil && !autopilotDryRun {
+		extractPromptAuthIntent(settings, repo, autopilotInstructionPrefix)
+	}
+
+	// Descend from the command's context (Cobra wires signal cancellation into
+	// it) so Ctrl-C / deadline propagates into the run.
+	ctx := context.Background()
+	if cmd != nil {
+		ctx = cmd.Context()
+	}
+	return runAutopilotOlium(ctx, settings, repo, instruction)
 }
 
 // runAutopilotFromPrompt parses a natural language prompt and runs autopilot for each extracted app.
@@ -454,10 +523,48 @@ func runAutopilotFromPrompt(prompt string) error {
 		return runAgentAutopilot(nil, nil)
 	}
 
-	// Multi-app: fan-out parallel runs using the already-created engine
-	fmt.Fprintf(os.Stderr, "%s Parsed %d apps from prompt, running in parallel\n",
+	// Multi-app: run each app one at a time (autopilot overrides shared flags
+	// per app, so runs must be serialized — see runMultiAppAutopilot).
+	fmt.Fprintf(os.Stderr, "%s Parsed %d apps from prompt, running sequentially\n",
 		terminal.InfoSymbol(), len(intent.Apps))
 	return runMultiAppAutopilot(context.Background(), engine, settings, repo, intent)
+}
+
+// applyAuthIntentToAutopilot copies auth/browser signals extracted by the LLM
+// intent parser into the autopilot vars, without overwriting values already set.
+// Shared by the NL-prompt path (applyIntentToAutopilotFlags) and the explicit-
+// flag path (extractPromptAuthIntent). It is the sole way these vars get
+// populated now that --credentials / --auth-required / --requires-browser /
+// --browser-start-url / --focus-routes no longer exist as flags.
+func applyAuthIntentToAutopilot(app agent.AppIntent) {
+	if app.Credentials != "" && autopilotCredentials == "" {
+		autopilotCredentials = app.Credentials
+	}
+	if app.AuthRequired {
+		autopilotAuthRequired = true
+	}
+	if app.RequiresBrowser {
+		autopilotRequiresBrowser = true
+	}
+	if app.BrowserStartURL != "" && autopilotBrowserStartURL == "" {
+		autopilotBrowserStartURL = app.BrowserStartURL
+	}
+	if len(app.FocusRoutes) > 0 && len(autopilotFocusRoutes) == 0 {
+		autopilotFocusRoutes = append([]string(nil), app.FocusRoutes...)
+	}
+}
+
+// extractPromptAuthIntent runs the LLM intent parser on the prompt purely to
+// pull auth/browser signals into the autopilot vars on the explicit-flag path,
+// where the prompt is otherwise passed verbatim and never parsed — so
+// `autopilot -t <url> "log in as admin/admin123, focus on /admin"` still
+// pre-authenticates. Target/source are owned by the explicit flags and left
+// untouched (ParseScanIntent does no target resolution). Best-effort: a parse
+// failure is logged and the run continues unauthenticated, as before.
+func extractPromptAuthIntent(settings *config.Settings, repo *database.Repository, prompt string) {
+	if app, ok := parsePromptFirstApp(settings, repo, prompt, "autopilot", autopilotTarget, autopilotSource); ok {
+		applyAuthIntentToAutopilot(app)
+	}
 }
 
 // applyIntentToAutopilotFlags populates autopilot package-level flags from an AppIntent.
@@ -485,24 +592,8 @@ func applyIntentToAutopilotFlags(app agent.AppIntent) {
 	if len(app.Files) > 0 && len(autopilotFiles) == 0 {
 		autopilotFiles = app.Files
 	}
-	if app.Browser {
-		autopilotBrowser = true
-	}
-	if app.Credentials != "" && autopilotCredentials == "" {
-		autopilotCredentials = app.Credentials
-	}
-	if app.AuthRequired {
-		autopilotAuthRequired = true
-	}
-	if app.RequiresBrowser {
-		autopilotRequiresBrowser = true
-	}
-	if app.BrowserStartURL != "" && autopilotBrowserStartURL == "" {
-		autopilotBrowserStartURL = app.BrowserStartURL
-	}
-	if len(app.FocusRoutes) > 0 && len(autopilotFocusRoutes) == 0 {
-		autopilotFocusRoutes = append([]string(nil), app.FocusRoutes...)
-	}
+	// Browser is always on for autopilot, so app.Browser is a no-op here.
+	applyAuthIntentToAutopilot(app)
 	if app.MaxCommands > 0 {
 		autopilotMaxCommands = app.MaxCommands
 	}
@@ -520,10 +611,12 @@ func applyIntentToAutopilotFlags(app agent.AppIntent) {
 		clicommon.ValueOrNone(terminal.ShortenHome(autopilotSource)))
 }
 
-// runMultiAppAutopilot fans out sequential autopilot runs for multiple apps.
-// Each app temporarily overrides the package-level flags and re-enters
-// runAutopilotOlium, so every app gets the same olium-backed treatment as
-// a single-app invocation.
+// runMultiAppAutopilot runs autopilot for multiple apps one at a time. Each app
+// temporarily overrides the package-level flags and re-enters runAutopilotOlium,
+// so every app gets the same olium-backed treatment as a single-app invocation.
+// Runs are strictly SEQUENTIAL (not the parallel fan-out swarm uses): the
+// per-app flag override/restore mutates shared package globals, so concurrent
+// runs would race and cross-contaminate targets/sources.
 func runMultiAppAutopilot(ctx context.Context, _ *agent.Engine, settings *config.Settings, repo *database.Repository, intent *agent.ScanIntent) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -539,13 +632,13 @@ func runMultiAppAutopilot(ctx context.Context, _ *agent.Engine, settings *config
 		cancel()
 	}()
 
-	return runMultiAppFanOut(ctx, intent, func(ctx context.Context, idx int, app agent.AppIntent) error {
+	return runMultiAppSequential(ctx, intent, func(ctx context.Context, idx int, app agent.AppIntent) error {
 		fmt.Fprintf(os.Stderr, "%s [%d/%d] Starting autopilot: target=%s source=%s\n",
 			terminal.InfoSymbol(), idx+1, len(intent.Apps),
 			clicommon.ValueOrNone(app.Target),
 			clicommon.ValueOrNone(terminal.ShortenHome(app.SourcePath)))
 
-		instruction := mergeIntentInstruction(autopilotInstruction, autopilotInstructionFile, app)
+		instruction := mergeIntentInstruction(autopilotInstruction, app)
 		instruction = prependVerbatimPrompt(instruction, autopilotInstructionPrefix)
 
 		// Snapshot globals, apply per-app overrides, then restore on exit.
@@ -574,7 +667,7 @@ func runMultiAppAutopilot(ctx context.Context, _ *agent.Engine, settings *config
 			autopilotFiles = app.Files
 		}
 
-		return runAutopilotOlium(settings, repo, instruction)
+		return runAutopilotOlium(ctx, settings, repo, instruction)
 	})
 }
 

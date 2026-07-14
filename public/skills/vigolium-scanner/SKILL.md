@@ -10,7 +10,7 @@ description: >-
   scripting, export, project management, and configuration tuning.
 license: MIT
 metadata:
-  version: "3.4.0"
+  version: "3.5.0"
   domain: security-tooling
   triggers: >-
     vigolium, scan, scan-url, scan-request, run, ingest, server, agent, agent query,
@@ -62,7 +62,10 @@ Olium provider drivers (set via `agent.olium.provider` or `--provider`):
 - **`anthropic-api-key`**: Anthropic Messages API via `$ANTHROPIC_API_KEY` / `--llm-api-key`
 - **`anthropic-oauth`**: Anthropic Claude via Claude Code OAuth bearer token (`claude setup-token`)
 - **`openai-api-key`**: OpenAI Chat Completions via `$OPENAI_API_KEY` / `--llm-api-key`
+- **`openai-responses`**: Public OpenAI Responses API (`/v1/responses`), API-key auth
 - **`anthropic-cli`**: Shells out to the local `claude` CLI binary (Claude Max subscribers)
+- **`anthropic-compatible`**: Anthropic Messages API (`/v1/messages`) at a custom `custom_provider.base_url`
+- **`anthropic-claude-sdk-bridge`**: Anthropic Claude via the `vigolium-audit` SDK bridge binary (`--bridge-bin`; default embedded blob, then PATH)
 - **`anthropic-vertex`**: Anthropic Claude on GCP Vertex AI via service-account JSON (`--oauth-cred` / `$GOOGLE_APPLICATION_CREDENTIALS`); requires a `claude-*` model (e.g. `claude-opus-4-6`)
 - **`google-vertex`**: Gemini-native on GCP Vertex AI via service-account JSON; requires a `gemini-*` model (e.g. `gemini-3.1-pro`)
 
@@ -98,7 +101,7 @@ Use this to find the right command quickly:
 | Swarm with source code (route discovery + SAST + code audit) | `vigolium agent swarm -t <url> --source ./src` |
 | Swarm with intensity preset | `vigolium agent swarm -t <url> --intensity quick` |
 | Swarm with background vigolium-audit | `vigolium agent swarm -t <url> --source ./src --audit lite` |
-| Swarm with custom instructions | `vigolium agent swarm -t <url> --instruction "Focus on GraphQL"` |
+| Swarm with custom guidance | `vigolium agent swarm -t <url> --prompt "Focus on GraphQL"` |
 | Source analysis only (no scan) | `vigolium agent swarm -t <url> --source ./src --source-analysis-only` |
 | Foreground vigolium-audit (lite/balanced/deep) | `vigolium agent audit --driver=audit --mode deep --source .` |
 | Audit a remote repo | `vigolium agent audit --driver=audit --mode lite --source https://github.com/org/repo` |
@@ -116,7 +119,7 @@ Use this to find the right command quickly:
 | Olium via anthropic-vertex (Claude on Vertex) | `vigolium olium --provider anthropic-vertex --gcp-project my-gcp --gcp-location us-east5 --model claude-opus-4-6` |
 | Olium via google-vertex (Gemini-native) | `vigolium olium --provider google-vertex --model gemini-3.1-pro` |
 | Browse stored HTTP traffic | `vigolium traffic` or `vigolium traffic <search>` |
-| Browse findings/vulnerabilities | `vigolium finding` or `vigolium db ls --table findings` |
+| Browse findings/vulnerabilities | `vigolium finding` or `vigolium db ls findings` |
 | Replay one request with mutations + baseline diff (external-agent confirm step) | `vigolium replay --record-uuid <uuid> -m 'name=id,payload=1 OR 1=1'` |
 | Replay a finding's HTTP evidence with a payload | `vigolium replay --finding-id 42 -m 'name=q,payload=<svg/onload=alert(1)>'` |
 | Replay an arbitrary curl/raw/burp/base64/URL input | `vigolium replay -i "curl -X POST <url> -d '...'"` |
@@ -153,7 +156,7 @@ Use this to find the right command quickly:
 | Delete cloud-storage objects | `vigolium storage rm ugc/foo.tar.gz` (add `-F` to skip confirm) |
 | List agent sessions | `vigolium agent session` or `vigolium agent session <uuid>` |
 | Seed database with sample data | `vigolium db seed` |
-| Import findings from file | `vigolium finding load -i findings.jsonl` |
+| Import findings from file | `vigolium finding load findings.jsonl` (positional/stdin, not `-i`) |
 | Import audit output folder or JSONL export | `vigolium import <path>` |
 | View runtime logs for a scan/agent session | `vigolium log <uuid>` (add `-f` to follow, `--tail N`) |
 | List all native + agentic sessions with log status | `vigolium log ls` |
@@ -178,6 +181,8 @@ Load detailed reference based on what you need:
 | Complete flag index | `references/flags-reference.md` | Looking up any specific flag by name |
 | Writing extensions | `references/writing-extensions.md` | Creating custom JS scanner modules, extension API |
 
+> **Need something not covered here?** Run `vigolium <command> -h` for the authoritative, version-matched flag list of any subcommand, then search the full docs at **[docs.vigolium.com](https://docs.vigolium.com/)** — start with the copy-paste [**cheat sheet**](https://docs.vigolium.com/getting-started/cheat-sheet) for the most common real-world workflows (Burp bridge, parallel fan-out, spec scans, agent triage, `fs` export, config). This skill is a curated subset; the docs are the source of truth for anything ambiguous or missing.
+
 ## Scanning Strategies
 
 Strategies control which phases run during a scan. Use `--strategy <name>`:
@@ -191,7 +196,7 @@ Strategies control which phases run during a scan. Use `--strategy <name>`:
 
 - Default strategy is set in config: `scanning_strategy.default_strategy`
 - **Balanced** is the default when `--strategy` is not specified
-- View all strategies: `vigolium strategy ls`
+- View all strategies: `vigolium strategy` (no `ls` subcommand — it prints the table directly)
 - Whitebox/source-aware scanning is an agent feature (`agent autopilot`/`agent swarm`): pass `--source <path-or-git-url>` (local dir, git URL, .zip/.tar.gz, or gs:// archive)
 
 ## Scan Phases
@@ -402,6 +407,8 @@ Autopilot runs a single autonomous operator session that drives the vigolium CLI
 
 **Audit-harness auto-pick:** when neither `--audit` nor `--piolium` is set, autopilot picks **piolium** if `pi` + the piolium extension are installed, otherwise falls back to the embedded **vigolium-audit** at its lite default. Pass `--piolium <mode>` to force piolium (auto-disables vigolium-audit for the run); pass `--audit <mode>` to force vigolium-audit; pass `--audit=off` to disable both.
 
+**Durable mode (opt-in):** `agent.olium.autopilot_mode` selects the operator's behavior — `legacy` (default, unchanged) vs `shadow` / `enforced`, which add bounded operator sections with context rotation, verify-before-promote (a fresh-context skeptic grades each candidate finding), and durable resume. `--resume <agentic-scan-uuid>` (which reuses a prior run's session dir + durable scratchpad) requires a non-`legacy` mode.
+
 Intensity presets (`--intensity`) bundle the operator command budget, audit mode, browser, and pre-scan strategy into a single flag. Explicit flags always override. The `Command Budget` is internal — there is no `--max-commands` flag.
 
 | Preset | Command Budget | Timeout | Audit Mode | Browser |
@@ -421,10 +428,10 @@ vigolium agent autopilot "test auth bypass on https://app.example.com"
 # With source code context (triggers the audit harness automatically)
 vigolium agent autopilot -t https://example.com --source ./src
 
-# Specific files + custom instruction
+# Specific files + custom guidance
 vigolium agent autopilot -t https://example.com --source ./src \
   --files "routes/api.js,controllers/auth.js" \
-  --instruction "Focus on the new payment endpoint"
+  --prompt "Focus on the new payment endpoint"
 
 # Intensity presets
 vigolium agent autopilot -t https://example.com --source ./src --intensity quick  # CI/PR
@@ -443,10 +450,9 @@ vigolium agent autopilot -t https://example.com --max-duration 15m
 # Pipe a curl command (target auto-derived)
 echo "curl -X POST https://example.com/api/login -d '{\"user\":\"admin\"}'" | vigolium agent autopilot
 
-# Browser-based auth preflight
-vigolium agent autopilot -t https://example.com --browser --credentials "admin/admin123"
-vigolium agent autopilot -t https://example.com --browser --auth-required \
-  --browser-start-url https://example.com/login
+# Authenticated scan — put the login in the prompt (browser is always on)
+vigolium agent autopilot -t https://example.com "log in as admin/admin123, then hunt IDOR and privilege escalation"
+vigolium agent autopilot -t https://example.com "authenticate at https://example.com/login as admin/admin123, then test the admin area"
 
 # Disable the audit harness when source is provided
 vigolium agent autopilot -t https://example.com --source ./src --audit=off
@@ -469,12 +475,24 @@ vigolium agent autopilot -t https://example.com --source ./src --upload-results
 # Preview rendered system prompt without launching the agent
 vigolium agent autopilot -t https://example.com --dry-run
 
+# Resume a prior durable-autopilot run by its agentic-scan UUID
+# (requires agent.olium.autopilot_mode = shadow|enforced; skips pre-scan + audit re-prep)
+vigolium agent autopilot --resume 550e8400-e29b-41d4-a716-446655440000
+
+# Pin the session dir and copy the transcript out (handy with throwaway/-S DBs)
+vigolium agent autopilot -t https://example.com --session-dir ./ap-run --transcript ./ap-run.jsonl
+
+# Force-load specific attack skills, skipping the pre-flight skill selection
+vigolium agent autopilot -t https://example.com --skill idor,xss
+
 # Override the olium provider for a single run
 vigolium agent autopilot -t https://example.com --provider anthropic-api-key
 
-# Drive autopilot through anthropic-vertex (Claude on Vertex; requires a claude-* model)
-vigolium agent autopilot -t https://example.com \
-  --provider anthropic-vertex --gcp-project my-gcp --gcp-location us-east5 --model claude-opus-4-6
+# Drive autopilot through anthropic-vertex (Claude on Vertex; requires a claude-* model).
+# Autopilot has no --gcp-project/--gcp-location flags — set them via env or agent.olium.* config:
+GOOGLE_CLOUD_PROJECT=my-gcp GOOGLE_CLOUD_LOCATION=us-east5 \
+  vigolium agent autopilot -t https://example.com \
+  --provider anthropic-vertex --model claude-opus-4-6
 ```
 
 ### 13. AI Agent Swarm (Targeted or Full-Scope)
@@ -564,18 +582,18 @@ vigolium agent swarm --source ./src --source-analysis-only
 # Enable triage and rescan loop
 vigolium agent swarm -t https://example.com/api/users --triage --max-iterations 5
 
-# Browser automation + auth capture
-vigolium agent swarm -t https://example.com --browser --browser-auth \
-  --credentials "username=admin,password=secret"
+# Browser-based auth capture — creds come from the prompt (browser is always on)
+vigolium agent swarm -t https://example.com --browser-auth \
+  "log in as admin/secret before scanning"
 
 # Upload results to cloud storage
 vigolium agent swarm -t https://example.com --source ./src --upload-results
 
-# Custom instructions to guide the agent
-vigolium agent swarm -t https://example.com/api/users --instruction "Focus on GraphQL parsing"
+# Custom guidance to steer the agent
+vigolium agent swarm -t https://example.com/api/users --prompt "Focus on GraphQL parsing"
 
-# Instructions from a file
-vigolium agent swarm -t https://example.com/api/users --instruction-file hints.txt
+# A whole plan (prose + raw HTTP request seeds) from a file
+vigolium agent swarm -t https://example.com/api/users --plan-file hints.txt
 
 # Resume from a specific phase
 vigolium agent swarm -t https://example.com --start-from plan
@@ -725,7 +743,7 @@ vigolium traffic --host api.example.com --method POST
 # JSONL output for agent / CI consumption (one JSON object per line)
 vigolium traffic -j --host api.example.com
 vigolium finding -j --severity high,critical
-vigolium db ls -j --table findings
+vigolium db ls findings -j
 vigolium db stats -j
 
 # Browse findings
@@ -736,14 +754,14 @@ vigolium finding --finding-source audit
 vigolium finding --burp         # Burp-style format
 vigolium finding --id 42        # specific finding by ID
 vigolium finding --columns ID,SEVERITY,MODULE,MATCHED_AT,TAGS
-vigolium db ls --table findings --severity critical
+vigolium db ls findings --severity critical
 
 # Database stats
 vigolium db stats
 vigolium db stats --detailed    # includes top hosts breakdown
 
-# Watch mode (auto-refresh)
-vigolium traffic --watch 5s
+# Watch mode (auto-refresh) — `--watch` is registered on the `db` command
+vigolium db ls http_records --watch 5s
 vigolium db stats --watch 10
 ```
 
@@ -1130,10 +1148,17 @@ vigolium import /path/to/vigolium-results/
 
 # Import a JSONL export (supports http_record and finding envelopes)
 vigolium import scan-results.jsonl
-vigolium import /tmp/demo/juice-shop.jsonl
+
+# Merge an external Vigolium SQLite scan DB (lossless, idempotent) — or an archive / gs:// object
+vigolium import other-vigolium-scan.sqlite
+vigolium import bundle.tar.gz                       # also .tgz, .zip
+vigolium import gs://<project-uuid>/<key>
+
+# Merge many scans into one DB (positional or --glob-db)
+vigolium import --db combined.sqlite --glob-db 'scans/*.sqlite'
 ```
 
-Audit output folders (produced by `vigolium agent audit` — vigolium-audit or piolium leg) create a new agentic_scan row plus findings. JSONL imports accept `{"type": "http_record", "data": {...}}` and `{"type": "finding", "data": {...}}` envelopes — the format produced by `vigolium export --format jsonl`.
+Input type is auto-detected: audit output folders create a new agentic_scan row plus findings; JSONL imports accept `{"type": "http_record", ...}` / `{"type": "finding", ...}` envelopes (from `vigolium export --format jsonl`); `.sqlite` databases are merged losslessly (deduped on natural keys, keeping their original `project_uuid`); `.tar.gz`/`.tgz`/`.zip` archives and `gs://` URLs wrap any of the above. To **read** an export without merging it, use `-S --db <file>` or `--glob-db` on `finding`/`traffic`/`export` instead.
 
 ### 24. Initialization & Reset
 ```bash
@@ -1163,8 +1188,9 @@ These flags are available on all commands (persistent flags on root):
 | `--input-read-timeout` | — | `3m` | Timeout for reading input from stdin or file |
 | `--concurrency` | `-c` | `50` | Concurrent scan workers |
 | `--rate-limit` | `-r` | `100` | Max requests per second |
-| `--max-per-host` | — | `30` | Max concurrent requests per host |
+| `--max-per-host` | — | `50` | Max concurrent requests per host |
 | `--max-host-error` | — | `30` | Skip host after this many consecutive errors |
+| `--mem-limit` | — | — | Soft heap ceiling (GOMEMLIMIT): empty = auto (⅓ RAM, scaled by `-P`), `off`, or a size/percent like `6GiB`/`50%` |
 | `--max-findings-per-module` | — | `10` | Stop reporting after N findings per module (0 = unlimited) |
 | `--timeout` | — | `15s` | HTTP request timeout |
 | `--scanning-max-duration` | — | — | Maximum total scan duration (e.g. 1h, 30m) |
@@ -1191,8 +1217,10 @@ These flags are available on all commands (persistent flags on root):
 | `--json` | `-j` | `false` | On `scan`: JSONL findings. On `finding`/`traffic`/`db`: a single compact, token-aware agent JSON object (see recipe 14c) |
 | `--soft-fail` | — | `false` | Always exit 0 even on error (keeps CI/wrappers from breaking); overrides `--fail-on` |
 | `--ci-output-format` | — | `false` | CI-friendly output: JSONL findings only, no color, no banners |
-| `--debug` | — | `false` | Dump raw HTTP traffic |
+| `--debug` | — | `false` | Enable debug-level logging (includes outgoing HTTP request lines). For full request+response pairs use `--dump-traffic` |
 | `--dump-traffic` | — | `false` | Print every HTTP request/response pair to stderr (Burp-style) |
+| `--no-color` | — | `false` | Disable ANSI color in all output (also honored via `NO_COLOR`) |
+| `--skip-dependency-check` | — | `false` | Skip the first-run dependency check (chromium, nuclei templates) |
 | `--log-file` | — | — | Write all log output to this file (JSON format) |
 | `--db` | — | `~/.vigolium/database-vgnm.sqlite` | SQLite database path |
 | `--config` | — | `~/.vigolium/vigolium-configs.yaml` | Config file path |
@@ -1201,7 +1229,6 @@ These flags are available on all commands (persistent flags on root):
 | `--force` | `-F` | `false` | Skip confirmation prompts |
 | `--list-modules` | `-M` | `false` | List all scanner modules |
 | `--list-input-mode` | — | `false` | List all supported input modes with examples |
-| `--watch` | — | — | Re-run on interval (e.g. 10s, 1m, 5m) |
 | `--width` | — | `70` | Max column width for tables |
 | `--ext` | — | — | Load JavaScript extension script (repeatable) |
 | `--ext-dir` | — | — | Override extension scripts directory |
@@ -1219,6 +1246,16 @@ These flags apply to `scan`, `scan-url`, `scan-request`, and `run` commands:
 | `--omit-response` | — | `false` | Omit raw HTTP request/response bytes from the output file (keeps metadata, smaller files; drops the `.resp.*` files under `--format fs`) |
 | `--fail-on` | — | — | Exit non-zero when a finding at/above this severity is present (`info`,`suspect`,`low`,`medium`,`high`,`critical`). Output is written first; `--soft-fail` overrides; per-child under `-P` |
 | `--split-by-host` | — | `false` | In stateless multi-target mode (`-S -T file`), write a separate per-host output file (`base-<host>.<ext>`) instead of one unified file (scan/run only; no-op for `--format fs`) |
+| `--parallel` | `-P` | `1` | Scan up to N targets concurrently as isolated child processes (requires `-S -T --split-by-host`, OR `--db-isolate -T`; each child keeps its own `--concurrency`) |
+| `--db-isolate` | — | `false` | Scan into a private temp DB, then merge results into `--db` at the end — lets parallel scans share one `--db` without write contention (SQLite only, not with `--stateless`) |
+| `--resume` | — | `false` | Resume a prior `-S -T --split-by-host -P` run from its `<output>.progress.json` manifest (bare `scan --resume` auto-discovers it) |
+| `--follow-subdomains` | — | `false` | Pull in-scope subdomains found in responses into the scan (exact hosts only; auto-on at `--intensity deep`) |
+| `--module-id` | — | — | Run exactly these module IDs (exact match against **both** active + passive registries; unlike `-m`, also selects passive modules) |
+| `--passive-only` | — | `false` | Run only passive modules (no active scan traffic); combine with `--module-id` |
+| `--headed` | — | `false` | Show the browser window during spidering (sugar for `--headless=false`) |
+| `--print-finding` | — | `false` | After the scan, print each finding to stdout as Markdown (pairs with `-S`/`--silent`) |
+| `--print-traffic` / `--print-traffic-tree` | — | `false` | After the scan, print the run's traffic to stdout (raw pairs / host-path tree) |
+| `--report-url` | — | — | URL for the "Raw Report URL" button in HTML reports |
 | `--retries` | — | `1` | Number of retry attempts for failed requests |
 | `--stream` | — | `false` | Process targets as a stream without buffering or deduplication |
 | `--header` | `-H` | — | Add custom HTTP header (repeatable, e.g. `-H 'Auth: Bearer tok'`) |
@@ -1263,16 +1300,16 @@ These flags apply to `scan`, `scan-url`, `scan-request`, and `run` commands:
 - `--skip-heuristics` is equivalent to `--heuristics-check=none`
 - Server mode requires API key auth by default (use `-A`/`--no-auth` to disable, or set `VIGOLIUM_API_KEY`)
 - Agent commands route every dispatch through the in-process **olium** engine; configure under `agent.olium.*` in `vigolium-configs.yaml`. Default provider `openai-compatible` points at a local Ollama (`http://localhost:11434/v1`, model `gemma4:latest`) via `custom_provider`. `openai-codex-oauth` reads `~/.codex/auth.json`; `anthropic-cli` needs `claude` in PATH; `anthropic-vertex` (Claude, `claude-*` model) and `google-vertex` (Gemini, `gemini-*` model) need a GCP service-account JSON via `--oauth-cred` or `$GOOGLE_APPLICATION_CREDENTIALS`
-- The `--provider`, `--model`, `--oauth-cred`, `--oauth-token`, `--llm-api-key`, `--gcp-project`, `--gcp-location` flags override `agent.olium.*` for one run on `agent query`, `agent autopilot`, `agent swarm`, and `agent olium` (and the top-level `vigolium olium` / `ol` alias)
+- The `--provider`, `--model`, `--oauth-cred`, `--oauth-token`, `--llm-api-key` flags override `agent.olium.*` for one run on `agent query`, `agent autopilot`, `agent swarm`, and `agent olium` (and the top-level `vigolium olium` / `ol` alias). `--base-url`, `--gcp-project`, `--gcp-location` are accepted on **query / swarm / olium only** — **not** `agent autopilot` (for a Vertex autopilot run, set project/location via `$GOOGLE_CLOUD_PROJECT`/`$GOOGLE_CLOUD_LOCATION` or `agent.olium.*` config)
 - `--scan-on-receive/-S` is ignored in remote ingest mode (server handles scanning)
 - `db clean --all` requires `--force` for safety
 - `db clean` with **no selector** is rejected — it never implicitly wipes the DB. Use `db clean --all --force` to delete all rows, or `db reset --force` to delete and recreate the database file (SQLite only). VACUUM runs automatically after every delete
 - Whitebox/source-aware scanning is an agent feature (`agent autopilot`/`agent swarm`): pass `--source <path-or-git-url>` (local dir, git URL, .zip/.tar.gz, or gs:// archive)
-- Phase aliases: `deparos`/`discover` = `discovery`, `spitolas` = `spidering`, `ext` = `extension`. The legacy alias `dynamic-assessment` is accepted for `audit`
+- Phase aliases: `deparos`/`discover` = `discovery`, `spitolas` = `spidering`, `cve`/`kis`/`known-issues` = `known-issue-scan`, `ext` = `extension`. The canonical vuln-scanning phase is `dynamic-assessment`; `audit`/`dast`/`assessment` are its aliases
 - `--module-tag` uses OR logic: modules matching any specified tag are included
 - `-m` and `--module-tag` merge results (union)
 - Use `agent swarm --discover` for full-scope AI-guided scanning
-- Agent swarm: `--source-analysis-only` requires `--source`; `--browser-auth` requires `--browser`; `--audit` requires `--source`; `--target` is required when `--source` is used with a remote target
+- Agent swarm: `--source-analysis-only` requires `--source`; `--audit`/`--piolium` require `--source`; `--target` is required when `--source` is used with a remote target (the browser is always available — there is no `--browser` flag). Direct auth injection: `--cookie`/`--header`/`--login-curl`/`--auth-config`
 - Agent autopilot: when `--source` is set, an audit harness runs automatically — auto-picks **piolium** if `pi`+piolium are installed, otherwise the embedded **vigolium-audit** at lite. Force with `--piolium <mode>` (auto-disables vigolium-audit) or `--audit <mode>`; disable with `--audit=off`. `--max-duration` default is `6h` (there is no `--max-commands`/`--token-budget` flag — the command budget is set by `--intensity`). `--triage` runs an AI triage pass after the scan; `--disable-guardrail` skips the prompt-safety classifier on the natural-language prompt
 - Agent audit: `--driver` must be `auto` (default), `both`, `audit`, or `piolium`. `auto` runs vigolium-audit and only falls back to piolium when the resolved claude/codex CLI is missing; `both` runs audit then piolium unconditionally. Under `auto`/`both`, `--mode` is restricted to the shared set (`lite`, `balanced`, `deep`, `revisit`, `confirm`, `merge`); driver-specific modes (audit's `reinvest`/`refresh`/`mock`/`diff`/`status`, piolium's `longshot`/`smoke`/`diff`/`status`) require forcing `--driver=audit|piolium`. `--intensity deep` resolves to the chain `deep,confirm`; `--modes a,b,c` chains modes. Audit-leg agent is selected by `--provider` (anthropic-*→claude, openai-*→codex) and `--agent {claude|codex}`, with BYOK via `--api-key`/`--oauth-token`/`--oauth-cred-file`. `-i/--interactive` hands you the audit harness (audit-only). `--driver=audit\|piolium` hard-errors on a missing runtime; under `both` a missing runtime is dropped with a warning. Post-pass project-wide findings dedup runs when a project UUID is set; suppress with `--no-dedup`
 - Agent audit `--driver=piolium`: `--mode` must be one of `lite`, `balanced`, `deep`, `revisit`, `confirm`, `merge`, `diff`, `longshot`, `status`, `smoke`. Requires `pi` in PATH and the piolium Pi extension installed. `--no-preflight` skips the pre-audit `pi` roundtrip

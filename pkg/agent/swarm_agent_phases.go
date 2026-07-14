@@ -143,7 +143,7 @@ func (s *SwarmRunner) runPlanAgent(ctx context.Context, cfg SwarmConfig, records
 		Verbose:        cfg.Verbose,
 	}
 
-	// Resolve effective vuln focus: --vuln-type takes precedence, --focus is a broader hint
+	// Resolve effective vuln focus: --vuln-type takes precedence, the intent-parsed focus is a broader hint
 	effectiveVulnType := cfg.VulnType
 	if effectiveVulnType == "" && cfg.Focus != "" {
 		effectiveVulnType = cfg.Focus

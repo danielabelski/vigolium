@@ -198,7 +198,7 @@ vigolium agent autopilot -t https://example.com --source ./app
 ### With a Focus Area
 
 ```bash
-vigolium agent autopilot -t https://example.com --focus "authentication bypass"
+vigolium agent autopilot -t https://example.com --prompt "focus on authentication bypass"
 ```
 
 ### Resuming a Session
@@ -234,20 +234,22 @@ vigolium agent session <uuid>
 
 ## Custom Instructions
 
-Append custom guidance to any agent prompt:
+Pass free-text task guidance to any agent with `--prompt` (or the positional
+`[prompt]` argument):
 
 ```bash
 vigolium agent swarm \
   -t https://example.com \
-  --instruction "Focus on the /api/v2 endpoints. The app uses JWT auth with RS256."
+  --prompt "Focus on the /api/v2 endpoints. The app uses JWT auth with RS256."
 ```
 
-Or load from a file:
+For a whole plan (prose guidance plus one or more raw HTTP request seeds in a
+single file), use `--plan-file`:
 
 ```bash
 vigolium agent swarm \
   -t https://example.com \
-  --instruction-file context.md
+  --plan-file context.md
 ```
 
 ## Dry Run and Prompt Inspection

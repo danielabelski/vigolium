@@ -114,7 +114,7 @@ func printFullExamples() {
 		"vigolium agent query --agent-label code-review --prompt-file custom-prompt.md",
 		"vigolium agent --list-templates",
 		"vigolium agent swarm -t https://example.com --discover",
-		"vigolium agent swarm -t https://example.com --discover --focus 'API injection'",
+		"vigolium agent swarm -t https://example.com --discover --prompt 'focus on API injection'",
 		"vigolium agent autopilot -t https://example.com",
 	})
 

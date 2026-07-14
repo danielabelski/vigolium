@@ -87,7 +87,7 @@ the vigolium `findings` table.
 │ user input                                                   │
 │   --target / --input (curl/raw/Burp/base64) / stdin pipe     │
 │   --source (local, git URL, diff, last-N commits)            │
-│   --focus, --instruction, --intensity                        │
+│   [prompt] / --prompt, --intensity                           │
 └──────────────────────────────────────────────────────────────┘
                               │
                               ▼ resolveInputAndTarget,
@@ -300,6 +300,44 @@ When `--source` is set, three things change:
 
 There is no separate code-audit pre-phase in the olium-backed autopilot — the
 single agent loop handles both code reading and dynamic probing.
+
+---
+
+## Knowledge base (`--knowledge-base`)
+
+`--knowledge-base <file|dir>` front-loads operator-supplied reference
+documentation — how the app authenticates, its roles / privilege tiers, its
+business logic — into the operator's opening brief. It works in both blackbox
+and whitebox runs and is where a KB matters most (blackbox, where the agent
+can't just read the code).
+
+The design is **read-on-demand**, mirroring `--source`: the full documents stay
+on disk, and only a compact **LLM-distilled summary** plus an **authoritative
+document index** are inlined. A directory of ten markdown files therefore adds a
+few hundred tokens to the prompt, not ten files' worth — the agent reads the
+specific file with `read_file`/`grep` when it needs detail, guided by an
+opinionated directive to consult the KB *before* authenticating or reasoning
+about roles.
+
+How it's assembled (in `runAutopilotOlium`, before the audit/pre-scan branch, so
+it reaches both execution paths):
+
+1. **Gather** — walk the file/dir, collect text docs (`.md`/`.markdown`/`.mdx`/
+   `.txt`/`.rst`/`.adoc`), skip binaries and `node_modules`/`.git`/`vendor`. Each
+   doc gets a deterministic one-line description (frontmatter `description:` →
+   first heading → first line).
+2. **Distill** — one bounded, tool-less LLM call (capped input corpus, 120s
+   timeout) turns the docs into a terse briefing (auth model, login flow, key
+   business logic, constraints). Best-effort: on any failure it degrades to the
+   deterministic index — the run never fails over the KB.
+3. **Inline + cache** — the assembled section is folded into the operator's
+   instruction and written to `<session-dir>/knowledge-base-brief.md` for
+   provenance and `--resume` reuse (a resumed run reuses the cached brief instead
+   of re-paying the LLM call).
+
+`--knowledge-base-raw` skips step 2 entirely and inlines the deterministic index
+only — for offline or byte-for-byte reproducible runs. A bad `--knowledge-base`
+path fails fast at flag-validation time.
 
 ---
 

@@ -458,7 +458,13 @@ func (h *Handlers) buildServerAgentSwarmFunc(targetURL, projectUUID, scanUUID, o
 			opts.Targets = []string{targetURL}
 		}
 		opts.ProjectUUID = projectUUID
+		// Prefer the pipeline-owned run-unique scan_uuid (passed via the
+		// ScanRequest) so it can attribute these findings to the run; fall back
+		// to any client-pinned scan_uuid.
 		opts.ScanUUID = scanUUID
+		if req.ScanUUID != "" {
+			opts.ScanUUID = req.ScanUUID
+		}
 		opts.HeuristicsCheck = "none"
 		opts.PassiveModules = []string{"all"}
 		opts.Silent = true

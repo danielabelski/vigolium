@@ -22,7 +22,7 @@ import (
 //
 // v1 limitations (documented in DURABLE_AUTOPILOT_REVIEW.md): resume skips the
 // native pre-scan and audit re-prep (the durable state already holds the
-// captured surface + plan) and does not replay the original --instruction; it
+// captured surface + plan) and does not replay the original prompt; it
 // re-enters the operator loop seeded from the durable scratchpad + candidates.
 func prepareAutopilotResume(ctx context.Context, repo *database.Repository, resumeUUID, sessionsDir string) error {
 	if repo == nil {
@@ -42,6 +42,10 @@ func prepareAutopilotResume(ctx context.Context, repo *database.Repository, resu
 	globalScanUUID = run.UUID
 	if run.ProjectUUID != "" {
 		globalProjectUUID = run.ProjectUUID
+		// Pin the resolver too: resolveProjectUUID caches via sync.Once, so setting
+		// the global flag alone would be ignored once the first resolve has fired.
+		// This makes the resumed project authoritative regardless of call ordering.
+		clicommon.PinProjectUUID(run.ProjectUUID)
 	}
 	if autopilotTarget == "" {
 		autopilotTarget = run.TargetURL

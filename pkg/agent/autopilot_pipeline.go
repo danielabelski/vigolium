@@ -93,6 +93,13 @@ type AutopilotPipelineConfig struct {
 	BrowserRequested bool
 	// RequiresBrowser means auth/setup should prefer browser assistance over HTTP-only preparation.
 	RequiresBrowser bool
+	// KeepBrowserEnabled forces the browser tool to stay available even when the
+	// browser-usage heuristic would deprioritize it (browser_unneeded). Unlike
+	// BrowserRequested it does NOT signal explicit user intent, so it only guards
+	// tool availability and never arms the browser-auth preflight or changes the
+	// planning hint. Set by the CLI autopilot path (browser is always-on for
+	// autopilot); the server leaves it false to keep its opt-in behavior.
+	KeepBrowserEnabled bool
 	// Credentials carries compact credentials extracted from the prompt or flag input.
 	Credentials string
 	// CredentialSets carries structured role/account pairs extracted from prompt input.
@@ -307,7 +314,7 @@ func (r *AutopilotPipelineRunner) RunAutonomous(ctx context.Context, cfg Autopil
 	bundle := buildAutopilotContextBundle(cfg, auditCtx, auditStatus, result.Warnings)
 	cfg.ContextBundle = &bundle
 	if cfg.BrowserEnabled {
-		if cfg.BrowserRequested || cfg.RequiresBrowser {
+		if cfg.BrowserRequested || cfg.RequiresBrowser || cfg.KeepBrowserEnabled {
 			cfg.BrowserEnabled = true
 		} else {
 			cfg.BrowserEnabled = bundle.BrowserDecision == "browser_required" || bundle.BrowserDecision == "browser_recommended"

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -487,7 +488,7 @@ func (p *WorkerPool) acquire(ctx context.Context) (*framedWorker, error) {
 	closed := p.closed
 	p.mu.Unlock()
 	if !closed && live == 0 {
-		if err := p.replaceWorker(); err != nil && err != ErrServiceClosed {
+		if err := p.replaceWorker(); err != nil && !errors.Is(err, ErrServiceClosed) {
 			zap.L().Warn("jstangle: on-demand worker respawn failed", zap.Error(err))
 		}
 	}
@@ -504,7 +505,7 @@ func (p *WorkerPool) acquire(ctx context.Context) (*framedWorker, error) {
 func (p *WorkerPool) release(worker *framedWorker) {
 	if worker.jobs.Load() >= int64(p.config.MaxJobs) || worker.exited() || workerRSSBytes(worker.cmd.Process.Pid) > p.config.MaxRSSBytes {
 		p.retire(worker, true)
-		if err := p.replaceWorker(); err != nil && err != ErrServiceClosed {
+		if err := p.replaceWorker(); err != nil && !errors.Is(err, ErrServiceClosed) {
 			// A transient start/resource failure must not permanently shrink the
 			// pool: retry in the background with backoff so capacity recovers,
 			// instead of silently dropping to zero (after which acquire stalls until
@@ -582,7 +583,7 @@ func (p *WorkerPool) replaceWorkerWithBackoff() {
 			return // capacity already restored elsewhere
 		}
 
-		if err := p.replaceWorker(); err == nil || err == ErrServiceClosed {
+		if err := p.replaceWorker(); err == nil || errors.Is(err, ErrServiceClosed) {
 			return
 		}
 		if backoff < 5*time.Second {

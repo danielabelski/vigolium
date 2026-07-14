@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -102,5 +105,124 @@ func TestRenderTranscriptSkipsMalformed(t *testing.T) {
 	}
 	if out := terminal.StripANSI(buf.String()); !strings.Contains(out, "valid") {
 		t.Errorf("expected the valid line to render despite a malformed predecessor; got %q", out)
+	}
+}
+
+// The committed sample transcripts external tools parse against
+// (test/testdata/agent-transcripts/README.md). These tests guard them against
+// schema drift and confirm the shipped reader renders them. Regenerate with
+// `go run ./test/testdata/agent-transcripts/generate.go`.
+const (
+	fixtureDir              = "../../test/testdata/agent-transcripts/"
+	sampleTranscriptFixture = fixtureDir + "autopilot-transcript.jsonl"
+	durableTranscriptFixt   = fixtureDir + "autopilot-durable-transcript.jsonl"
+)
+
+func TestRenderTranscriptFixture(t *testing.T) {
+	cases := []struct {
+		name  string
+		path  string
+		wants []string // markers that must survive the render round trip
+	}{
+		{
+			name: "autopilot",
+			path: sampleTranscriptFixture,
+			wants: []string{
+				"◆ model: openai-codex-oauth gpt-5.4",
+				"▸ user", "⋈ thinking", "▶ http_request", "✓ http_request",
+				"✗", // the errored PATCH tool result
+				"Horizontal IDOR/BOLA on GET /api/users/{id}",
+			},
+		},
+		{
+			name: "durable",
+			path: durableTranscriptFixt,
+			wants: []string{
+				"◆ model: anthropic-oauth claude-opus-4-8",
+				"⋈ thinking",
+				"query_records to see the captured endpoints", // multi-line thinking body
+				"▶ query_records", "▶ replay_request",
+				"✗",                              // rate-limited sweep tool error
+				"✖ error: provider stream error", // terminal engine error line
+				"BOLA on GET /api/orders/{id}",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.FromSlash(tc.path))
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			assertTranscriptStructure(t, raw)
+
+			var buf bytes.Buffer
+			if err := renderTranscript(&buf, bytes.NewReader(raw)); err != nil {
+				t.Fatalf("renderTranscript(fixture): %v", err)
+			}
+			out := terminal.StripANSI(buf.String())
+			for _, want := range tc.wants {
+				if !strings.Contains(out, want) {
+					t.Errorf("rendered fixture missing %q", want)
+				}
+			}
+		})
+	}
+}
+
+// assertTranscriptStructure verifies every non-empty line is valid JSON matching
+// the Pi header trio + version and a linear parentId chain (session carries no
+// parentId), with at least one assistant + toolResult message.
+func assertTranscriptStructure(t *testing.T, raw []byte) {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) < 5 {
+		t.Fatalf("fixture unexpectedly short: %d lines", len(lines))
+	}
+	wantHeader := []string{"session", "model_change", "thinking_level_change"}
+	var prevID string
+	sawAssistant, sawToolResult := false, false
+	for i, ln := range lines {
+		var env struct {
+			Type     string  `json:"type"`
+			ID       string  `json:"id"`
+			Version  int     `json:"version"`
+			ParentID *string `json:"parentId"`
+			Message  struct {
+				Role string `json:"role"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(ln), &env); err != nil {
+			t.Fatalf("line %d is not valid JSON: %v\n%s", i+1, err, ln)
+		}
+		if i < len(wantHeader) && env.Type != wantHeader[i] {
+			t.Errorf("line %d type = %q, want %q (header trio)", i+1, env.Type, wantHeader[i])
+		}
+		switch env.Type {
+		case "session":
+			if env.Version != 3 {
+				t.Errorf("session version = %d, want 3", env.Version)
+			}
+			prevID = "" // chain restarts null at the next node
+			continue
+		case "message":
+			switch env.Message.Role {
+			case "assistant":
+				sawAssistant = true
+			case "toolResult":
+				sawToolResult = true
+			}
+		}
+		if prevID == "" {
+			if env.ParentID != nil {
+				t.Errorf("line %d (%s) parentId = %q, want null (chain head)", i+1, env.Type, *env.ParentID)
+			}
+		} else if env.ParentID == nil || *env.ParentID != prevID {
+			t.Errorf("line %d (%s) parentId = %v, want %q (broken chain)", i+1, env.Type, env.ParentID, prevID)
+		}
+		prevID = env.ID
+	}
+	if !sawAssistant || !sawToolResult {
+		t.Errorf("fixture missing message roles: assistant=%v toolResult=%v", sawAssistant, sawToolResult)
 	}
 }

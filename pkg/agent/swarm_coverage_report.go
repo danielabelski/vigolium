@@ -143,13 +143,14 @@ func WriteSwarmCoverageReport(sessionDir string, report *SwarmCoverageReport) st
 }
 
 // findingAggregatesFromDB returns finding counts grouped by module_id and
-// by URL. Uses two SQL GROUP BY queries — bounded by distinct-value count,
-// not finding count — so it scales to projects with thousands of findings.
-func findingAggregatesFromDB(ctx context.Context, repo *database.Repository, projectUUID string) (byModule, byEndpoint map[string]int) {
+// by URL, scoped to one agentic-scan run. Uses two SQL GROUP BY queries —
+// bounded by distinct-value count, not finding count — so it scales to
+// projects with thousands of findings.
+func findingAggregatesFromDB(ctx context.Context, repo *database.Repository, agenticScanUUID string) (byModule, byEndpoint map[string]int) {
 	if repo == nil {
 		return nil, nil
 	}
-	mod, err := database.CountFindingsByModule(ctx, repo.DB(), projectUUID)
+	mod, err := database.CountFindingsByModule(ctx, repo.DB(), agenticScanUUID)
 	if err != nil {
 		zap.L().Debug("findingAggregatesFromDB: CountFindingsByModule failed", zap.Error(err))
 	} else if len(mod) > 0 {
@@ -158,7 +159,7 @@ func findingAggregatesFromDB(ctx context.Context, repo *database.Repository, pro
 			byModule[k] = int(v)
 		}
 	}
-	url, err := database.CountFindingsByURL(ctx, repo.DB(), projectUUID)
+	url, err := database.CountFindingsByURL(ctx, repo.DB(), agenticScanUUID)
 	if err != nil {
 		zap.L().Debug("findingAggregatesFromDB: CountFindingsByURL failed", zap.Error(err))
 	} else if len(url) > 0 {

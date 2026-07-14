@@ -90,9 +90,9 @@ func registerLightweightScanIOFlags(flags *pflag.FlagSet) {
 // markFlagDeprecated hides oldName from --help and makes pflag emit a one-time
 // stderr warning ("Flag --<oldName> has been deprecated, use --<replacement>")
 // when it is set. Use after registering a hidden alias whose variable is shared
-// with the canonical flag.
+// with the canonical flag. pflag's MarkDeprecated sets both Deprecated and Hidden
+// (Deprecated alone still renders in usage, since FlagUsages only skips Hidden);
+// the error is ignored — it only fires for an unknown flag or an empty message.
 func markFlagDeprecated(flags *pflag.FlagSet, oldName, replacement string) {
-	if f := flags.Lookup(oldName); f != nil {
-		f.Deprecated = "use --" + replacement
-	}
+	_ = flags.MarkDeprecated(oldName, "use --"+replacement)
 }

@@ -22,8 +22,14 @@ import (
 	"github.com/vigolium/vigolium/pkg/types"
 )
 
-// runMultiAppSwarm fans out parallel swarm runs for multiple apps.
-func runMultiAppSwarm(ctx context.Context, cmd *cobra.Command, engine *agent.Engine, settings *config.Settings, repo *database.Repository, intent *agent.ScanIntent) error {
+// runMultiAppSwarm fans out parallel swarm runs for multiple apps. Each app
+// builds its own engine (see below), so the shared engine arg is unused.
+func runMultiAppSwarm(ctx context.Context, cmd *cobra.Command, _ *agent.Engine, settings *config.Settings, repo *database.Repository, intent *agent.ScanIntent) error {
+	// Same as the single-app leg: browser is always available for swarm. This leg
+	// bypasses runAgentSwarm, so force it here too or the swarm pipeline's
+	// settings.Agent.Browser.IsEnabled() check would fall back to the config.
+	forceSwarmBrowserOn(settings)
+
 	if swarmMaxDuration > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, swarmMaxDuration)
@@ -32,9 +38,13 @@ func runMultiAppSwarm(ctx context.Context, cmd *cobra.Command, engine *agent.Eng
 
 	return runMultiAppFanOut(ctx, intent, func(ctx context.Context, idx int, app agent.AppIntent) error {
 		agenticScanUUID := uuid.New().String()
+		// Each app runs concurrently, so it needs its own native scan_uuid —
+		// sharing one across apps would let their findings (and the pipeline's
+		// run-scoped attribution/counts) bleed into each other.
+		scanUUID := uuid.New().String()
 		sessionDir, _ := agent.EnsureSessionDir(settings.Agent.EffectiveSessionsDir(), agenticScanUUID)
 
-		instruction := mergeIntentInstruction(swarmInstruction, swarmInstructionFile, app)
+		instruction := mergeIntentInstruction(swarmInstruction, app)
 		instruction = prependVerbatimPrompt(instruction, swarmInstructionPrefix)
 		focus := swarmFocus
 		if app.Focus != "" {
@@ -72,7 +82,7 @@ func runMultiAppSwarm(ctx context.Context, cmd *cobra.Command, engine *agent.Eng
 		phaseCfg := swarmNativePhaseConfig{
 			Target:      app.Target,
 			ProjectUUID: projectUUID,
-			ScanUUID:    globalScanUUID,
+			ScanUUID:    scanUUID,
 			ConfigPath:  globalConfig,
 			Verbose:     globalVerbose,
 		}
@@ -88,7 +98,7 @@ func runMultiAppSwarm(ctx context.Context, cmd *cobra.Command, engine *agent.Eng
 			ShowPrompt:      swarmShowPrompt,
 			CodeAudit:       codeAudit,
 			ForceExtensions: swarmForceExtensions,
-			Browser:         swarmBrowser || app.Browser || app.RequiresBrowser,
+			Browser:         settings.Agent.Browser.IsEnabled(), // forced on above; matches the single-app leg
 			Auth:            swarmBrowserAuth || app.RequiresBrowser,
 			Credentials: func() string {
 				if app.Credentials != "" {
@@ -125,7 +135,7 @@ func runMultiAppSwarm(ctx context.Context, cmd *cobra.Command, engine *agent.Eng
 			SessionDir:      sessionDir,
 			AgenticScanUUID: agenticScanUUID,
 			ProjectUUID:     projectUUID,
-			ScanUUID:        globalScanUUID,
+			ScanUUID:        scanUUID,
 		}
 
 		// Wire scan callback using per-app target (not the package-level swarmTarget)
@@ -139,7 +149,11 @@ func runMultiAppSwarm(ctx context.Context, cmd *cobra.Command, engine *agent.Eng
 			cfg.DiscoverFunc = buildMultiAppSwarmDiscoverFunc(settings, repo, phaseCfg, &generatedAuthConfig)
 		}
 
-		swarmRunner := agent.NewSwarmRunner(engine, repo)
+		// Each app gets its own engine: the swarm run replaces the engine's
+		// contextCache pointer and accumulates token usage on it, so sharing one
+		// engine across the concurrent app fan-out would race and cross-bill
+		// tokens. The provider factory + process-wide rate limiter stay shared.
+		swarmRunner := agent.NewSwarmRunner(agent.NewEngine(settings, repo), repo)
 		_, runErr := swarmRunner.Run(ctx, cfg)
 		return runErr
 	})
@@ -152,7 +166,7 @@ func buildMultiAppSwarmScanFunc(settings *config.Settings, repo *database.Reposi
 	return func(ctx context.Context, req agent.ScanRequest) error {
 		opts := types.DefaultOptions()
 		opts.Targets = []string{phaseCfg.Target}
-		opts.ScanUUID = phaseCfg.ScanUUID
+		opts.ScanUUID = firstNonEmptyString(req.ScanUUID, phaseCfg.ScanUUID)
 		opts.ProjectUUID = phaseCfg.ProjectUUID
 		opts.ConfigPath = phaseCfg.ConfigPath
 		opts.HeuristicsCheck = "none"

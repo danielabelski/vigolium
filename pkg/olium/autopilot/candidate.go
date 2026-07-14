@@ -37,20 +37,19 @@ func validCandidateClass(s string) bool {
 }
 
 // CandidateSink is the narrow persistence surface the propose_candidate tool
-// needs. *database.Repository does not satisfy it directly (its SaveCandidate
-// returns (bool, error) for dedup accounting), so use RepoCandidateSink to
-// adapt one. Keeping the interface tiny lets tests swap in a fake.
+// needs. It returns whether the candidate was newly inserted (true) or
+// collapsed into an existing one by dedup (false) so the tool only counts
+// distinct candidates. *database.Repository already has this shape; tests swap
+// in a fake.
 type CandidateSink interface {
-	SaveCandidate(ctx context.Context, cand *database.AgentFindingCandidate) error
+	SaveCandidate(ctx context.Context, cand *database.AgentFindingCandidate) (inserted bool, err error)
 }
 
-// repoCandidateSink adapts a *database.Repository to CandidateSink, discarding
-// the inserted bool (the tool tracks its own running count).
+// repoCandidateSink adapts a *database.Repository to CandidateSink.
 type repoCandidateSink struct{ repo *database.Repository }
 
-func (r repoCandidateSink) SaveCandidate(ctx context.Context, cand *database.AgentFindingCandidate) error {
-	_, err := r.repo.SaveCandidate(ctx, cand)
-	return err
+func (r repoCandidateSink) SaveCandidate(ctx context.Context, cand *database.AgentFindingCandidate) (bool, error) {
+	return r.repo.SaveCandidate(ctx, cand)
 }
 
 // RepoCandidateSink wraps a repository as a CandidateSink for the tool. Returns
@@ -334,10 +333,28 @@ func (c *ProposeCandidateContext) PersistCandidateFromArgs(ctx context.Context, 
 		Tags:            tags,
 	}
 
-	if err := c.Repo.SaveCandidate(ctx, cand); err != nil {
+	inserted, err := c.Repo.SaveCandidate(ctx, cand)
+	if err != nil {
 		return PersistResult{
 			Message: fmt.Sprintf("failed to save candidate: %v", err),
 			IsError: true,
+		}
+	}
+	if !inserted {
+		// Deduplicated against an existing candidate for this run. Don't bump
+		// the counter — it tracks distinct candidates, and the already-recorded
+		// row will be verified. Reporting it as success keeps the loop from
+		// retrying the same proposal.
+		n := c.Count.Load()
+		return PersistResult{
+			Message: fmt.Sprintf("Candidate deduplicated (hash=%s) — already recorded this run; not re-counted", dedupHash[:12]),
+			Count:   n,
+			Details: map[string]any{
+				"deduplicated": true,
+				"severity":     severity,
+				"class":        class,
+				"title":        title,
+			},
 		}
 	}
 

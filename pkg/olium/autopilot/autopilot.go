@@ -86,12 +86,23 @@ func (q *quotedLineWriter) Reset() { q.atNewline = true }
 // both override this on a per-run basis.
 const DefaultAutopilotMaxTurns = 200
 
-// autopilotEmptyTurnNudge is the user-role reminder appended after a
+// autopilotEmptyTurnNudge builds the user-role reminder appended after a
 // text-only turn (no tool_calls). Names halt_scan explicitly so the model
 // has both a "resume work" and a "stop cleanly" path described in one
 // sentence — the generic engine default doesn't know about autopilot's
-// halt tool by name.
-const autopilotEmptyTurnNudge = "You produced text but did not call any tool. The autopilot loop only progresses when you invoke a tool. If you are genuinely done, call halt_scan with a one-line reason. Otherwise pick the next concrete step (run_scan to scan natively, browser_probe or web_fetch to populate http_records, query_records to re-inspect what's already there, report_finding if you have evidence) and invoke it now. Do not respond with prose alone."
+// halt tool by name. Tool names track the real registry: run_native_scan is
+// the scanner tool, and the finding verb follows the mode (enforced exposes
+// propose_candidate, every other mode exposes report_finding).
+func autopilotEmptyTurnNudge(mode string) string {
+	findingStep := "report_finding if you have evidence"
+	if mode == config.AutopilotModeEnforced {
+		findingStep = "propose_candidate if you have evidence"
+	}
+	return "You produced text but did not call any tool. The autopilot loop only progresses when you invoke a tool. " +
+		"If you are genuinely done, call halt_scan with a one-line reason. Otherwise pick the next concrete step " +
+		"(run_native_scan to scan natively, browser_probe or web_fetch to populate http_records, query_records to " +
+		"re-inspect what's already there, " + findingStep + ") and invoke it now. Do not respond with prose alone."
+}
 
 // Options configures an autopilot run.
 type Options struct {
@@ -565,7 +576,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 	// proposeCtx is the candidate sink for shadow/enforced mode; nil in legacy.
 	// Its SectionUUID is repointed at each rotation by the section controller.
+	// findingTool is the mode's finding tool, captured so the Claude Code
+	// sentinel path (below) dispatches through the SAME tool instead of
+	// re-deriving the mode→behavior mapping and risking drift.
 	var proposeCtx *ProposeCandidateContext
+	var findingTool tool.Tool
 	if opts.Repo != nil {
 		switch mode {
 		case config.AutopilotModeEnforced:
@@ -578,7 +593,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 				AgenticScanUUID: opts.AgenticScanUUID,
 				Target:          opts.Target,
 			}
-			tools.Register(NewProposeCandidateTool(proposeCtx))
+			findingTool = NewProposeCandidateTool(proposeCtx)
 		case config.AutopilotModeShadow:
 			// Shadow: findings still land directly (unchanged behavior) but
 			// each is mirrored into a candidate so the verifier can grade it.
@@ -588,10 +603,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 				AgenticScanUUID: opts.AgenticScanUUID,
 				Target:          opts.Target,
 			}
-			tools.Register(NewShadowReportFindingTool(reportCtx, proposeCtx))
+			findingTool = NewShadowReportFindingTool(reportCtx, proposeCtx)
 		default:
-			tools.Register(NewReportFindingTool(reportCtx))
+			findingTool = NewReportFindingTool(reportCtx)
 		}
+		tools.Register(findingTool)
 
 		// Vigolium-aware tools: scan launching, extension execution, and
 		// session/finding queries. All require a real *database.Repository
@@ -690,7 +706,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		// calling halt_scan. Capable models that genuinely have nothing left
 		// to do almost always halt on the first nudge — one round of waste.
 		NudgeOnEmptyToolCalls: 2,
-		NudgeOnEmptyMessage:   autopilotEmptyTurnNudge,
+		NudgeOnEmptyMessage:   autopilotEmptyTurnNudge(mode),
 	}
 
 	// Persist a Pi-style JSONL transcript beside the other session artifacts
@@ -754,14 +770,21 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if isClaudeCodeProvider(opts.Provider) {
 		ccParser = &claudeCodeBlockParser{
 			onFinding: func(args map[string]any) {
-				// runCtx is reassigned across re-entries; capturing it by
-				// closure is fine because PersistFromArgs only reads ctx
-				// during the call (no goroutine retains it).
-				res := reportCtx.PersistFromArgs(runCtx, args)
+				// Dispatch through the mode's registered finding tool so the
+				// sentinel path can't drift from the real tool contract
+				// (enforced→propose_candidate, shadow→report+mirror, legacy→
+				// report). runCtx is reassigned across re-entries; capturing it
+				// by closure is fine because Execute only reads ctx during the
+				// call (no goroutine retains it).
+				if findingTool == nil {
+					_, _ = fmt.Fprintf(opts.ToolLog, "[claudecode] finding dropped: no sink configured for this run\n")
+					return
+				}
+				res, _ := findingTool.Execute(runCtx, args, nil)
 				if res.IsError {
-					_, _ = fmt.Fprintf(opts.ToolLog, "[claudecode] report_finding: %s\n", res.Message)
+					_, _ = fmt.Fprintf(opts.ToolLog, "[claudecode] finding: %s\n", res.Content)
 				} else {
-					_, _ = fmt.Fprintf(opts.ToolLog, "[claudecode] %s\n", res.Message)
+					_, _ = fmt.Fprintf(opts.ToolLog, "[claudecode] %s\n", res.Content)
 				}
 			},
 			onHalt: func(reason string) {

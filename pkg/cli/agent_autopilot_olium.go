@@ -40,10 +40,21 @@ import (
 //   - Drive autopilot.Run, which owns the engine and AI loop
 //   - Update the parent row on completion/failure
 //   - Print a short summary for the operator
-func runAutopilotOlium(settings *config.Settings, repo *database.Repository, instruction string) error {
-	// Ctx + timeout + signal handling — same shape as runAgentAutopilot's
-	// legacy path so operator muscle memory transfers.
-	ctx, cancel := context.WithCancel(context.Background())
+func runAutopilotOlium(parentCtx context.Context, settings *config.Settings, repo *database.Repository, instruction string) error {
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	// Browser is always available for autopilot — force it on regardless of the
+	// config default so the operator always gets the browser tool and
+	// browser-assisted auth can run. This is the single chokepoint for both the
+	// direct and multi-app paths (there is no --browser flag).
+	enabledBrowser := true
+	settings.Agent.Browser.Enable = &enabledBrowser
+
+	// Ctx + timeout + signal handling — descend from the caller's context so an
+	// outer cancellation/timeout (e.g. the multi-app scheduler) actually stops
+	// this run, then layer our own timeout + signal handling on top.
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 	if autopilotMaxDuration > 0 {
 		ctx, cancel = context.WithTimeout(ctx, autopilotMaxDuration)
@@ -81,7 +92,7 @@ func runAutopilotOlium(settings *config.Settings, repo *database.Repository, ins
 		// discover them via filesystem tools. vigolium-scanner is always
 		// copied; agent-browser is copied only when the browser is enabled,
 		// which matches the tool-availability surface the agent sees.
-		agent.CopySkillsToSessionDir(sessionDir, autopilotBrowser || settings.Agent.Browser.IsEnabled())
+		agent.CopySkillsToSessionDir(sessionDir, settings.Agent.Browser.IsEnabled())
 	}
 
 	projectUUID, _ := resolveProjectUUID()
@@ -173,11 +184,47 @@ func runAutopilotOlium(settings *config.Settings, repo *database.Repository, ins
 		MaxDuration:     autopilotMaxDuration,
 		AuditDriverMode: autopilotAudit,
 		PioliumMode:     autopilotPiolium,
-		BrowserEnabled:  autopilotBrowser || settings.Agent.Browser.IsEnabled(),
+		BrowserEnabled:  settings.Agent.Browser.IsEnabled(),
 		NoPrescan:       autopilotNoPrescan,
 		SessionDir:      sessionDir,
 		AgenticScanUUID: parentAgenticScanUUID,
 	})
+
+	// Prior context: front-load a bounded summary of the traffic + findings
+	// already in the project DB (Burp imports, prior scans/findings) so the
+	// operator mines them instead of re-deriving from scratch. Built here — before
+	// this run's pre-scan — so it reflects genuinely prior data, and layered onto
+	// both the source (pipeline) and target (pre-scan) paths below.
+	if brief, nRec, nFind := buildPriorContextBrief(ctx, repo, projectUUID, autopilotPriorContext); brief != "" {
+		fmt.Fprintf(os.Stderr, "%s Prior context: front-loaded %d record(s) · %d finding(s) from the project DB (--prior-context %s)\n",
+			terminal.InfoSymbol(), nRec, nFind, autopilotPriorContext)
+		if strings.TrimSpace(instruction) != "" {
+			instruction = instruction + "\n\n" + brief
+		} else {
+			instruction = brief
+		}
+	}
+
+	// Knowledge base: fold operator-supplied reference docs (auth model, login
+	// flows, roles, business logic) into the operator's brief. Read-on-demand
+	// like --source — only a compact LLM-distilled summary + a document index
+	// are inlined here; the full docs stay on disk for the agent to read_file /
+	// grep, so a large docs tree never floods the context window. Layered onto
+	// `instruction` before the audit-cfg branch so it reaches BOTH the pipeline
+	// (whitebox/audit) and direct (blackbox/pre-scan) paths. Failure is
+	// non-fatal — the run continues without the brief.
+	if kb := strings.TrimSpace(autopilotKnowledgeBase); kb != "" {
+		section, kbErr := buildKnowledgeBaseSection(ctx, prov, model, kb, autopilotKnowledgeBaseRaw, sessionDir, os.Stderr)
+		if kbErr != nil {
+			fmt.Fprintf(os.Stderr, "%s Knowledge base: %v — continuing without it\n", terminal.WarningSymbol(), kbErr)
+		} else if section != "" {
+			if strings.TrimSpace(instruction) != "" {
+				instruction = instruction + "\n\n" + section
+			} else {
+				instruction = section
+			}
+		}
+	}
 
 	// Audit (audit or piolium) runs automatically when --source is set
 	// unless --audit=off (and --piolium empty/off).
@@ -220,7 +267,7 @@ func runAutopilotOlium(settings *config.Settings, repo *database.Repository, ins
 		Out:              streamWriter,
 		Verbose:          autopilotVerbose,
 		SystemPrompt:     effectiveSystemPrompt,
-		BrowserAvailable: autopilotBrowser || settings.Agent.Browser.IsEnabled(),
+		BrowserAvailable: settings.Agent.Browser.IsEnabled(),
 		SkillNames:       autopilotSkills,
 		SkillTags:        autopilotSkillTags,
 		NoSkillFilter:    autopilotNoSkillFilter,
@@ -255,15 +302,17 @@ func runAutopilotOlium(settings *config.Settings, repo *database.Repository, ins
 
 	finalizeOliumAutopilotRun(repo, parentAgenticScanUUID, model, startedAt, result, runErr)
 
-	if runErr != nil {
-		webhook.FireAgenticScan(settings, repo, parentAgenticScanUUID)
-		if errors.Is(runErr, context.DeadlineExceeded) {
-			return fmt.Errorf("autopilot session timed out after %s", autopilotMaxDuration)
-		}
-		return fmt.Errorf("autopilot session failed: %w", runErr)
+	// A wall-deadline timeout is the designed stop condition for a time-boxed
+	// autopilot, not a failure: the operator produced real work (and a valid
+	// transcript) right up to the wall, so we still finalize + emit artifacts.
+	// Any other error is fatal. The extra AI triage step is skipped past the
+	// wall (no budget left).
+	walledOut, fatal := handleAutopilotWallOrError(ctx, runErr, settings, repo, parentAgenticScanUUID, streamWriter)
+	if fatal != nil {
+		return fatal
 	}
 
-	if autopilotTriage {
+	if autopilotTriage && !walledOut {
 		triageEngine := agent.NewEngine(settings, repo)
 		if _, terr := agent.RunAutopilotTriage(ctx, triageEngine, repo, agent.AutopilotTriageParams{
 			TargetURL:       autopilotTarget,
@@ -279,8 +328,12 @@ func runAutopilotOlium(settings *config.Settings, repo *database.Repository, ins
 		}
 	}
 
+	summaryStatus := autopilotRunStatus(result)
+	if walledOut {
+		summaryStatus = "timed_out"
+	}
 	if globalJSON {
-		emitAgentScanJSONSummary(repo, projectUUID, parentAgenticScanUUID, autopilotRunStatus(result), sessionDir)
+		emitAgentScanJSONSummary(repo, projectUUID, parentAgenticScanUUID, summaryStatus, sessionDir)
 	} else {
 		printOliumAutopilotSummary(result, sessionDir, repo, parentAgenticScanUUID)
 	}
@@ -325,6 +378,60 @@ func autopilotRunStatus(result *autopilot.Result) string {
 	return "completed"
 }
 
+// prescanBudget bounds the native pre-scan to a fraction of the autopilot wall.
+// Without a cap the pre-scan runs unbounded (runner.LaunchScan sets no duration)
+// and inherits the full session ctx, so a wedged browser spider (the class
+// runSpiderWatchdog catches, but whose budget is minutes) consumes the entire
+// wall and starves the operator agent with "context deadline exceeded". Capping
+// at clamp(wall/3, 30s, 4m) guarantees the agent gets the majority of the wall
+// even when the pre-scan stalls, while never exceeding the wall itself.
+func prescanBudget(wall time.Duration) time.Duration {
+	// NB: pkg/cli shadows the builtin min/max with an int-only min (db_list.go),
+	// so an explicit clamp is used rather than min/max on time.Duration.
+	budget := wall / 3
+	if budget > 4*time.Minute {
+		budget = 4 * time.Minute
+	}
+	if budget < 30*time.Second {
+		budget = 30 * time.Second
+	}
+	if wall > 0 && budget > wall {
+		budget = wall
+	}
+	return budget
+}
+
+// isWallTimeout reports whether a finished autopilot run stopped because it hit
+// its max-duration wall (a graceful, expected terminal state) rather than a real
+// failure. It keys off the wall-bounded ctx, NOT runErr: the engine surfaces its
+// failure through engine.Event.Err — a plain string field — so the underlying
+// error sentinel is already gone before the caller sees runErr, and
+// errors.Is(runErr, …) can never match (this is why the run error can't carry
+// context.DeadlineExceeded). ctx.Err()==DeadlineExceeded iff the wall fired,
+// which correctly excludes a transient per-call provider timeout (wall ctx
+// un-fired) and Ctrl-C/SIGTERM (Canceled, not DeadlineExceeded).
+func isWallTimeout(ctx context.Context, runErr error) bool {
+	return runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
+// handleAutopilotWallOrError classifies a finished autopilot run for the two run
+// paths (direct + pipeline), which share this exact prologue. A wall-deadline
+// timeout is a graceful stop: it returns walledOut=true with fatal=nil so the
+// caller still finalizes and emits artifacts (logging the "finalizing partial
+// results" line). Any other error is fatal: it fires the webhook and returns the
+// wrapped error for the caller to propagate. A clean run returns (false, nil).
+func handleAutopilotWallOrError(ctx context.Context, runErr error, settings *config.Settings, repo *database.Repository, agenticScanUUID string, w io.Writer) (walledOut bool, fatal error) {
+	walledOut = isWallTimeout(ctx, runErr)
+	if runErr != nil && !walledOut {
+		webhook.FireAgenticScan(settings, repo, agenticScanUUID)
+		return false, fmt.Errorf("autopilot session failed: %w", runErr)
+	}
+	if walledOut {
+		_, _ = fmt.Fprintf(w, "[autopilot] wall reached after %s — finalizing partial results\n", autopilotMaxDuration)
+	}
+	return walledOut, nil
+}
+
 // buildPrescanInstruction launches the autopilot native pre-scan (when
 // permitted) and returns a short context blob to splice into the operator
 // agent's initial Instruction. Returns "" when the pre-scan is disabled,
@@ -355,11 +462,20 @@ func buildPrescanInstruction(ctx context.Context, repo *database.Repository, pro
 		return ""
 	}
 
-	fmt.Fprintf(os.Stderr, "%s Pre-scan: %s strategy against %s (full native scan: discover + spider + dynamic-assessment)\n",
+	preScanBudget := prescanBudget(autopilotMaxDuration)
+
+	fmt.Fprintf(os.Stderr, "%s Pre-scan: %s strategy against %s (native scan: discover + dynamic-assessment; budget %s)\n",
 		terminal.InfoSymbol(),
 		terminal.Cyan(strategy),
-		terminal.Cyan(autopilotTarget))
+		terminal.Cyan(autopilotTarget),
+		terminal.Cyan(preScanBudget.Round(time.Second).String()))
 
+	// Browser spidering is intentionally OFF for the pre-scan. It is the slow,
+	// wedge-prone phase: on a real target it can hang the browser (abandoned by
+	// runSpiderWatchdog, leaking a Chrome that then contends with the operator
+	// agent's own agent-browser). Discovery + dynamic-assessment seed plenty of
+	// http_records/findings fast, and the operator agent does its own browser
+	// exploration — so the pre-scan gains little from spidering and pays a lot.
 	params := runner.LaunchParams{
 		Targets:          []string{autopilotTarget},
 		ProjectUUID:      projectUUID,
@@ -367,7 +483,8 @@ func buildPrescanInstruction(ctx context.Context, repo *database.Repository, pro
 		Repository:       repo,
 		ScanningStrategy: strategy,
 		EnableDiscovery:  true,
-		EnableSpidering:  true,
+		EnableSpidering:  false,
+		ScanMaxDuration:  preScanBudget,
 	}
 	res, err := runner.LaunchScan(ctx, params)
 	if err != nil {
@@ -507,16 +624,23 @@ func runAutopilotOliumPipeline(
 		StreamWriter:          streamWriter,
 		Audit:                 auditCfg,
 		AuditHarness:          harness,
-		BrowserEnabled:        autopilotBrowser || settings.Agent.Browser.IsEnabled(),
-		BrowserRequested:      autopilotBrowser || autopilotRequiresBrowser,
+		BrowserEnabled:        settings.Agent.Browser.IsEnabled(),
+		BrowserRequested:      autopilotRequiresBrowser,
 		RequiresBrowser:       autopilotRequiresBrowser,
-		Credentials:           autopilotCredentials,
-		AuthRequired:          autopilotAuthRequired,
-		BrowserStartURL:       autopilotBrowserStartURL,
-		FocusRoutes:           append([]string(nil), autopilotFocusRoutes...),
-		PreflightDiscovery:    !autopilotNoPreflight,
-		PostHaltVerify:        !autopilotNoPostHaltVerify,
-		PostHaltGapThreshold:  autopilotPostHaltGap,
+		// Browser is always-on for autopilot (runAutopilotOlium forces
+		// agent.browser.enable), so keep the tool available even when the pipeline
+		// runner's decideBrowserUsage heuristic returns browser_unneeded for a
+		// plain UI/DOM-XSS prompt. This guards only tool availability — it does not
+		// flag explicit intent, so the browser-auth preflight stays gated on real
+		// credentials / RequiresBrowser.
+		KeepBrowserEnabled:   settings.Agent.Browser.IsEnabled(),
+		Credentials:          autopilotCredentials,
+		AuthRequired:         autopilotAuthRequired,
+		BrowserStartURL:      autopilotBrowserStartURL,
+		FocusRoutes:          append([]string(nil), autopilotFocusRoutes...),
+		PreflightDiscovery:   !autopilotNoPreflight,
+		PostHaltVerify:       !autopilotNoPostHaltVerify,
+		PostHaltGapThreshold: autopilotPostHaltGap,
 	}
 
 	engine := agent.NewEngine(settings, repo)
@@ -525,16 +649,19 @@ func runAutopilotOliumPipeline(
 
 	finalizeOliumAutopilotPipelineRun(repo, parentAgenticScanUUID, startedAt, result, runErr)
 
-	if runErr != nil {
-		webhook.FireAgenticScan(settings, repo, parentAgenticScanUUID)
-		if errors.Is(runErr, context.DeadlineExceeded) {
-			return fmt.Errorf("autopilot session timed out after %s", autopilotMaxDuration)
-		}
-		return fmt.Errorf("autopilot session failed: %w", runErr)
+	// Same graceful wall-hit handling as the direct path: a max-duration
+	// timeout finalizes (summary + artifacts) instead of erroring.
+	walledOut, fatal := handleAutopilotWallOrError(ctx, runErr, settings, repo, parentAgenticScanUUID, streamWriter)
+	if fatal != nil {
+		return fatal
 	}
 
+	pipelineStatus := "completed"
+	if walledOut {
+		pipelineStatus = "timed_out"
+	}
 	if globalJSON {
-		emitAgentScanJSONSummary(repo, projectUUID, parentAgenticScanUUID, "completed", sessionDir)
+		emitAgentScanJSONSummary(repo, projectUUID, parentAgenticScanUUID, pipelineStatus, sessionDir)
 	} else {
 		printOliumAutopilotPipelineSummary(result, sessionDir, repo, parentAgenticScanUUID)
 	}

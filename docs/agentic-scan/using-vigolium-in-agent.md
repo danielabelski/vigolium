@@ -655,7 +655,7 @@ vigolium agent autopilot -t https://example.com
 > Autonomous scan focused on auth bypass, with source code for context
 ```
 ```bash
-vigolium agent autopilot -t https://api.example.com --source ./src --focus "auth bypass"
+vigolium agent autopilot -t https://api.example.com --source ./src --prompt "focus on auth bypass"
 ```
 
 **Custom limits (fewer commands, shorter timeout):**
@@ -719,7 +719,7 @@ The swarm runs:
 > Swarm scan focused on SQL injection, with source code
 ```
 ```bash
-vigolium agent swarm --discover -t https://example.com --focus "SQL injection" --source ./src
+vigolium agent swarm --discover -t https://example.com --prompt "focus on SQL injection" --source ./src
 ```
 
 **Control rescan iterations:**
@@ -1384,7 +1384,7 @@ These are examples of natural language prompts you can give to Claude Code or Co
 | "Scan my OpenAPI spec with auth" | `vigolium scan -I openapi -i spec.yaml -t <url> --spec-header "Authorization: Bearer ..."` |
 | "Only run XSS modules" | `vigolium scan -t <url> --module-tag xss` |
 | "Review my code for security issues" | `vigolium agent query --prompt-template security-code-review --source ./src` |
-| "Autonomous scan focused on injection" | `vigolium agent autopilot -t <url> --focus "injection"` |
+| "Autonomous scan focused on injection" | `vigolium agent autopilot -t <url> --prompt "focus on injection"` |
 | "Run the full AI pipeline" | `vigolium agent swarm --discover -t <url>` |
 | "Show me all critical findings" | `vigolium finding --severity critical` |
 | "Export results as HTML report" | `vigolium export --format html -o report.html` |
