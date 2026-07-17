@@ -8,12 +8,13 @@ describe("FilesystemContentLoader (real vendored content)", () => {
   const roots = resolveRoots();
   const loader = makeContentLoader(roots);
 
-  test("lists all 9 commands", async () => {
+  test("lists all commands including the standalone knowledge-base mode", async () => {
     const cmds = await loader.listCommands();
     expect(cmds).toContain("deep");
     expect(cmds).toContain("lite");
     expect(cmds).toContain("confirm");
-    expect(cmds.length).toBeGreaterThanOrEqual(9);
+    expect(cmds).toContain("knowledge-base");
+    expect(cmds.length).toBeGreaterThanOrEqual(10);
   });
 
   test("loads a known agent-def", async () => {
@@ -23,10 +24,10 @@ describe("FilesystemContentLoader (real vendored content)", () => {
     expect(agent.body.length).toBeGreaterThan(100);
   });
 
-  test("loads deep command-def with 12 phases", async () => {
+  test("loads deep command-def with optional KB intake plus 12 audit phases", async () => {
     const def = await loader.loadCommand("deep");
     expect(def.mode as string).toBe("deep");
-    expect(def.phases.length).toBe(12);
+    expect(def.phases.length).toBe(13);
   });
 
   test("resolves skill dir for an embedded skill", async () => {

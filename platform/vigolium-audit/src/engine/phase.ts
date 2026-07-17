@@ -64,6 +64,7 @@ const PhaseSchema = z.object({
   title: z.string(),
   agent: z.string().nullable(),
   requires_git: z.boolean().default(false),
+  requires_knowledge_base: z.boolean().default(false),
   parallel_with: z.array(z.union([z.string(), z.number()]).transform((v) => String(v))).default([]),
   depends_on: z.array(z.union([z.string(), z.number()]).transform((v) => String(v))).default([]),
   completion: PhaseCompletionSchema.optional(),

@@ -56,6 +56,12 @@ The skill teaches the agent how to install the binary, pick a mode, resume inter
 # just start the audit
 vigolium-audit run --mode balanced --target /path/to/repo/
 
+# Build only the reusable application knowledge base + attack surface
+vigolium-audit run --mode knowledge-base --target /path/to/repo/
+
+# Seed an audit with application docs (a file or a directory of Markdown)
+vigolium-audit run --mode deep --target /path/to/repo/ --knowledge-base ./app-docs
+
 # Run a deep audit interactively (auto-installs the harness for the session
 # and removes it on exit — leave-no-trace)
 vigolium-audit run --mode deep --agent claude -i
@@ -85,7 +91,7 @@ ambient subscription auth).
 `vigolium-audit verify codex --transport both` probes both Codex paths with a
 real `ping` → `pong` round trip. Interactive `-i` always uses the native CLI,
 so it rejects `--transport sdk`. Codex interactive dispatch is available for
-`lite`, `balanced`, `deep`, `revisit`, and `confirm`; run `diff`, `merge`,
+`knowledge-base`, `lite`, `balanced`, `deep`, `revisit`, and `confirm`; run `diff`, `merge`,
 `reinvest`, and `longshot` without `-i` so the phase orchestrator handles them.
 
 ### Auth overrides
@@ -144,6 +150,7 @@ short version:
 
 | Mode | Use it when |
 |------|-------------|
+| `knowledge-base` | You only want a reusable source-grounded application model and attack surface, with no vulnerability finding pass. |
 | `lite` | You want a fast surface scan (secrets + SAST + PoC) on a plain folder. |
 | `balanced` | You want a real audit but not the full deep pipeline — middle ground. |
 | `deep` | You want the full multi-agent pipeline: highest signal, longest run. |
@@ -161,14 +168,63 @@ live in [`src/content/command-defs/`](./src/content/command-defs/);
 overriding or extending them (per-user or per-project) is documented in
 [`CUSTOMIZATION.md`](./CUSTOMIZATION.md).
 
+### Application knowledge-base input
+
+The `knowledge-base`, `lite`, `balanced`, and `deep` modes accept application
+documentation through either of these mutually exclusive flags:
+
+```bash
+# One Markdown/MDX file, or a directory recursively containing Markdown/MDX
+vigolium-audit run --mode deep --knowledge-base ./docs/application
+
+# Small inline input (prefer the path form for sensitive or large content)
+vigolium-audit run --mode balanced --knowledge-base-raw $'# Auth\nAdmins require WebAuthn.'
+```
+
+With no flag, the CLI searches the target (to a bounded depth) for directories
+named `knowledge-base`. It snapshots the selected files before any prior result
+is archived, enforces file/count/size limits, hashes every source, and stores an
+immutable copy under
+`vigolium-results/attack-surface/knowledge-base-input/`. Conditional phase
+`KB0` converts that corpus into the cited
+`vigolium-results/attack-surface/knowledge-base-seed.md`; later phases verify
+its implementation claims against source code. Documentation is treated as
+data, never as agent instructions or by itself as a reason to suppress a
+finding.
+
+Resume binds the staged copy to the exact audit record and rejects changed,
+missing, or cross-run input. A completed
+`knowledge-base` run can be chained directly into an audit:
+
+```bash
+vigolium-audit run --modes knowledge-base,deep --knowledge-base ./docs/application
+```
+
+On a Git target, a later run at the same commit also adopts the latest completed
+standalone knowledge-base report when it is still the live result and both the
+builder and consumer source snapshots have clean working trees (excluding
+`vigolium-results/`).
+
+### `knowledge-base` mode phases
+
+This mode writes context only—no SAST, finding drafts, PoCs, or vulnerability
+report. Its graph is `KB0` (conditional) → `K1` → `K2`:
+
+| Phase | What it does |
+|-------|--------------|
+| `KB0` Knowledge Base Intake | Normalize supplied/discovered docs into a provenance-linked seed. Skipped when no input is resolved. |
+| `K1` Intelligence and Inventory | Build advisory intelligence, component/dependency inventory, and `sbom.json`. |
+| `K2` Knowledge Base and Attack Surface | Build the source-grounded architecture, roles/auth flows, DFD/CFD slices, threat model, attack surface, and unauthenticated surface. |
+
 ### `deep` mode phases
 
-`deep` is a 12-phase pipeline where each phase feeds the next — intel first,
+`deep` has 12 audit phases plus the conditional `KB0` intake node. Each phase feeds the next — intel first,
 then static analysis, then adversarial review, then PoC and reporting. `D1`/`D2`
 run in parallel; `D2` and `D3` are skipped on a no-git target.
 
 | Phase | What it does |
 |-------|--------------|
+| `KB0` Knowledge Base Intake *(optional)* | Normalize resolved application docs into a cited seed used by later phases. |
 | `D1` Intelligence Pass (CVE) | Collect known CVEs/advisories for the project's stack and dependencies. |
 | `D2` Intelligence Pass (History) | Mine git history for security-relevant commits, regressions, and risky changes. *(git only)* |
 | `D3` Patch Audit | Inspect prior security fixes for incomplete patches or bypasses. *(git only)* |
@@ -226,8 +282,8 @@ vigolium-audit/
 │   ├── engine/             # orchestrator, phase parser, state, harness, modes
 │   ├── adapters/           # claude/codex CLI + SDK adapters, platform detect
 │   ├── content/            # vendored audit methodology
-│   │   ├── agent-defs/         # 35 specialist agent prompts (.md)
-│   │   ├── command-defs/       # 10 mode workflows (lite/balanced/deep/…)
+│   │   ├── agent-defs/         # 36 specialist agent prompts (.md)
+│   │   ├── command-defs/       # 11 mode workflows (knowledge-base/lite/balanced/deep/…)
 │   │   ├── skills/             # 20 standalone workflow skills
 │   │   ├── harnesses/          # platform-specific frontmatter (claude, codex)
 │   │   ├── sdk-variants/       # generated SDK-safe variants (gitignored)

@@ -23,6 +23,34 @@ export function probeGit(targetDir: string): GitInfo {
   };
 }
 
+/**
+ * Return whether the target's tracked and untracked source snapshot matches
+ * HEAD, deliberately excluding vigolium-results/. A null result means Git
+ * could not establish cleanliness and must be treated as unsafe for reuse.
+ */
+export function isGitWorktreeCleanForKnowledgeBaseReuse(targetDir: string): boolean | null {
+  const result = spawnSync(
+    "git",
+    [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "--",
+      ".",
+      ":(exclude)vigolium-results",
+      ":(exclude)vigolium-results/**",
+    ],
+    {
+      cwd: targetDir,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+    },
+  );
+  if (result.status !== 0 || result.error !== undefined) return null;
+  return (result.stdout ?? "").trim().length === 0;
+}
+
 function runGit(args: string[], cwd: string): string | null {
   const result = spawnSync("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"], encoding: "utf8" });
   if (result.status !== 0) return null;

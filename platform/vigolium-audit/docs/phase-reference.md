@@ -20,8 +20,10 @@ Most audit modes write these shared artifacts:
 | Path | Purpose |
 | --- | --- |
 | `vigolium-results/audit-state.json` | Resumable run state, phase status, retry metadata, repository identity, model + agent SDK, and completion status. |
-| `vigolium-results/file-state.json` | Per-source-file scan record (SHA-256, last audits, last phases). Backs `/vigolium-audit:diff`. |
+| `vigolium-results/file-state.json` | Per-source-file SHA-256 baseline plus the audits that stamped each file. Written by the engine after a complete audit; read by `vigolium-audit incremental-scope`. |
 | `vigolium-results/attack-surface/` | Durable audit context: recon, KB, SAST summaries, probe summaries, authz/concurrency/spec audits, cross-service edges. |
+| `vigolium-results/attack-surface/knowledge-base-input/` | Immutable source copies, combined corpus, and hash/provenance manifest for `--knowledge-base`, `--knowledge-base-raw`, auto-discovered docs, or an adopted standalone KB report. Present only when input was resolved. |
+| `vigolium-results/attack-surface/knowledge-base-seed.md` | KB0's cited security-oriented extraction of application docs. Present only when KB0 runs. |
 | `vigolium-results/attack-surface/knowledge-base-report.md` | Central KB document. Many phases append in-place sections rather than creating new files. |
 | `vigolium-results/findings-draft/` | Candidate findings before promotion into final finding directories. |
 | `vigolium-results/findings/<ID>-<slug>/` | Finalized findings with `draft.md`, `poc.*`, `evidence/`, `report.md`. |
@@ -37,11 +39,64 @@ and per-file descriptions.
 | --- | --- | --- | --- |
 | `status` | `vigolium-audit run --mode status` | Prints current audit progress for the target directory. Read-only. | Displays `vigolium-results/audit-state.json` metadata, phase status, finding counts, and disk usage. |
 
+## Knowledge-base input and KB0
+
+Usage:
+
+```bash
+vigolium-audit run --mode <knowledge-base|lite|balanced|deep> --knowledge-base <file-or-directory>
+vigolium-audit run --mode <knowledge-base|lite|balanced|deep> --knowledge-base-raw '<markdown>'
+```
+
+The flags are mutually exclusive. Explicit files must be `.md` or `.mdx`;
+directories are scanned recursively for those extensions. With neither flag,
+the CLI auto-discovers directories named `knowledge-base` within four traversal
+levels of the target, excluding VCS metadata, dependencies, build output, and
+`vigolium-results/`.
+
+Resolution is bounded to 256 files, 512 KiB per file, 4 MiB total, and 1 MiB
+for raw inline input. Symlinks are not followed. Before a fresh-run lifecycle
+archives old attack-surface artifacts, the CLI holds an in-memory snapshot; it
+then writes exact source copies plus SHA-256 metadata to
+`attack-surface/knowledge-base-input/`. Resume verifies that the staged corpus
+matches the exact selected audit record, then reuses it; changed, newly
+introduced, missing, and cross-run input is rejected.
+
+`KB0` is a conditional graph node in the four consuming modes. It runs
+`knowledge-base-loader` only when input was resolved and writes the cited
+`knowledge-base-seed.md`. The loader treats source prose as untrusted data,
+does not inspect code or create findings, and records contradictions/open
+questions. Later phases verify implementation claims against the repository;
+the seed by itself cannot suppress a finding.
+
+## `vigolium-audit run --mode knowledge-base`
+
+Usage: `vigolium-audit run --mode knowledge-base [--target <path>] [knowledge-base flags]`
+
+Phase count: 3 graph nodes (`KB0`, `K1`, `K2`); KB0 is skipped when no
+external or discovered documentation exists.
+
+This mode builds reusable application context and stops before static analysis,
+bug hunting, findings, PoCs, partitioning, or final vulnerability reporting.
+
+| Phase | Name | Agent | What it does | Main outputs |
+| --- | --- | --- | --- | --- |
+| `KB0` | Knowledge Base Intake *(conditional)* | `knowledge-base-loader` | Converts the immutable staged docs into a provenance-linked model of roles, auth/login flows, business rules, assets, integrations, and open questions. | `vigolium-results/attack-surface/knowledge-base-input/`; `vigolium-results/attack-surface/knowledge-base-seed.md` |
+| `K1` | Intelligence and Inventory | `cve-scout` | Builds advisory intelligence and component/dependency inventory without commit archaeology or patch-bypass work. | `vigolium-results/attack-surface/knowledge-base-report.md`; `vigolium-results/attack-surface/sbom.json` |
+| `K2` | Knowledge Base and Attack Surface | `threat-modeler` | Source-verifies documented claims and builds architecture, DFD/CFD slices, roles/auth model, business workflows, trust boundaries, threat model, attack surface, and anonymous/pre-auth surface. | `vigolium-results/attack-surface/knowledge-base-report.md`; `vigolium-results/attack-surface/unauthenticated-surface.md` |
+
+A sequential chain such as `--modes knowledge-base,deep` snapshots K2's report
+and uses it as deep's KB0 input after the standalone artifacts are archived.
+On a Git target, a separate later run at the same commit may also adopt the
+latest completed standalone report when it is still the live result and both
+the builder and current working trees are clean, excluding
+`vigolium-results/`.
+
 ## `vigolium-audit run --mode lite`
 
 Usage: `vigolium-audit run --mode lite [--target <path>]`
 
-Phase count: 3 (`L1`-`L3`)
+Phase count: 4 graph nodes (`KB0`, `L1`-`L3`); KB0 is conditional.
 
 Lite is a super-quick surface scan answering one question: "what would blow
 up if this shipped right now?" It supports plain source folders with no `.git`
@@ -55,6 +110,7 @@ mode.
 
 | Phase | Name | Agent | What it does | Main outputs |
 | --- | --- | --- | --- | --- |
+| `KB0` | Knowledge Base Intake *(conditional)* | `knowledge-base-loader` | Normalizes resolved application docs into a cited seed for recon. | `vigolium-results/attack-surface/knowledge-base-input/`; `vigolium-results/attack-surface/knowledge-base-seed.md` |
 | `L1` | Recon Pass | (inline) | Detects languages, frameworks, manifests, likely entry points, deployment model, git state, and scan exclusions; best-effort enumeration of the unauthenticated (pre-auth) surface. | `vigolium-results/attack-surface/lite-recon.md`; `vigolium-results/attack-surface/unauthenticated-surface.md` |
 | `L2` | Secrets Scan | (inline) | Hardcoded keys, tokens, passwords, credentials via trufflehog/gitleaks (filesystem mode) or `rg` fallback. Uses secret-specific exclusions, masks values, and filters obvious placeholders. | `vigolium-results/attack-surface/lite-secrets-scan.md`; `vigolium-results/findings-draft/l2-<NNN>-<slug>.md` |
 | `L3` | Fast Code Scan + Finalize | (inline) | Single high-signal pass scoped by L1, then consolidates all L2/L3 survivors, dispatches `poc-author`, partitions non-executed PoCs to the theoretical bucket, and dispatches `finding-writer` for both buckets. | `vigolium-results/attack-surface/lite-sast-summary.md`; `vigolium-results/findings-draft/l3-<NNN>-<slug>.md`; `vigolium-results/findings/<id>-<slug>/`; `vigolium-results/findings-theoretical/<id>-<slug>/`; per-finding `report.md` |
@@ -63,7 +119,7 @@ mode.
 
 Usage: `vigolium-audit run --mode balanced [--target <path>]`
 
-Phase count: 9 (`B1`-`B9`)
+Phase count: 10 graph nodes (`KB0`, `B1`-`B9`); KB0 is conditional.
 
 Balanced trades depth for speed while keeping the core false-positive
 elimination loop. It produces the same output format as `deep` so findings
@@ -72,6 +128,7 @@ are compatible with `diff` and `status`. Phases B3 and B4 declare
 
 | Phase | Name | Agent | What it does | Main outputs |
 | --- | --- | --- | --- | --- |
+| `KB0` | Knowledge Base Intake *(conditional)* | `knowledge-base-loader` | Normalizes resolved application docs into a cited seed for intelligence and threat modeling. | `vigolium-results/attack-surface/knowledge-base-input/`; `vigolium-results/attack-surface/knowledge-base-seed.md` |
 | `B1` | Intelligence Pass | `cve-scout` | Published advisory hunt + dependency intelligence. | `## Advisory Intelligence` section appended to `vigolium-results/attack-surface/knowledge-base-report.md` |
 | `B2` | Threat Model | `threat-modeler` | Project type, trust boundaries, DFD/CFD slices, attack surface, threat model, coverage gaps, known false-positive sources, unauthenticated (pre-auth) surface. | `vigolium-results/attack-surface/knowledge-base-report.md` (creates the file with all phase-B2 sections); `vigolium-results/attack-surface/unauthenticated-surface.md` |
 | `B3` | Code Scan | `code-scanner` | Built-in CodeQL suites + Semgrep Pro with inline SAST enrichment. Skips custom queries and structural extraction (deep-only). Parallel-eligible with `B4`. | `vigolium-results/codeql-artifacts/`; `vigolium-results/findings-draft/p4-<NNN>-<slug>.md` |
@@ -86,7 +143,7 @@ are compatible with `diff` and `status`. Phases B3 and B4 declare
 
 Usage: `vigolium-audit run --mode deep [--target <path>]`
 
-Phase count: 12 (`D1`-`D12`)
+Phase count: 13 graph nodes (`KB0`, `D1`-`D12`); KB0 is conditional.
 
 Deep is the full pipeline. The Intelligence Pass splits into parallel-eligible
 halves (`D1` CVE/advisory + `D2` commit archaeology); the remaining ids are
@@ -100,6 +157,7 @@ Review Chamber (Ideator + Code Tracer). FP elimination runs as the inline tail o
 
 | Phase | Name | Agent | What it does | Main outputs |
 | --- | --- | --- | --- | --- |
+| `KB0` | Knowledge Base Intake *(conditional)* | `knowledge-base-loader` | Normalizes resolved application docs into a cited seed used by intelligence, threat modeling, scanning, probes, access review, chambers, and intent reconciliation. | `vigolium-results/attack-surface/knowledge-base-input/`; `vigolium-results/attack-surface/knowledge-base-seed.md` |
 | `D1` | Intelligence Pass (CVE) | `cve-scout` | Public advisory + dependency intelligence. Parallel-eligible with `D2`. | `## Advisory Intelligence` section in `vigolium-results/attack-surface/knowledge-base-report.md` |
 | `D2` | Intelligence Pass (History) | `history-miner` | Security-relevant git history: high-risk patches, sneaky reverts, half-fixed advisories. Skips when `requires_git: true` is unmet. Parallel-eligible with `D1`. | `vigolium-results/attack-surface/commit-recon-report.md`; `## Commit Archaeology` section in KB |
 | `D3` | Patch Audit | `patch-auditor` | Per-advisory bypass review fan-out. Skips without git history. | `vigolium-results/bypass-analysis/<advisory-id>-bypass.md`; `## Bypass Analysis` section in KB |
@@ -253,8 +311,8 @@ locks are reclaimed.
 ## Phase graph customization
 
 The orchestrator validates each mode's `phases:` array via Zod, detects
-cycles, and topologically sorts. v1 walks the order sequentially —
-`parallel_with` is recorded but not yet honored. Phases with `agent: null`
+cycles, and topologically sorts. Mutually declared `parallel_with` siblings run
+in the same batch unless `--serial` is set. Phases with `agent: null`
 are "inline" and run with the command-def body as the system prompt; phases
 with an agent name load that prompt from
 [`src/content/agent-defs/<name>.md`](../src/content/agent-defs/).
@@ -262,7 +320,9 @@ with an agent name load that prompt from
 When customizing modes or adding new ones, any phase referenced in
 `depends_on` / `parallel_with` must exist in `phases:` — there are no
 hardcoded phase ids in the engine. Phases that declare `requires_git: true`
-are skipped automatically when the target has no git history.
+are skipped automatically when the target has no git history. Phases with
+`requires_knowledge_base: true` are skipped automatically when the CLI did not
+resolve a staged input.
 
 Failure policy is `skip-and-continue` by default (`--strict` aborts on first
 failure). Failed phases have their `findings-draft/` output quarantined to

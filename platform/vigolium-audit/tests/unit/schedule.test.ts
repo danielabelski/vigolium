@@ -8,6 +8,7 @@ function phase(id: string, dependsOn: string[] = [], parallelWith: string[] = []
     title: id,
     agent: null,
     requires_git: false,
+    requires_knowledge_base: false,
     depends_on: dependsOn,
     parallel_with: parallelWith,
   };

@@ -7,14 +7,25 @@ import { evaluatePhaseArtifacts, formatArtifactFailures } from "./artifact-gates
 import { archivePriorCoreArtifacts } from "./artifact-lifecycle.js";
 import { OrchestratorBus, type OrchestratorEvent } from "./events.js";
 import { startFindingsWatcher, summarizeFindings } from "./findings.js";
-import { probeGit } from "./git.js";
+import { isGitWorktreeCleanForKnowledgeBaseReuse, probeGit } from "./git.js";
 import { type OrchestratorResult } from "./orchestrator.js";
-import { StateStore, buildAuditId, findResumableAudit, newAuditRecord } from "./state.js";
+import {
+  StateStore,
+  buildAuditId,
+  findResumableAudit,
+  findResumableAuditById,
+  newAuditRecord,
+} from "./state.js";
 import { deriveHandoffStatus, startHandoffPoller } from "./handoff-poll.js";
 import { round2 } from "./util.js";
 import type { AuditMode, AuditRecord, CommandDef, PhaseDef } from "./types.js";
+import {
+  knowledgeBaseReference,
+  stageKnowledgeBaseInput,
+  type ResolvedKnowledgeBase,
+} from "./knowledge-base.js";
 
-const ENGINE_STATE_MODES = new Set<AuditMode>(["lite", "balanced", "deep"]);
+const ENGINE_STATE_MODES = new Set<AuditMode>(["lite", "balanced", "deep", "knowledge-base"]);
 
 /**
  * Options common to every headless handoff driver. Platform-specific drivers
@@ -28,9 +39,12 @@ export interface BaseHandoffOptions {
   debug?: boolean;
   focus?: string;
   expectedBehaviors?: string;
+  knowledgeBase?: ResolvedKnowledgeBase;
   liveTarget?: string;
   /** Continue latest non-complete audit for this mode instead of starting fresh. */
   resume?: boolean;
+  /** Exact resumable audit selected by a higher-level router. */
+  resumeAuditId?: string;
   /**
    * Phase IDs the orchestrator wants the agents to skip (refresh-fallback
    * policy). Surfaced in `audit-context.md`; the agents are expected to honor
@@ -76,7 +90,7 @@ export interface HandoffDriveResult {
 /**
  * Shared skeleton for the headless handoff drivers. Both platforms hand the
  * whole audit off to the native runtime in one adapter session. For the core
- * lite/balanced/deep modes the driver owns audit-state creation, resume
+ * knowledge-base/lite/balanced/deep modes the driver owns audit-state creation, resume
  * recovery, artifact-derived phase transitions, and final status; agents own
  * analysis and artifacts. Specialized modes retain their dedicated state
  * contracts. The driver also streams events and watches findings.
@@ -269,7 +283,16 @@ export abstract class BaseHandoff<O extends BaseHandoffOptions = BaseHandoffOpti
     const stateStore = new StateStore(resultsDir);
     const before = await stateStore.load().catch(() => ({ schema_version: 1 as const, audits: [] as AuditRecord[] }));
     const knownIds = new Set(before.audits.map((a) => a.audit_id));
-    const resumeAudit = this.opts.resume ? findResumableAudit(before.audits, this.opts.mode) : null;
+    const resumeAudit = this.opts.resume
+      ? this.opts.resumeAuditId !== undefined
+        ? findResumableAuditById(before.audits, this.opts.resumeAuditId, this.opts.mode)
+        : findResumableAudit(before.audits, this.opts.mode)
+      : null;
+    if (this.opts.resume && this.opts.resumeAuditId !== undefined && resumeAudit === null) {
+      throw new Error(
+        `cannot resume audit ${this.opts.resumeAuditId}: no matching non-complete ${this.opts.mode} audit was found`,
+      );
+    }
 
     let activeAudit: AuditRecord | null = null;
     if (engineOwnsState) {
@@ -293,13 +316,22 @@ export abstract class BaseHandoff<O extends BaseHandoffOptions = BaseHandoffOpti
           branch: git.branch,
           repository: git.repository,
           historyAvailable: git.available,
+          ...(this.opts.mode === "knowledge-base" && git.available
+            ? {
+                sourceSnapshotClean:
+                  isGitWorktreeCleanForKnowledgeBaseReuse(this.opts.targetDir) === true,
+              }
+            : {}),
           phaseIds: command.phases.map((phase) => phase.id),
-          ...(this.opts.focus || this.opts.expectedBehaviors
+          ...(this.opts.focus || this.opts.expectedBehaviors || this.opts.knowledgeBase
             ? {
                 context: {
                   ...(this.opts.focus ? { focus: this.opts.focus } : {}),
                   ...(this.opts.expectedBehaviors
                     ? { expected_behaviors: this.opts.expectedBehaviors }
+                    : {}),
+                  ...(this.opts.knowledgeBase
+                    ? { knowledge_base: knowledgeBaseReference(this.opts.knowledgeBase) }
                     : {}),
                 },
               }
@@ -309,6 +341,10 @@ export abstract class BaseHandoff<O extends BaseHandoffOptions = BaseHandoffOpti
         await stateStore.appendAudit(activeAudit);
       }
 
+      if (this.opts.knowledgeBase !== undefined) {
+        await stageKnowledgeBaseInput(resultsDir, this.opts.knowledgeBase);
+      }
+
       const gitAvailable = this.opts.noGit ? false : probeGit(this.opts.targetDir).available;
       const exclusions = new Set(this.opts.excludePhases ?? []);
       for (const phaseDef of command.phases) {
@@ -316,6 +352,8 @@ export abstract class BaseHandoff<O extends BaseHandoffOptions = BaseHandoffOpti
           ? "requires_git but target has no local history"
           : exclusions.has(phaseDef.id)
             ? "excluded by orchestrator directive"
+            : phaseDef.requires_knowledge_base && this.opts.knowledgeBase === undefined
+              ? "no knowledge-base flag or knowledge-base directory was resolved"
             : null;
         if (skipReason) {
           await stateStore.updatePhase(activeAudit.audit_id, phaseDef.id, {
@@ -353,6 +391,9 @@ export abstract class BaseHandoff<O extends BaseHandoffOptions = BaseHandoffOpti
       ...(this.opts.excludePhases !== undefined ? { excludePhases: this.opts.excludePhases } : {}),
       ...(this.opts.focus !== undefined ? { focus: this.opts.focus } : {}),
       ...(this.opts.expectedBehaviors !== undefined ? { expectedBehaviors: this.opts.expectedBehaviors } : {}),
+      ...(this.opts.knowledgeBase !== undefined
+        ? { knowledgeBase: knowledgeBaseReference(this.opts.knowledgeBase) }
+        : {}),
       ...(engineOwnsState ? { engineOwnsState: true } : {}),
     });
 
@@ -364,6 +405,7 @@ export abstract class BaseHandoff<O extends BaseHandoffOptions = BaseHandoffOpti
       title: `${this.opts.mode} (${this.phaseTitleSuffix()})`,
       agent: null,
       requires_git: false,
+      requires_knowledge_base: false,
       depends_on: [],
       parallel_with: [],
     };
@@ -431,6 +473,9 @@ export abstract class BaseHandoff<O extends BaseHandoffOptions = BaseHandoffOpti
       : undefined;
     const observedAudit = engineAudit ?? newAudit ?? resumedAudit;
     const finalAuditId = observedAudit?.audit_id ?? ctx.provisionalAuditId;
+    const skippedPhaseIds = ctx.command.phases
+      .filter((phaseDef) => observedAudit?.phases[phaseDef.id]?.status === "skipped")
+      .map((phaseDef) => phaseDef.id);
 
     // Whole-mode handoffs still let the native runtime coordinate subagents,
     // but the engine has the final word on completion. Evaluate every declared
@@ -510,9 +555,17 @@ export abstract class BaseHandoff<O extends BaseHandoffOptions = BaseHandoffOpti
           });
     const effectiveOk = handoffOk && failedGatePhases.length === 0;
     if (ctx.engineOwnsState && observedAudit) {
+      const completedKnowledgeBaseSnapshotClean =
+        this.opts.mode === "knowledge-base" && status === "complete"
+          ? observedAudit.source_snapshot_clean === true &&
+            isGitWorktreeCleanForKnowledgeBaseReuse(this.opts.targetDir) === true
+          : undefined;
       await ctx.stateStore.updateAudit(observedAudit.audit_id, {
         status,
         completed_at: new Date().toISOString(),
+        ...(completedKnowledgeBaseSnapshotClean !== undefined
+          ? { source_snapshot_clean: completedKnowledgeBaseSnapshotClean }
+          : {}),
         usage: {
           input_tokens: tokens.input,
           output_tokens: tokens.output,
@@ -558,7 +611,7 @@ export abstract class BaseHandoff<O extends BaseHandoffOptions = BaseHandoffOpti
       totalTokens: tokens,
       findings,
       failedPhases: failedGatePhases,
-      skippedPhases: [],
+      skippedPhases: skippedPhaseIds,
     };
   }
 }

@@ -37,9 +37,9 @@ interface StructureSpec {
 // in sync; the notes here are the only thing maintained by hand.
 const KEEP_NOTES: Record<string, string> = {
   "audit-state.json": "canonical phase-graph + run history (resume/status read this; never rewrite)",
-  "file-state.json": "per-file scan record used by diff mode for incremental scope (never rewrite)",
+  "file-state.json": "per-file SHA-256 baseline for incremental scope; written by the engine, never by an audit",
   "revisit-audit-state.json": "round-N revisit state, kept separate from the round-1 audit-state.json",
-  "attack-surface": "durable knowledge base: recon, KB report, SAST, authz matrix, intent reconciliation",
+  "attack-surface": "durable context: staged KB inputs/seed, recon, KB report, SAST, authz matrix, intent reconciliation",
   findings: "finalized confirmed findings — one dir per finding (report.md, poc.*, evidence/)",
   "findings-theoretical": "finalized theoretical / unconfirmed findings, same per-dir shape",
   quarantine: "findings excluded by a merge, with the reason in QUARANTINE.md",

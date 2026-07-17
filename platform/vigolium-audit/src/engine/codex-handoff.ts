@@ -25,8 +25,8 @@ import type { AuditMode } from "./types.js";
  *   - `~/.codex/skills/vigolium-audit-<skill>/` (skills the subagents reference)
  *   - the BEGIN/END vigolium-audit block in `~/.codex/AGENTS.md` (dispatch)
  *
- * Modes covered by the dispatch fragment: lite, balanced, deep, revisit,
- * confirm. `isCodexHandoffMode()` is the canonical predicate — keep in sync if
+ * Modes covered by the dispatch fragment: lite, balanced, deep,
+ * knowledge-base, revisit, confirm. `isCodexHandoffMode()` is the canonical predicate — keep in sync if
  * `agents-dispatch.md` is extended.
  */
 
@@ -34,6 +34,7 @@ const MODE_TRIGGER_PHRASE: Partial<Record<AuditMode, string>> = {
   lite: "Lite mode: L1-L3",
   balanced: "Balanced mode: B1-B9",
   deep: "Full deep mode",
+  "knowledge-base": "Knowledge-base mode: KB0-K2",
   revisit: "Revisit mode",
   confirm: "Confirm mode",
 };
@@ -60,7 +61,7 @@ export function buildCodexTriggerPrompt(options: CodexTriggerPromptOptions): str
     `${trigger}.`,
     ``,
     `Dispatch authority: \`~/.codex/AGENTS.md\` between \`# BEGIN vigolium-audit\` and \`# END vigolium-audit\`. Follow that contract exactly — do not import orchestration from any other prompt.`,
-    `Audit context: read \`vigolium-results/audit-context.md\` first if it exists; it carries focus, expected behaviors, and orchestrator directives.`,
+    `Audit context: read \`vigolium-results/audit-context.md\` first if it exists; it carries focus, expected behaviors, knowledge-base pointers, and orchestrator directives.`,
     `Target directory: ${options.targetDir}`,
     `Mode: ${options.mode}`,
   ];

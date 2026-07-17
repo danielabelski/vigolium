@@ -15,8 +15,12 @@ interface ScopeOptions {
 export interface ChangedFile {
   path: string;
   reason: "git-diff" | "hash-mismatch" | "missing-from-state";
-  /** Phases that previously touched this file (from file-state.json). */
-  priorPhases: string[];
+  /**
+   * Phases that ran in the audit that last stamped this file. NOT the phases
+   * that read it — no per-file attribution is collected, so this is the same
+   * list for every file stamped by a given audit. Don't route on it per-file.
+   */
+  auditPhases: string[];
 }
 
 export interface IncrementalScope {
@@ -25,8 +29,8 @@ export interface IncrementalScope {
   /** Whether a file-state.json baseline was found and read. */
   baselinePresent: boolean;
   changed: ChangedFile[];
-  /** Union of phases that touched the changed files in prior audits. */
-  phasesPriorlyTouching: string[];
+  /** Union of `auditPhases` across the changed files. */
+  phasesFromLastAudit: string[];
 }
 
 /**
@@ -74,7 +78,7 @@ export async function computeIncrementalScope(opts: { target?: string; since?: s
         const actual = await sha256OfFile(join(targetDir, rel));
         if (actual !== indexed.sha256) reason = "hash-mismatch";
       }
-      return reason === null ? null : { path: rel, reason, priorPhases: indexed?.last_phases ?? [] };
+      return reason === null ? null : { path: rel, reason, auditPhases: indexed?.audit_phases ?? [] };
     }),
   );
   const changed: ChangedFile[] = classified.filter((c): c is ChangedFile => c !== null);
@@ -85,7 +89,7 @@ export async function computeIncrementalScope(opts: { target?: string; since?: s
       changed.push({
         path: rel,
         reason: "git-diff",
-        priorPhases: filesIndex?.files[rel]?.last_phases ?? [],
+        auditPhases: filesIndex?.files[rel]?.audit_phases ?? [],
       });
     }
   }
@@ -95,7 +99,7 @@ export async function computeIncrementalScope(opts: { target?: string; since?: s
     since: opts.since ?? null,
     baselinePresent: filesIndex !== null,
     changed,
-    phasesPriorlyTouching: uniq(changed.flatMap((c) => c.priorPhases)),
+    phasesFromLastAudit: uniq(changed.flatMap((c) => c.auditPhases)),
   };
 }
 
@@ -109,7 +113,7 @@ export async function incrementalScopeCommand(opts: ScopeOptions = {}): Promise<
   } catch (err) {
     return fail(opts, (err as Error).message);
   }
-  const { targetDir, changed, baselinePresent, phasesPriorlyTouching: phasesUnion } = scope;
+  const { targetDir, changed, baselinePresent, phasesFromLastAudit: phasesUnion } = scope;
 
   if (opts.json) {
     process.stdout.write(
@@ -119,7 +123,7 @@ export async function incrementalScopeCommand(opts: ScopeOptions = {}): Promise<
         since: scope.since,
         baselinePresent,
         changed,
-        phasesPriorlyTouching: phasesUnion,
+        phasesFromLastAudit: phasesUnion,
       }) + "\n",
     );
     return;
@@ -130,11 +134,12 @@ export async function incrementalScopeCommand(opts: ScopeOptions = {}): Promise<
   if (opts.since) console.log(`${statusArrow("Diff ref")} Diff ref:  ${chalk.cyan(opts.since)} → HEAD`);
   console.log(`${statusArrow("Changed")} Changed:   ${chalk.magenta(changed.length)} file(s)`);
   for (const c of changed.slice(0, 50)) {
-    console.log(`  ${chalk.dim("·")} ${c.path} ${chalk.dim(`(${c.reason})`)}` +
-      (c.priorPhases.length > 0 ? chalk.dim(`  prior phases: ${c.priorPhases.join(", ")}`) : ""));
+    console.log(`  ${chalk.dim("·")} ${c.path} ${chalk.dim(`(${c.reason})`)}`);
   }
   if (changed.length > 50) console.log(chalk.dim(`  …(+${changed.length - 50} more)`));
-  console.log(`${statusArrow("Phases")} Phases:    ${phasesUnion.length > 0 ? phasesUnion.join(", ") : chalk.dim("(none recorded yet)")}`);
+  // Deliberately not printed per-file: this is the stamping audit's phase list,
+  // identical for every file, and reads as per-file attribution next to a path.
+  console.log(`${statusArrow("Phases")} Last audit ran: ${phasesUnion.length > 0 ? phasesUnion.join(", ") : chalk.dim("(none recorded yet)")}`);
 }
 
 function uniq(items: string[]): string[] {

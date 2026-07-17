@@ -118,7 +118,7 @@ describe("e2e: claude handoff quota-limit retry", () => {
     expect(audit.usage).toEqual({ input_tokens: 180, output_tokens: 90, cost_usd: 16.75 });
     expect(
       Object.values(audit.phases as Record<string, { status: string }>).every(
-        (phase) => phase.status === "complete",
+        (phase) => phase.status === "complete" || phase.status === "skipped",
       ),
     ).toBe(true);
     expect(readFileSync(join(target, "vigolium-results", "audit-context.md"), "utf8")).toContain(

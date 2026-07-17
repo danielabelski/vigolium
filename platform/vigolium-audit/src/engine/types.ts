@@ -2,6 +2,7 @@ export type AuditMode =
   | "lite"
   | "balanced"
   | "deep"
+  | "knowledge-base"
   | "diff"
   | "confirm"
   | "merge"
@@ -125,6 +126,10 @@ export interface RunOptions {
    * from the most recent prior audit when unset.
    */
   expectedBehaviorsFile?: string;
+  /** Markdown file or directory of application documentation used to seed KB0. */
+  knowledgeBase?: string;
+  /** Inline markdown application documentation used to seed KB0. */
+  knowledgeBaseRaw?: string;
   /**
    * Live HTTP(S) endpoint to verify findings against in `confirm` mode.
    * When set, the URL is injected into the prompt and substituted for
@@ -181,6 +186,8 @@ export interface RunOptions {
    * has its own resume detection).
    */
   resume?: boolean;
+  /** Internal provenance binding for the exact audit selected by `resume` or `refresh`. */
+  resumeAuditId?: string;
   /**
    * `merge` mode only: two-or-more audit output folders (project dir or
    * `vigolium-results/` dir) to consolidate before the LLM normalization pass.
@@ -199,6 +206,8 @@ export interface AuditContext {
   focus?: string;
   /** User-supplied expected-behaviors prose (already loaded from flag). */
   expected_behaviors?: string;
+  /** Durable pointer and hash metadata for the staged knowledge-base corpus. */
+  knowledge_base?: import("./knowledge-base.js").KnowledgeBaseReference;
 }
 
 export type PhaseStatus = "pending" | "in_progress" | "complete" | "failed" | "skipped";
@@ -218,6 +227,8 @@ export interface AuditRecord {
   repository: string | null;
   /** Whether local Git history was available to history-dependent phases. */
   history_available?: boolean;
+  /** Whether a standalone KB run began and completed on a clean Git snapshot, excluding results. */
+  source_snapshot_clean?: boolean;
   mode: AuditMode;
   model: string | null;
   agent_sdk: string;
@@ -317,6 +328,8 @@ export interface PhaseDef {
   title: string;
   agent: string | null;
   requires_git: boolean;
+  /** Skip this phase when the CLI did not resolve an external knowledge-base corpus. */
+  requires_knowledge_base: boolean;
   parallel_with: string[];
   depends_on: string[];
   completion?: PhaseCompletionContract;

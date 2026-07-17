@@ -2,7 +2,7 @@ import { lstat, mkdir, rename } from "fs/promises";
 import { join } from "path";
 import type { AuditMode } from "./types.js";
 
-const CORE_MODES = new Set<AuditMode>(["lite", "balanced", "deep"]);
+const CORE_MODES = new Set<AuditMode>(["lite", "balanced", "deep", "knowledge-base"]);
 
 /**
  * Phase-owned outputs that must not leak into a fresh core audit. State,

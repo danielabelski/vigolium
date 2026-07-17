@@ -30,7 +30,7 @@ function commitAll(dir: string): void {
 }
 
 describe.if(gitAvailable)("computeIncrementalScope round-trips the file-state snapshot", () => {
-  test("reports a hash-mismatch with prior phases after a tracked file changes", async () => {
+  test("reports a hash-mismatch with the stamping audit's phases after a tracked file changes", async () => {
     const target = gitRepo();
     writeFileSync(join(target, "a.ts"), "v1\n");
     writeFileSync(join(target, "b.ts"), "stable\n");
@@ -54,9 +54,9 @@ describe.if(gitAvailable)("computeIncrementalScope round-trips the file-state sn
 
     const a = scope.changed.find((c) => c.path === "a.ts");
     expect(a?.reason).toBe("hash-mismatch");
-    expect(a?.priorPhases).toEqual(["L1", "L2"]);
+    expect(a?.auditPhases).toEqual(["L1", "L2"]);
     expect(scope.changed.find((c) => c.path === "b.ts")).toBeUndefined();
-    expect(scope.phasesPriorlyTouching).toEqual(["L1", "L2"]);
+    expect(scope.phasesFromLastAudit).toEqual(["L1", "L2"]);
   });
 
   test("treats every tracked file as new when no baseline exists", async () => {

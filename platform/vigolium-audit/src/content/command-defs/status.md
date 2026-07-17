@@ -20,7 +20,7 @@ Display a comprehensive audit status report. Do not modify any files.
 
 1. **Audit Metadata**: Read `audits[-1]` from `vigolium-results/audit-state.json`. Display:
    - Repository (`repository` field: e.g. org/reponame or folder name)
-   - Mode (`mode` field: lite/balanced/deep)
+   - Mode (`mode` field, including knowledge-base/lite/balanced/deep and specialized modes)
    - Model (`model` field: e.g. opus-4.6, gpt-5.3-codex)
    - Coding Agent (`agent_sdk` field: e.g. claude-code, codex)
    - Started at / Completed at timestamps

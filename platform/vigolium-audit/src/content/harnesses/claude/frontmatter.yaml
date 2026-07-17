@@ -7,6 +7,11 @@ defaults:
   effort: "low"
 
 overrides:
+  # --- Conditional knowledge-base intake ---
+  knowledge-base-loader:
+    tools: "Read, Write"
+    color: "blue"
+
   # --- Phase 1 ---
   cve-scout:
     tools: "Glob, Grep, Read, Bash, WebSearch, WebFetch"

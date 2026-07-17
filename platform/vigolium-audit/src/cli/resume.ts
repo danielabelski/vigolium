@@ -34,6 +34,8 @@ export interface ResumeOptions {
   keepSecrets?: boolean;
   focusFile?: string;
   expectedBehaviorsFile?: string;
+  knowledgeBase?: string;
+  knowledgeBaseRaw?: string;
   serial?: boolean;
   json?: boolean;
   debug?: boolean;
@@ -100,21 +102,28 @@ export async function resumeCommand(
     );
   }
 
-  const runOpts = buildRunOptions({ mode: picked.mode, targetDir, opts });
+  const runOpts = buildRunOptions({
+    mode: picked.mode,
+    auditId: picked.audit_id,
+    targetDir,
+    opts,
+  });
   const { runCommand } = await import("./run.js");
   await runCommand(runOpts);
 }
 
 function buildRunOptions(args: {
   mode: AuditMode;
+  auditId: string;
   targetDir: string;
   opts: ResumeOptions;
 }): RunOptions {
-  const { mode, targetDir, opts } = args;
+  const { mode, auditId, targetDir, opts } = args;
   const runOpts: RunOptions = {
     mode,
     target: targetDir,
     resume: true,
+    resumeAuditId: auditId,
   };
   if (opts.agent !== undefined) runOpts.agent = opts.agent as AgentPlatform;
   if (opts.transport !== undefined) runOpts.transport = opts.transport;
@@ -135,6 +144,8 @@ function buildRunOptions(args: {
   if (opts.keepSecrets !== undefined) runOpts.keepSecrets = opts.keepSecrets;
   if (opts.focusFile !== undefined) runOpts.focusFile = opts.focusFile;
   if (opts.expectedBehaviorsFile !== undefined) runOpts.expectedBehaviorsFile = opts.expectedBehaviorsFile;
+  if (opts.knowledgeBase !== undefined) runOpts.knowledgeBase = opts.knowledgeBase;
+  if (opts.knowledgeBaseRaw !== undefined) runOpts.knowledgeBaseRaw = opts.knowledgeBaseRaw;
   if (opts.serial !== undefined) runOpts.serial = opts.serial;
   if (opts.json !== undefined) runOpts.json = opts.json;
   if (opts.debug !== undefined) runOpts.debug = opts.debug;

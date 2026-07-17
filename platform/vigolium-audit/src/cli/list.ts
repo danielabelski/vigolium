@@ -140,6 +140,11 @@ function printChoiceGuide(): void {
   const m = (s: string): string => chalk.cyan(s);
   console.log(h("Choosing between modes:"));
   console.log(
+    `  ${m("knowledge-base")} build only the reusable application model + attack surface. ` +
+      `No SAST, findings, or PoCs; useful before a later audit or in a chained ` +
+      `${m("knowledge-base,deep")} run.`,
+  );
+  console.log(
     `  ${m("revisit")}    second offensive pass on the same code. Reuses prior KB; anti-anchored\n` +
       `             reasoning surfaces findings round 1 missed. Use after a complete deep run\n` +
       `             when you want to make sure nothing was missed.`,

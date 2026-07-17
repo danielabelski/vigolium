@@ -7,6 +7,7 @@ import { makeContentLoader, resolveRoots } from "../../src/content-loader.js";
 import type { Adapter, AdapterEvent, AdapterRunInput } from "../../src/adapters/adapter.js";
 import type { OrchestratorEvent } from "../../src/engine/events.js";
 import { StateStore } from "../../src/engine/state.js";
+import { resolveKnowledgeBaseInput } from "../../src/engine/knowledge-base.js";
 
 class FakeAdapter implements Adapter {
   readonly id = "fake";
@@ -91,7 +92,36 @@ class FakeAdapter implements Adapter {
     const results = join(cwd, "vigolium-results");
     const base = join(results, "attack-surface");
     mkdirSync(base, { recursive: true });
-    if (label.startsWith("lite:L1")) {
+    if (label.includes(":KB0")) {
+      writeFileSync(
+        join(base, "knowledge-base-seed.md"),
+        "# Knowledge Base Seed\n\n## Provenance\n\nFixture docs with immutable hash and source citations.\n\n## Application Purpose and Deployment\n\nFixture application context.\n\n## Source Index\n\n- source 1\n",
+      );
+    } else if (label.startsWith("knowledge-base:K1")) {
+      writeFileSync(
+        join(base, "knowledge-base-report.md"),
+        "## Advisory Intelligence\n\nFixture advisory and dependency inventory evidence with explicit coverage and provenance.\n",
+      );
+      writeFileSync(join(base, "sbom.json"), '{"schema_version":1,"components":[]}\n');
+    } else if (label.startsWith("knowledge-base:K2")) {
+      writeFileSync(
+        join(base, "knowledge-base-report.md"),
+        [
+          "## Advisory Intelligence",
+          "Fixture advisory and inventory evidence.",
+          "## Architecture Model",
+          "Multi-service: false. Fixture architecture and trust boundaries.",
+          "## DFD/CFD Slices",
+          "Fixture data and control flow slices.",
+          "## Attack Surface",
+          "Fixture attacker-controlled entry points.",
+        ].join("\n\n") + "\n",
+      );
+      writeFileSync(
+        join(base, "unauthenticated-surface.md"),
+        "# Unauthenticated Attack Surface\n\nNo public fixture routes.\n",
+      );
+    } else if (label.startsWith("lite:L1")) {
       writeFileSync(join(base, "lite-recon.md"), "## Lite Recon\n\nLanguages and entry points were enumerated.\n");
       writeFileSync(
         join(base, "unauthenticated-surface.md"),
@@ -210,6 +240,61 @@ describe("Orchestrator", () => {
     }
     const usd = audit.usage?.cost_usd ?? 0;
     expect(usd).toBeGreaterThan(0);
+  });
+
+  test("runs KB0 before lite when a knowledge base is resolved and stages immutable inputs", async () => {
+    const target = makeTarget();
+    const knowledgeBase = await resolveKnowledgeBaseInput({
+      targetDir: target,
+      raw: "# Application\n\nAdmins approve refunds.\n",
+    });
+    const adapter = new FakeAdapter();
+    const orch = new Orchestrator({
+      adapter,
+      loader: makeContentLoader(resolveRoots()),
+      targetDir: target,
+      mode: "lite",
+      knowledgeBase: knowledgeBase!,
+    });
+
+    const result = await orch.run();
+    expect(result.status).toBe("complete");
+    expect(adapter.calls.map((call) => call.label)).toEqual([
+      "lite:KB0",
+      "lite:L1",
+      "lite:L2",
+      "lite:L3",
+    ]);
+    expect(adapter.calls[0]?.userPrompt).toContain("Knowledge-base corpus:");
+    expect(adapter.calls[0]?.userPrompt).not.toContain("Admins approve refunds");
+    const results = join(target, "vigolium-results");
+    expect(Bun.file(join(results, "attack-surface", "knowledge-base-input", "manifest.json")).size)
+      .toBeGreaterThan(40);
+    const state = await new StateStore(results).load();
+    expect(state.audits[0]?.phases.KB0?.status).toBe("complete");
+    expect(state.audits[0]?.context?.knowledge_base?.source_kind).toBe("raw");
+  });
+
+  test("standalone knowledge-base mode stops after reusable attack-surface artifacts", async () => {
+    const target = makeTarget();
+    const adapter = new FakeAdapter();
+    const result = await new Orchestrator({
+      adapter,
+      loader: makeContentLoader(resolveRoots()),
+      targetDir: target,
+      mode: "knowledge-base",
+    }).run();
+
+    expect(result.status).toBe("complete");
+    expect(result.findings.total).toBe(0);
+    expect(adapter.calls.map((call) => call.label)).toEqual([
+      "knowledge-base:K1",
+      "knowledge-base:K2",
+    ]);
+    const state = await new StateStore(join(target, "vigolium-results")).load();
+    expect(state.audits[0]?.phases.KB0?.status).toBe("skipped");
+    expect(state.audits[0]?.phases.K1?.status).toBe("complete");
+    expect(state.audits[0]?.phases.K2?.status).toBe("complete");
   });
 
   test("strict failure aborts after first failed phase", async () => {

@@ -4,12 +4,33 @@ argument-hint: "Optional: target path/scope"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, WebSearch, WebFetch, AskUserQuestion, TaskCreate, TaskGet, TaskList, TaskUpdate
 mode: balanced
 phases:
+  - id: "KB0"
+    title: Knowledge Base Intake
+    agent: knowledge-base-loader
+    requires_git: false
+    requires_knowledge_base: true
+    parallel_with: []
+    depends_on: []
+    completion:
+      repair_attempts: 1
+      artifacts:
+        - kind: file
+          path: attack-surface/knowledge-base-input/manifest.json
+          min_bytes: 40
+          json: true
+        - kind: file
+          path: attack-surface/knowledge-base-input/corpus.md
+          min_bytes: 80
+        - kind: file
+          path: attack-surface/knowledge-base-seed.md
+          min_bytes: 120
+          contains: ["# Knowledge Base Seed", "## Source Index"]
   - id: "B1"
     title: Intelligence Pass
     agent: cve-scout
     requires_git: false
     parallel_with: []
-    depends_on: []
+    depends_on: ["KB0"]
     completion:
       repair_attempts: 1
       artifacts:
@@ -227,6 +248,7 @@ Do not proceed past the pre-flight check without an explicit user choice.
          "completed_at": null,
          "status": "in_progress",
          "phases": {
+           "KB0": {"status": "pending"},
            "B1": {"status": "pending"},
            "B2": {"status": "pending"},
            "B3": {"status": "pending"},
@@ -284,9 +306,13 @@ T3 and T4 unblock after T2 and run in parallel. T5 waits for both T3 and T4. T6 
 
 You are the orchestrator. Dispatch agents, monitor completion, aggregate results. Do NOT perform audit work yourself.
 
+### Phase KB0: Knowledge Base Intake (conditional)
+
+If `vigolium-results/audit-context.md` contains `## Knowledge Base Input`, run `vigolium-audit:knowledge-base-loader` first. It writes `vigolium-results/attack-surface/knowledge-base-seed.md`. All later roles treat the seed as documented intent and verify implementation claims against source; it is never a standalone reason to suppress a finding. If the context has no Knowledge Base Input section, the trusted engine records KB0 skipped and B1 starts normally.
+
 ### Phase B1: Intelligence Pass (T1)
 
-Spawn `vigolium-audit:cve-scout` with `run_in_background: true`.
+Spawn `vigolium-audit:cve-scout` with `run_in_background: true`. When `knowledge-base-seed.md` exists, use its named components, deployment model, and integrations to guide inventory and advisory coverage.
 
 **Scope**: cve-scout only. Do NOT spawn `history-miner` or `patch-auditor`.
 
@@ -298,7 +324,7 @@ After the B1 artifact is sufficient, mark the in-session task T1 complete. When 
 
 If `VIGOLIUM_AUDIT_INFO_AVAILABLE=true` (or `vigolium-results/INFO.md` exists), the KB-builder treats that file as authoritative project context and skips its rediscovery work for project type, trust boundaries, auth primitives, known FP sources, out-of-scope paths, and spec commitments. Mention this in the prompt explicitly so the agent reads INFO.md first.
 
-Spawn `vigolium-audit:threat-modeler` (foreground) with the following additional instruction in the prompt:
+Spawn `vigolium-audit:threat-modeler` (foreground) with the following additional instruction in the prompt. It must read `vigolium-results/attack-surface/knowledge-base-seed.md` first when present, incorporate its cited documented facts, and source-verify implementation claims:
 
 > "BALANCED MODE: Skip Domain Attack Research Modes B and C. Only run Mode A if the project is a library/plugin/protocol. Skip generating `## Spec Gap Candidates` and `## Phase 4 CodeQL Extraction Targets` sections. Focus on: Project Classification, Architecture Model, DFD/CFD Slices, Attack Surface, and Threat Model. Still run Step 6 — write `vigolium-results/attack-surface/unauthenticated-surface.md` (balanced has no access-auditor phase, so this is the final unauthenticated-surface artifact). If `vigolium-results/INFO.md` exists, read it first and use it as authoritative for the sections it covers (per the agent's INFO.md handling rules)."
 
@@ -423,13 +449,7 @@ Spawn `vigolium-audit:report-composer` (foreground) with the following additiona
 
 > "BALANCED MODE: This is a balanced audit report. Add a note in the Executive Summary: 'This report was generated using balanced audit mode. Skipped vs deep: commit archaeology, patch-bypass analysis, the dedicated authorization phase, custom SAST/structural extraction, multi-round deep probing, and the deep chamber''s inline cross-service taint reasoning + variant expansion (cold verification and intent reconciliation still run). For comprehensive coverage, run a full audit with /vigolium-audit:deep.' Render confirmed findings (PoC executed) in the main report and put theoretical/unconfirmed ones in the dedicated Theoretical / Unconfirmed Findings section, kept out of the Summary-of-Findings table. Surface the Intent Reconciliation summary from vigolium-results/attack-surface/intent-reconciliation.md. Skip the chamber workspace appendix. Consistency checks MUST include: finding ID cross-reference (across both buckets), orphan detection, AND finding completeness (every `<ID>-<slug>/` in BOTH `vigolium-results/findings/` and `vigolium-results/findings-theoretical/` must contain `draft.md` and a non-empty `report.md`; a `poc.*` is required only in `vigolium-results/findings/`). Do NOT drop the finding-completeness check — Phase B8 has already guaranteed it, so any failure here is a real regression."
 
-**File-state stamp (incremental basis)**: Before cleanup, stamp `vigolium-results/file-state.json` so the next audit can compute an incremental scope (changed/new/deleted files) against this run. This adds nothing to the user-facing report — it just persists per-file hashes and the audit IDs that touched each file.
-
-```bash
-python3 ~/.config/vigolium-audit/runtime-skills/audit/scripts/stamp_file_state.py --target . 2>&1
-```
-
-The script reads `vigolium-results/audit-state.json` to detect the current audit_id and phase set, walks the target tree (excluding `vigolium-results/`, `node_modules/`, `vendor/`, etc.), sha-256 hashes every text-readable source file under ~512 KB, and merges the result into `vigolium-results/file-state.json`. If it errors, log the failure but DO NOT fail the audit — the report is the deliverable.
+**File-state stamp (incremental basis)**: Nothing to do — the engine stamps `vigolium-results/file-state.json` itself after the run completes, so the next audit can compute an incremental scope. Do NOT write this file from inside the audit.
 
 **Retention handoff**: Do not delete findings drafts, probe/chamber workspaces, or scanner artifacts inside the agent run; they are inputs to engine completion gates and resume recovery. The trusted CLI applies the requested retention/strip policy only after artifact validation. If report consistency checks fail, report them and leave all evidence intact.
 
@@ -439,9 +459,10 @@ Mark the in-session task T9 complete and print the post-audit summary. The engin
 
 ## Resume Logic
 
-Read `audits[-1].phases` from `vigolium-results/audit-state.json` to find phase statuses. Walk phases in order: B1, B2, B3, B4, B5, B6, B7, B8, B9. Find the first phase with status `pending`, `in_progress`, or `failed`:
+Read `audits[-1].phases` from `vigolium-results/audit-state.json` to find phase statuses. Walk phases in order: KB0, B1, B2, B3, B4, B5, B6, B7, B8, B9. A skipped KB0 is already satisfied. Find the first phase with status `pending`, `in_progress`, or `failed`:
 
 - `failed` or `in_progress`: check whether the expected KB sections or output artifacts exist and appear complete. Artifact gates:
+  - KB0 complete if the staged manifest/corpus exist and `vigolium-results/attack-surface/knowledge-base-seed.md` contains `# Knowledge Base Seed` plus `## Source Index`
   - B6 complete if `vigolium-results/attack-surface/intent-corpus.json` exists (empty arrays acceptable) OR the phase was recorded `failed` under `policy: skip-and-continue`
   - B7 complete if every directory under `vigolium-results/findings/` has a PoC script AND the draft inside has a `PoC-Status` line written back
   - B7 complete if `vigolium-results/findings-draft/partition-manifest.json` exists (PoC + partition ran), or the consolidation manifest had an empty `findings` array (all theoretical)

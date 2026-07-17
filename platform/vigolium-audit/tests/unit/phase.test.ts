@@ -6,9 +6,10 @@ import { parseCommandDef, topologicalOrder } from "../../src/engine/phase.js";
 const COMMAND_DEFS_DIR = join(import.meta.dir, "../../src/content/command-defs");
 
 const expectedPhaseCount: Record<string, number> = {
-  lite: 3,
-  balanced: 9,
-  deep: 12,
+  lite: 4,
+  balanced: 10,
+  deep: 13,
+  "knowledge-base": 3,
   diff: 1,
   confirm: 7,
   merge: 7,
@@ -108,6 +109,14 @@ body`;
     const def = parseCommandDef(src, "lite.md");
     expect(def.phases.find((phase) => phase.id === "L3")?.depends_on.sort()).toEqual(["L1", "L2"]);
     expect(def.phases.find((phase) => phase.id === "L2")?.parallel_with).toEqual([]);
+  });
+
+  test("knowledge-base intake is conditional and precedes source discovery", () => {
+    const src = readFileSync(join(COMMAND_DEFS_DIR, "knowledge-base.md"), "utf8");
+    const def = parseCommandDef(src, "knowledge-base.md");
+    expect(def.phases.find((phase) => phase.id === "KB0")?.requires_knowledge_base).toBe(true);
+    expect(def.phases.find((phase) => phase.id === "K1")?.depends_on).toEqual(["KB0"]);
+    expect(def.phases.find((phase) => phase.id === "K2")?.depends_on).toEqual(["K1"]);
   });
 
   test("rejects artifact paths outside the results directory", () => {

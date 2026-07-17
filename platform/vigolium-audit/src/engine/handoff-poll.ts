@@ -43,6 +43,7 @@ export function startHandoffPoller(args: {
     title: title ?? `${phaseId} (handoff)`,
     agent: null,
     requires_git: false,
+    requires_knowledge_base: false,
     depends_on: [],
     parallel_with: [],
   });

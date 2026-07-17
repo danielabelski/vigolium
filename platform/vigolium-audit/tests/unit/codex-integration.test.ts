@@ -50,6 +50,7 @@ describe("Codex canonical interactive prompt", () => {
       ["lite", "Lite mode: L1-L3"],
       ["balanced", "Balanced mode: B1-B9"],
       ["deep", "Full deep mode"],
+      ["knowledge-base", "Knowledge-base mode: KB0-K2"],
       ["revisit", "Revisit mode"],
       ["confirm", "Confirm mode"],
     ] as const;

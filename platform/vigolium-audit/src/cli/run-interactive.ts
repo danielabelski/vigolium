@@ -13,6 +13,11 @@ import { StateStore, buildAuditId } from "../engine/state.js";
 import type { AgentPlatform, AuditMode } from "../engine/types.js";
 import { resolveModel } from "./run-models.js";
 import { statusArrow, tildify } from "./util.js";
+import {
+  knowledgeBaseReference,
+  stageKnowledgeBaseInput,
+  type ResolvedKnowledgeBase,
+} from "../engine/knowledge-base.js";
 
 /**
  * Interactive mode (`-i` / `--interactive`).
@@ -36,6 +41,7 @@ export async function runInteractive(args: {
   model?: string;
   focus?: string;
   expectedBehaviors?: string;
+  knowledgeBase?: ResolvedKnowledgeBase;
   /** Override the agent binary/command (e.g. an env-wrapper like `cc`). */
   agentBinary?: string;
   /** claude-only: passed through as `--disallowedTools <value>`. */
@@ -77,6 +83,9 @@ export async function runInteractive(args: {
       await archivePriorCoreArtifacts(resultsDir, buildAuditId());
     }
   }
+  if (args.knowledgeBase !== undefined) {
+    await stageKnowledgeBaseInput(resultsDir, args.knowledgeBase);
+  }
 
   // Write `vigolium-results/audit-context.md` before the agent starts so the auto-confirm
   // directive (plus user-supplied focus / expected behaviors) lands in the
@@ -87,6 +96,9 @@ export async function runInteractive(args: {
   await writeAuditContext(resultsDir, {
     ...(args.focus !== undefined ? { focus: args.focus } : {}),
     ...(args.expectedBehaviors !== undefined ? { expectedBehaviors: args.expectedBehaviors } : {}),
+    ...(args.knowledgeBase !== undefined
+      ? { knowledgeBase: knowledgeBaseReference(args.knowledgeBase) }
+      : {}),
   });
 
   // Install the harness fresh for this run; remove it on exit (natural,

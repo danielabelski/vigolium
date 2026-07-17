@@ -14,7 +14,7 @@ function command(mode: string) {
 
 describe("content execution contracts", () => {
   test("every core audit phase declares an executable completion contract", () => {
-    for (const mode of ["lite", "balanced", "deep"]) {
+    for (const mode of ["lite", "balanced", "deep", "knowledge-base"]) {
       for (const phase of command(mode).phases) {
         expect(phase.completion, `${mode}:${phase.id}`).toBeDefined();
         expect(phase.completion!.artifacts.length, `${mode}:${phase.id}`).toBeGreaterThan(0);
@@ -44,7 +44,7 @@ describe("content execution contracts", () => {
       for (const phase of def.phases) {
         if (!phase.agent) continue;
         expect(agents.has(phase.agent), `${def.mode}:${phase.id}:${phase.agent}`).toBe(true);
-        if (["lite", "balanced", "deep", "revisit", "confirm"].includes(def.mode)) {
+        if (["lite", "balanced", "deep", "knowledge-base", "revisit", "confirm"].includes(def.mode)) {
           expect(excluded.has(phase.agent), `Codex excludes ${def.mode}:${phase.agent}`).toBe(false);
         }
       }
@@ -60,6 +60,11 @@ describe("content execution contracts", () => {
       expect(source).toMatch(/clean no-findings/i);
     }
     expect(readFileSync(join(COMMANDS, "revisit.md"), "utf8")).toMatch(/clean no-new-findings/i);
+
+    const kb = readFileSync(join(COMMANDS, "knowledge-base.md"), "utf8");
+    expect(kb).toContain("Engine-Owned Audit State");
+    expect(kb).toContain("context, not vulnerability findings");
+    expect(kb).not.toContain("partition_findings.py");
   });
 
   test("audit skill stays concise and contains no legacy destructive state workflow", () => {
@@ -99,6 +104,8 @@ describe("content execution contracts", () => {
     expect(source).toContain("### 0: Intent Cartography");
     expect(source).toContain("vigolium-audit:intent-mapper");
     expect(source).toContain("### V1.5: Intent Cross-Check");
+    expect(source).toContain("# Knowledge-Base Mode (KB0-K2)");
+    expect(source).toContain("vigolium-audit:knowledge-base-loader");
     expect(source).not.toContain("Collect `Verdict: VALID` drafts, assign severity IDs");
     expect(source).not.toContain("rm -rf vigolium-results/findings-draft/");
 

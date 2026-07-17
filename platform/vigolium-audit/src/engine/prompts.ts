@@ -1,5 +1,6 @@
 import type { CommandDef, PhaseDef } from "./types.js";
 import { describeArtifactRule } from "./artifact-gates.js";
+import type { KnowledgeBaseReference } from "./knowledge-base.js";
 
 export function parseToolsField(raw: string | undefined): string[] {
   if (!raw) return [];
@@ -14,7 +15,7 @@ export function composeUserPrompt(
   command: CommandDef,
   auditId: string,
   targetDir: string,
-  context: { focus?: string; expectedBehaviors?: string; liveTarget?: string } = {},
+  context: { focus?: string; expectedBehaviors?: string; liveTarget?: string; knowledgeBase?: KnowledgeBaseReference } = {},
 ): string {
   // The command body uses $ARGUMENTS as a placeholder for trailing slash-command
   // args. In headless mode there's no slash command, so we substitute the live
@@ -31,6 +32,13 @@ export function composeUserPrompt(
   ];
   if (typeof context.liveTarget === "string" && context.liveTarget.length > 0) {
     lines.push(`Live target: ${context.liveTarget}`);
+  }
+  if (context.knowledgeBase !== undefined) {
+    lines.push(
+      `Knowledge-base corpus: ${context.knowledgeBase.corpus_path}`,
+      `Knowledge-base seed: ${context.knowledgeBase.seed_path}`,
+      `Knowledge-base SHA-256: ${context.knowledgeBase.aggregate_sha256}`,
+    );
   }
   lines.push(
     ``,

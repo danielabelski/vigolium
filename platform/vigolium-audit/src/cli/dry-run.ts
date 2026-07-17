@@ -12,6 +12,12 @@ import { composeUserPrompt, parseToolsField } from "../engine/prompts.js";
 import { topologicalOrder } from "../engine/phase.js";
 import { probeGit } from "../engine/git.js";
 import { compact } from "../engine/util.js";
+import {
+  knowledgeBaseReference,
+  resolveKnowledgeBaseInput,
+  type KnowledgeBaseReference,
+  type ResolvedKnowledgeBase,
+} from "../engine/knowledge-base.js";
 import type {
   AgentPlatform,
   AgentTransport,
@@ -19,7 +25,12 @@ import type {
   PhaseDef,
   RunOptions,
 } from "../engine/types.js";
-import { resolveRequestedModes, resolveAuditContext } from "./run.js";
+import {
+  modeMayResolveKnowledgeBase,
+  modeSupportsKnowledgeBase,
+  resolveRequestedModes,
+  resolveAuditContext,
+} from "./run.js";
 import { detectRefreshRoute } from "./refresh-detect.js";
 import { failCli, statusArrow } from "./util.js";
 
@@ -65,6 +76,28 @@ export async function dryRunCommand(opts: RunOptions): Promise<void> {
     return fail(json, (err as Error).message);
   }
 
+  const acceptsKnowledgeBase = requestedModes.some(modeMayResolveKnowledgeBase);
+  if ((opts.knowledgeBase !== undefined || opts.knowledgeBaseRaw !== undefined) && !acceptsKnowledgeBase) {
+    return fail(json, "--knowledge-base and --knowledge-base-raw are only supported by lite, balanced, deep, and knowledge-base modes");
+  }
+  let knowledgeBase: ResolvedKnowledgeBase | undefined;
+  if (acceptsKnowledgeBase) {
+    try {
+      knowledgeBase = await resolveKnowledgeBaseInput({
+        targetDir,
+        adoptPriorRun: requestedModes[0] !== "knowledge-base",
+        ...compact({
+          path: opts.knowledgeBase,
+          raw: opts.knowledgeBaseRaw,
+          resume: opts.resume || undefined,
+          resumeMode: opts.resume ? requestedModes[0] : undefined,
+        }),
+      });
+    } catch (err) {
+      return fail(json, (err as Error).message);
+    }
+  }
+
   const plans: ModePlan[] = [];
   for (const requested of requestedModes) {
     let resolvedMode: AuditMode = requested;
@@ -98,8 +131,22 @@ export async function dryRunCommand(opts: RunOptions): Promise<void> {
           focus: auditContext.focus,
           expectedBehaviors: auditContext.expectedBehaviors,
           liveTarget: opts.liveTarget,
+          knowledgeBase: modeSupportsKnowledgeBase(resolvedMode) && knowledgeBase !== undefined
+            ? knowledgeBaseReference(knowledgeBase)
+            : undefined,
         }),
       }),
+    );
+  }
+
+  if (
+    (opts.knowledgeBase !== undefined || opts.knowledgeBaseRaw !== undefined)
+    && !plans.some((plan) => modeSupportsKnowledgeBase(plan.resolvedMode))
+  ) {
+    return fail(
+      json,
+      "knowledge-base input cannot be applied because refresh routed to revisit; " +
+        "run a lite, balanced, deep, or knowledge-base mode instead",
     );
   }
 
@@ -115,13 +162,31 @@ export async function dryRunCommand(opts: RunOptions): Promise<void> {
         focus: auditContext.focus ?? null,
         expectedBehaviors: auditContext.expectedBehaviors ?? null,
         maxCost: opts.maxCost ?? null,
+        knowledgeBase: knowledgeBase === undefined
+          ? null
+          : {
+              sourceKind: knowledgeBase.sourceKind,
+              sourceLabel: knowledgeBase.sourceLabel,
+              fileCount: knowledgeBase.files.length,
+              totalBytes: knowledgeBase.totalBytes,
+              aggregateSha256: knowledgeBase.aggregateSha256,
+            },
         plans: plans.map(serializePlan),
       }) + "\n",
     );
     return;
   }
 
-  renderPlans({ platform, transport, targetDir, gitAvailable: git.available, noGit, plans, opts });
+  renderPlans({
+    platform,
+    transport,
+    targetDir,
+    gitAvailable: git.available,
+    noGit,
+    plans,
+    opts,
+    ...(knowledgeBase !== undefined ? { knowledgeBase } : {}),
+  });
 }
 
 interface ResolvedPhase {
@@ -161,6 +226,7 @@ async function buildModePlan(args: {
   focus?: string;
   expectedBehaviors?: string;
   liveTarget?: string;
+  knowledgeBase?: KnowledgeBaseReference;
 }): Promise<ModePlan> {
   if (args.platform === "codex" && isCodexHandoffMode(args.resolvedMode)) {
     const dispatchPath = join(args.roots.contentRoot, "harnesses", "codex", "agents-dispatch.md");
@@ -184,6 +250,7 @@ async function buildModePlan(args: {
           title: `${args.resolvedMode} codex dispatch`,
           agent: null,
           requires_git: false,
+          requires_knowledge_base: false,
           parallel_with: [],
           depends_on: [],
         },
@@ -205,6 +272,7 @@ async function buildModePlan(args: {
     focus: args.focus,
     expectedBehaviors: args.expectedBehaviors,
     liveTarget: args.liveTarget,
+    knowledgeBase: args.knowledgeBase,
   });
 
   const phases: ResolvedPhase[] = await Promise.all(
@@ -213,6 +281,8 @@ async function buildModePlan(args: {
         ? args.noGit
           ? "requires_git, but git checks disabled via --no-git"
           : "requires_git but target has no git history"
+        : phase.requires_knowledge_base && args.knowledgeBase === undefined
+          ? "no knowledge-base flag or knowledge-base directory was resolved"
         : excludeSet.has(phase.id)
           ? "excluded by refresh fresh-fallback policy"
           : undefined;
@@ -300,6 +370,7 @@ function serializePlan(p: ModePlan): unknown {
       title: ph.phase.title,
       agent: ph.phase.agent,
       requiresGit: ph.phase.requires_git,
+      requiresKnowledgeBase: ph.phase.requires_knowledge_base,
       dependsOn: ph.phase.depends_on,
       parallelWith: ph.phase.parallel_with,
       skipped: ph.skipped,
@@ -321,6 +392,7 @@ function renderPlans(args: {
   noGit?: boolean;
   plans: ModePlan[];
   opts: RunOptions;
+  knowledgeBase?: ResolvedKnowledgeBase;
 }): void {
   console.log(chalk.bold(`\nvigolium-audit — dry run (no adapter calls)`));
   console.log(`${statusArrow("Platform")} Platform:  ${chalk.cyan(args.platform)}`);
@@ -339,6 +411,12 @@ function renderPlans(args: {
   if (args.opts.focusFile) console.log(`${statusArrow("Focus")} Focus:     ${chalk.cyan(args.opts.focusFile)}`);
   if (args.opts.expectedBehaviorsFile) console.log(`${statusArrow("Expected")} Expected:  ${chalk.cyan(args.opts.expectedBehaviorsFile)}`);
   if (args.opts.liveTarget) console.log(`${statusArrow("Live")} Live:      ${chalk.cyan(args.opts.liveTarget)}`);
+  if (args.knowledgeBase !== undefined) {
+    console.log(
+      `${statusArrow("Knowledge base")} Knowledge: ${chalk.cyan(`${args.knowledgeBase.files.length} file${args.knowledgeBase.files.length === 1 ? "" : "s"}`)} ` +
+        chalk.dim(`(${args.knowledgeBase.totalBytes} bytes, ${args.knowledgeBase.sourceKind})`),
+    );
+  }
 
   for (const plan of args.plans) {
     const header = plan.requestedMode === plan.resolvedMode

@@ -10,9 +10,9 @@ authoritative going forward; the snapshot below is for traceability only.
 - **Commit**: `26e7f8783cc26e029d559f8cfa601196e17c6f4b`
 - **Synced**: 2026-05-09
 - **Inventory**:
-  - `agent-defs/`: 31 specialist agent prompts
-  - `command-defs/`: 9 mode workflows (lite, balanced, deep, diff, confirm,
-    merge, revisit, reinvest, status)
+  - `agent-defs/`: 36 specialist agent prompts
+  - `command-defs/`: 11 mode workflows (knowledge-base, lite, balanced, deep,
+    diff, confirm, merge, revisit, reinvest, longshot, status)
   - `skills/`: 20 reusable workflow definitions
   - `harnesses/{claude,codex}/`: platform-specific frontmatter deltas
   - `skills-lock.json`: skill version locks (carried over verbatim)

@@ -24,6 +24,7 @@ function phase(artifacts: NonNullable<PhaseDef["completion"]>["artifacts"]): Pha
     title: "Test",
     agent: null,
     requires_git: false,
+    requires_knowledge_base: false,
     parallel_with: [],
     depends_on: [],
     completion: { artifacts, repair_attempts: 1, enforcement: "required" },

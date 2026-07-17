@@ -79,10 +79,9 @@ Use the bundled scripts when the command requests them:
 ```bash
 python3 ~/.config/vigolium-audit/runtime-skills/audit/scripts/consolidate_drafts.py vigolium-results
 python3 ~/.config/vigolium-audit/runtime-skills/audit/scripts/partition_findings.py vigolium-results
-python3 ~/.config/vigolium-audit/runtime-skills/audit/scripts/stamp_file_state.py --target .
 ```
 
-Do not reproduce their ID assignment, bucket routing, or file-state schema manually.
+Do not reproduce their ID assignment or bucket routing manually. `file-state.json` is stamped by the engine after the run — never write it from inside the audit.
 
 ## No-history targets
 

@@ -41,6 +41,11 @@ import { cloneRemoteTarget, isRemoteTargetUrl } from "./clone-target.js";
 import type { ResumeOptions } from "./resume.js";
 import { compact } from "../engine/util.js";
 import { cleanupConfirmationResources } from "../engine/confirmation-cleanup.js";
+import {
+  resolveCompletedKnowledgeBaseOutput,
+  resolveKnowledgeBaseInput,
+  type ResolvedKnowledgeBase,
+} from "../engine/knowledge-base.js";
 import { parsePositiveUsd, statusArrow } from "./util.js";
 import { resolveModel } from "./run-models.js";
 import { runInteractive } from "./run-interactive.js";
@@ -55,7 +60,16 @@ import {
 
 const MAX_CONTEXT_BYTES = 32 * 1024;
 
-const VALID_MODES: AuditMode[] = ["lite", "balanced", "deep", "diff", "confirm", "merge", "revisit", "reinvest", "longshot", "refresh"];
+const VALID_MODES: AuditMode[] = ["lite", "balanced", "deep", "knowledge-base", "diff", "confirm", "merge", "revisit", "reinvest", "longshot", "refresh"];
+const KNOWLEDGE_BASE_MODES = new Set<AuditMode>(["lite", "balanced", "deep", "knowledge-base"]);
+
+export function modeSupportsKnowledgeBase(mode: AuditMode): boolean {
+  return KNOWLEDGE_BASE_MODES.has(mode);
+}
+
+export function modeMayResolveKnowledgeBase(mode: AuditMode): boolean {
+  return modeSupportsKnowledgeBase(mode) || mode === "refresh";
+}
 
 /**
  * Routing decision produced when `--mode refresh` is invoked. The
@@ -67,6 +81,7 @@ interface RefreshRouting {
   excludePhases?: string[];
   triggeredVia: string;
   resume?: boolean;
+  resumeAuditId?: string;
 }
 
 export async function runCommand(opts: RunOptions): Promise<void> {
@@ -287,6 +302,41 @@ export async function runCommand(opts: RunOptions): Promise<void> {
       ? resolve(mergeTargetOverride)
       : resolve(opts.target ?? ".");
 
+  const acceptsKnowledgeBase = requestedModes.some(modeMayResolveKnowledgeBase);
+  if ((opts.knowledgeBase !== undefined || opts.knowledgeBaseRaw !== undefined) && !acceptsKnowledgeBase) {
+    fail(
+      `--knowledge-base and --knowledge-base-raw are supported with modes: ` +
+        `${[...KNOWLEDGE_BASE_MODES].join(", ")}`,
+    );
+  }
+  let knowledgeBase: ResolvedKnowledgeBase | undefined;
+  if (acceptsKnowledgeBase) {
+    try {
+      knowledgeBase = await resolveKnowledgeBaseInput({
+        targetDir,
+        // A fresh standalone builder should inspect the current repository and
+        // any discovered docs, not recursively seed itself from its last report.
+        adoptPriorRun: requestedModes[0] !== "knowledge-base",
+        ...compact({
+          path: opts.knowledgeBase,
+          raw: opts.knowledgeBaseRaw,
+          resume: opts.resume || undefined,
+          resumeMode: opts.resume ? requestedModes[0] : undefined,
+          resumeAuditId: opts.resume ? opts.resumeAuditId : undefined,
+        }),
+      });
+      if (knowledgeBase !== undefined && !json) {
+        console.log(
+          chalk.blue("[knowledge-base]") +
+            ` ${knowledgeBase.files.length} file${knowledgeBase.files.length === 1 ? "" : "s"}, ` +
+            `${knowledgeBase.totalBytes} bytes (${knowledgeBase.sourceKind})`,
+        );
+      }
+    } catch (err) {
+      fail((err as Error).message);
+    }
+  }
+
   // Auth overrides must be applied before any adapter / subprocess work — env
   // vars and file swaps must be in place when the SDK reads them or when
   // claude/codex gets spawned.
@@ -334,6 +384,7 @@ export async function runCommand(opts: RunOptions): Promise<void> {
           model: opts.model,
           focus: interactiveAuditContext.focus,
           expectedBehaviors: interactiveAuditContext.expectedBehaviors,
+          knowledgeBase,
           agentBinary: opts.agentBinary,
           disallowedTools: opts.disallowedTools,
         }),
@@ -345,6 +396,7 @@ export async function runCommand(opts: RunOptions): Promise<void> {
       targetDir,
       opts,
       noGit,
+      ...(knowledgeBase !== undefined ? { knowledgeBase } : {}),
     });
   } finally {
     authHandle?.restore();
@@ -433,6 +485,8 @@ function toResumeOptions(opts: RunOptions): ResumeOptions {
     keepSecrets: opts.keepSecrets,
     focusFile: opts.focusFile,
     expectedBehaviorsFile: opts.expectedBehaviorsFile,
+    knowledgeBase: opts.knowledgeBase,
+    knowledgeBaseRaw: opts.knowledgeBaseRaw,
     serial: opts.serial,
     json: opts.json,
     debug: opts.debug,
@@ -453,7 +507,11 @@ async function resolveRefreshRouting(
   if (inProgress) {
     return {
       mode: inProgress.mode,
-      routing: { triggeredVia: TRIGGERED_VIA_REFRESH, resume: true },
+      routing: {
+        triggeredVia: TRIGGERED_VIA_REFRESH,
+        resume: true,
+        resumeAuditId: inProgress.auditId,
+      },
       logLine: `resuming in-progress audit ${inProgress.auditId} (mode=${inProgress.mode})`,
     };
   }
@@ -555,8 +613,10 @@ async function runHeadless(args: {
   targetDir: string;
   opts: RunOptions;
   noGit: boolean;
+  knowledgeBase?: ResolvedKnowledgeBase;
 }): Promise<void> {
   const { platform, modes, targetDir, opts, noGit } = args;
+  let activeKnowledgeBase = args.knowledgeBase;
   const json = !!opts.json;
   const isChain = modes.length > 1;
   const choice = chooseAdapter(platform, opts.transport);
@@ -822,6 +882,7 @@ async function runHeadless(args: {
             debug: opts.debug || undefined,
             focus: auditContext.focus,
             expectedBehaviors: auditContext.expectedBehaviors,
+            knowledgeBase: KNOWLEDGE_BASE_MODES.has(m) ? activeKnowledgeBase : undefined,
             liveTarget: opts.liveTarget,
             model: effectiveModel,
             noGit: noGit || undefined,
@@ -917,6 +978,40 @@ async function runHeadless(args: {
         if (!json) {
           console.log(chalk.green("[refresh]") + ` ${routed.logLine}`);
         }
+        if (
+          !modeSupportsKnowledgeBase(mode)
+          && (opts.knowledgeBase !== undefined || opts.knowledgeBaseRaw !== undefined)
+          && !modes.some(modeSupportsKnowledgeBase)
+        ) {
+          fatalError = new Error(
+            "knowledge-base input cannot be applied because refresh routed to revisit; " +
+              "run a lite, balanced, deep, or knowledge-base mode instead",
+          );
+          stoppedReason = "fatal";
+          break;
+        }
+      }
+
+      if (
+        modeSupportsKnowledgeBase(mode) &&
+        refreshRouting?.resume === true
+      ) {
+        try {
+          activeKnowledgeBase = await resolveKnowledgeBaseInput({
+            targetDir,
+            resume: true,
+            resumeMode: mode,
+            ...compact({
+              resumeAuditId: refreshRouting.resumeAuditId,
+              path: opts.knowledgeBase,
+              raw: opts.knowledgeBaseRaw,
+            }),
+          });
+        } catch (err) {
+          fatalError = err as Error;
+          stoppedReason = "fatal";
+          break;
+        }
       }
 
       // Aggregate cost cap: each driver gets the remaining budget.
@@ -953,6 +1048,7 @@ async function runHeadless(args: {
           platform,
           excludePhases: refreshRouting?.excludePhases ?? [],
           noGit,
+          knowledgeBaseAvailable: modeSupportsKnowledgeBase(mode) && activeKnowledgeBase !== undefined,
         });
         const { estimateCost } = await import("./cost-preflight.js");
         const est = await estimateCost({ targetDir, mode, runnablePhases: runnable });
@@ -965,8 +1061,8 @@ async function runHeadless(args: {
       // single CLI/SDK call when the runtime can dispatch sub-agents itself:
       //   - claude → `/vigolium-audit:vigolium-audit:<mode>` slash command + plugin.
       //   - codex  → AGENTS.md dispatch + ~/.codex/agents/* + ~/.codex/skills/*.
-      // Codex's dispatch fragment only covers lite/balanced/deep/revisit/
-      // confirm — for diff/merge/reinvest/longshot we fall back to the
+      // Codex's dispatch fragment only covers knowledge-base/lite/balanced/
+      // deep/revisit/confirm — for diff/merge/reinvest/longshot we fall back to the
       // per-phase Orchestrator since there's no codex-shaped methodology
       // for those yet.
       const useCodexHandoff = platform === "codex" && isCodexHandoffMode(mode);
@@ -980,12 +1076,14 @@ async function runHeadless(args: {
         debug: opts.debug || undefined,
         focus: auditContext.focus,
         expectedBehaviors: auditContext.expectedBehaviors,
+        knowledgeBase: KNOWLEDGE_BASE_MODES.has(mode) ? activeKnowledgeBase : undefined,
         liveTarget: opts.liveTarget,
         model: effectiveModel,
         noGit: noGit || undefined,
         excludePhases: refreshRouting?.excludePhases,
         triggeredVia: refreshRouting?.triggeredVia,
         resume: opts.resume === true || refreshRouting?.resume === true ? true : undefined,
+        resumeAuditId: refreshRouting?.resumeAuditId ?? opts.resumeAuditId,
       });
       const driver: { on: typeof Orchestrator.prototype.on; run: () => Promise<OrchestratorResult> } =
         platform === "claude"
@@ -1076,6 +1174,19 @@ async function runHeadless(args: {
       if (abortController.signal.aborted) {
         stoppedReason = "aborted";
         break;
+      }
+      if (mode === "knowledge-base" && i + 1 < modes.length) {
+        try {
+          const generated = await resolveCompletedKnowledgeBaseOutput(targetDir, result.auditId);
+          if (generated === undefined) {
+            throw new Error("completed knowledge-base mode did not produce a reusable knowledge-base report");
+          }
+          activeKnowledgeBase = generated;
+        } catch (err) {
+          fatalError = err as Error;
+          stoppedReason = "fatal";
+          break;
+        }
       }
     }
   } finally {
@@ -1188,6 +1299,7 @@ async function countRunnablePhases(args: {
   platform: AgentPlatform;
   excludePhases: string[];
   noGit?: boolean;
+  knowledgeBaseAvailable: boolean;
 }): Promise<number> {
   const loader = getContentLoader();
   const variant = args.platform === "codex" ? "sdk" : "default";
@@ -1196,6 +1308,7 @@ async function countRunnablePhases(args: {
   const exclude = new Set(args.excludePhases);
   return command.phases.filter((p) => {
     if (p.requires_git && !gitAvailable) return false;
+    if (p.requires_knowledge_base && !args.knowledgeBaseAvailable) return false;
     if (exclude.has(p.id)) return false;
     return true;
   }).length;

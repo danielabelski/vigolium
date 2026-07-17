@@ -53,7 +53,8 @@ section("# Quickstart");
 cmd("preflight: binary + auth + ping", "vigolium-audit verify claude");
 cmd("preflight both Codex transports", "vigolium-audit verify codex --transport both");
 cmd("3-phase headless surface scan", "vigolium-audit run --mode lite --target ./repo");
-cmd("full 15-phase audit, interactive (auto-installs harness, cleans up on exit)", "vigolium-audit run --mode deep --agent claude -i");
+cmd("build only the reusable knowledge base + attack surface", "vigolium-audit run --mode knowledge-base --knowledge-base ./knowledge-base");
+cmd("full multi-phase audit, interactive (auto-installs harness, cleans up on exit)", "vigolium-audit run --mode deep --agent claude -i");
 cmd("Codex Agent SDK deep audit", "vigolium-audit run --mode deep --agent codex --transport sdk");
 blank();
 
@@ -144,7 +145,7 @@ cli.help((sections) => {
 
 const runCmd = cli
   .command("run", "Run a security audit")
-  .option("--mode <mode>", "Audit mode (lite|balanced|deep|diff|confirm|merge|revisit|reinvest|longshot|refresh|resume). 'resume' is an alias for `vigolium-audit resume`: auto-detect the latest non-complete audit and continue it.")
+  .option("--mode <mode>", "Audit mode (lite|balanced|deep|knowledge-base|diff|confirm|merge|revisit|reinvest|longshot|refresh|resume). 'resume' is an alias for `vigolium-audit resume`: auto-detect the latest non-complete audit and continue it.")
   .option("--modes <list>", "Run multiple modes in sequence (comma-separated, e.g. deep,refresh,confirm). Mutually exclusive with --mode. Stops on first non-complete mode; --max-cost is an aggregate cap.")
   .option("--model <model>", "Model name forwarded to the agent runtime. Defaults to the agent's own configured model; set this flag or the VIGOLIUM_AUDIT_MODEL env var to override.")
   .option("--target <path-or-url>", "Target directory, or a remote git URL (https://github.com/..., https://gitlab.com/..., git@host:owner/repo, git://, ssh://). A URL is cloned with --depth=1 into ./<owner-repo>/ under the current working directory and used as the audit target; an existing same-remote checkout there is reused in place.", { default: "." })
@@ -166,6 +167,8 @@ const runCmd = cli
   .option("--keep-secrets", "When cleanup runs, retain DB snapshots and skip scrubbing secrets from confirm-workspace JSON/logs (default: redacted). The junk sweep still runs.")
   .option("--focus-file <path>", "Path to a free-form file describing areas to prioritize. Injected as a soft hint into every phase. Auto-inherited by chained modes.")
   .option("--expected-behaviors-file <path>", "Path to a free-form file describing intentional behaviors that should NOT be flagged. Auto-inherited by chained modes.")
+  .option("--knowledge-base <path>", "Path to a markdown file or directory of docs describing the app (auth model, login flows, roles, business logic). Mutually exclusive with --knowledge-base-raw.")
+  .option("--knowledge-base-raw <markdown>", "Raw markdown describing the app. Mutually exclusive with --knowledge-base; prefer the path form for sensitive or large content.")
   .option("--live-target <url>", "confirm mode only: HTTP(S) endpoint to verify findings against. Skips env discovery + provisioning and runs PoCs against this URL.")
   .option("--dry-run", "Resolve and print the phase plan, prompts, and content origin without invoking any adapter. No state file is written.")
   .option("--serial", "Force serial phase execution even when the mode declares parallel_with siblings. Default: parallel.")
@@ -199,6 +202,7 @@ const runBlank = () => runCmd.example("");
 
 runSection("# Quickstart");
 runCmdEx("fast 3-phase headless surface scan", "vigolium-audit run --mode lite --target ./repo");
+runCmdEx("build only the reusable knowledge base + attack surface", "vigolium-audit run --mode knowledge-base --knowledge-base ./knowledge-base");
 runCmdEx("full multi-phase audit (recon, candidates, attack paths, debate)", "vigolium-audit run --mode deep --target ./repo");
 runCmdEx("interactive — drops you into the CLI with the vigolium-audit harness installed", "vigolium-audit run --mode deep -i");
 runCmdEx("Codex Agent SDK (also selected by Codex auto)", "vigolium-audit run --mode deep --agent codex --transport sdk");
@@ -221,6 +225,7 @@ runSection("# Audit modes (each mode runs a different phase graph)");
 runCmdEx("lite — ~3-phase surface scan, fast & cheap", "vigolium-audit run --mode lite");
 runCmdEx("balanced — middle ground between lite and deep", "vigolium-audit run --mode balanced");
 runCmdEx("deep — full audit pipeline, highest signal", "vigolium-audit run --mode deep");
+runCmdEx("knowledge-base — build the application model and attack surface only", "vigolium-audit run --mode knowledge-base --knowledge-base ./knowledge-base");
 runCmdEx("diff — re-audit only phases affected since a baseline ref", "vigolium-audit run --mode diff --baseline HEAD~10");
 runCmdEx("confirm — boot the target and execute PoCs against prior findings", "vigolium-audit run --mode confirm");
 runCmdEx("confirm against a live URL (skips env discovery + provisioning)", "vigolium-audit run --mode confirm --live-target https://staging.example.com");
@@ -263,6 +268,8 @@ runSection("# Audit context (persisted + auto-inherited by chained modes)");
 runCmdEx("narrow what the audit prioritizes (free-form prose, 32 KB cap)", "vigolium-audit run --mode deep --focus-file ./scope.md");
 runCmdEx("flag intentional behaviors so confirm doesn't re-flag them", "vigolium-audit run --mode confirm --expected-behaviors-file ./allowed.md");
 runCmdEx("both at once on the initial deep run", "vigolium-audit run --mode deep --focus-file ./scope.md --expected-behaviors-file ./allowed.md");
+runCmdEx("seed auth, roles, and business flows from project docs", "vigolium-audit run --mode deep --knowledge-base ./docs/security");
+runCmdEx("supply a short application model inline", "vigolium-audit run --mode balanced --knowledge-base-raw 'Admins approve payouts; reviewers cannot execute them.'");
 runCmdEx("override one field on a chained run; the other still inherits", "vigolium-audit run --mode confirm --focus-file ./narrower.md");
 runCmdEx("clear inherited context for this run (pass an empty file)", "vigolium-audit run --mode longshot --focus-file /dev/null");
 runBlank();
@@ -437,6 +444,8 @@ cli
   .option("--keep-raw", "Keep raw scanner output and intermediate workspaces for manual review; overrides the deep/confirm auto-prune. Mutually exclusive with --strip-raw.")
   .option("--keep-secrets", "When cleanup runs, retain DB snapshots and skip scrubbing secrets from confirm-workspace JSON/logs (default: redacted).")
   .option("--serial", "Force serial phase execution")
+  .option("--knowledge-base <path>", "Resume with the same staged knowledge-base source; rejected if its content changed.")
+  .option("--knowledge-base-raw <markdown>", "Resume with the same inline knowledge-base content; rejected if it changed.")
   .option("--no-git", "Skip all git-related checks")
   .action(
     async (
@@ -454,6 +463,8 @@ cli
         keepRaw?: boolean;
         keepSecrets?: boolean;
         serial?: boolean;
+        knowledgeBase?: string;
+        knowledgeBaseRaw?: string;
         git?: boolean;
         json?: boolean;
         debug?: boolean;

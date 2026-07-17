@@ -5,9 +5,19 @@ import type { Adapter } from "../adapters/adapter.js";
 import type { ContentLoader, ContentVariant } from "../content-loader.js";
 import { OrchestratorBus, type OrchestratorEvent } from "./events.js";
 import { scheduleBatches, topologicalOrder } from "./phase.js";
-import { StateStore, buildAuditId, findResumableAudit, newAuditRecord } from "./state.js";
+import {
+  StateStore,
+  buildAuditId,
+  findResumableAudit,
+  findResumableAuditById,
+  newAuditRecord,
+} from "./state.js";
 import type { AuditContext, AuditMode, AuditRecord, CommandDef, PhaseDef } from "./types.js";
-import { listTrackedFiles, probeGit } from "./git.js";
+import {
+  isGitWorktreeCleanForKnowledgeBaseReuse,
+  listTrackedFiles,
+  probeGit,
+} from "./git.js";
 import { compact, round2 } from "./util.js";
 import { resolveRetryConfig, runWithRetry } from "./retry.js";
 import { adapterEventHasQuotaLimit, adapterEventHasRetryableError, isTransientError, quotaResetDelayMs, valueContainsQuotaLimit } from "../adapters/claude-events.js";
@@ -18,6 +28,11 @@ import { finalizeOutput } from "./redact-artifacts.js";
 import { composeUserPrompt, parseToolsField } from "./prompts.js";
 import { evaluatePhaseArtifacts, formatArtifactFailures } from "./artifact-gates.js";
 import { archivePriorCoreArtifacts, isCoreAuditMode } from "./artifact-lifecycle.js";
+import {
+  knowledgeBaseReference,
+  stageKnowledgeBaseInput,
+  type ResolvedKnowledgeBase,
+} from "./knowledge-base.js";
 
 export interface OrchestratorOptions {
   adapter: Adapter;
@@ -33,6 +48,8 @@ export interface OrchestratorOptions {
   failurePolicy?: "skip-and-continue" | "strict";
   /** Resume the latest in-progress audit for this mode if one exists. */
   resume?: boolean;
+  /** Exact resumable audit selected by a higher-level router. */
+  resumeAuditId?: string;
   /** External signal to abort the audit cleanly. */
   abortSignal?: AbortSignal;
   /**
@@ -91,6 +108,8 @@ export interface OrchestratorOptions {
    * phase's user prompt and persisted into the audit record.
    */
   expectedBehaviors?: string;
+  /** Resolved immutable documentation corpus staged after fresh-run archival. */
+  knowledgeBase?: ResolvedKnowledgeBase;
   /**
    * Live HTTP(S) endpoint for `confirm` mode. Substituted for `$ARGUMENTS`
    * in the command body and surfaced as a `Live target:` header in every
@@ -212,12 +231,17 @@ export class Orchestrator {
         );
       } else if (excludeSet.has(p.id)) {
         skipReasons.set(p.id, "excluded by --mode refresh fresh-fallback policy");
+      } else if (p.requires_knowledge_base && this.opts.knowledgeBase === undefined) {
+        skipReasons.set(p.id, "no knowledge-base flag or knowledge-base directory was resolved");
       }
     }
     const runnable = ordered.filter((p) => !skipReasons.has(p.id));
     const skipped = ordered.filter((p) => skipReasons.has(p.id));
 
     const auditId = await this.resolveAuditId(command, runnable);
+    if (this.opts.knowledgeBase !== undefined) {
+      await stageKnowledgeBaseInput(resultsDir, this.opts.knowledgeBase);
+    }
 
     const stopFindingsWatch = this.startFindingsWatcher(resultsDir, auditId);
     let watchStopped = false;
@@ -382,9 +406,20 @@ export class Orchestrator {
       : failedPhases.length === 0
         ? "complete"
         : "failed";
+    const currentAudit = (await this.state.load()).audits.find(
+      (audit) => audit.audit_id === auditId,
+    );
+    const completedKnowledgeBaseSnapshotClean =
+      this.opts.mode === "knowledge-base" && status === "complete"
+        ? currentAudit?.source_snapshot_clean === true &&
+          isGitWorktreeCleanForKnowledgeBaseReuse(this.opts.targetDir) === true
+        : undefined;
     await this.state.updateAudit(auditId, {
       status,
       completed_at: new Date().toISOString(),
+      ...(completedKnowledgeBaseSnapshotClean !== undefined
+        ? { source_snapshot_clean: completedKnowledgeBaseSnapshotClean }
+        : {}),
       usage: {
         input_tokens: this.cost.tokens.input,
         output_tokens: this.cost.tokens.output,
@@ -420,6 +455,9 @@ export class Orchestrator {
             files,
             auditId,
             completedPhaseIds,
+            // `files` is the full tracked set, so entries missing from it are
+            // deletions rather than an incomplete list.
+            prune: true,
           });
         }
       } catch {
@@ -457,7 +495,13 @@ export class Orchestrator {
   private async resolveAuditId(command: CommandDef, runnable: PhaseDef[]): Promise<string> {
     const state = await this.state.load();
     if (this.opts.resume) {
-      const existing = findResumableAudit(state.audits, command.mode as AuditMode);
+      const existing = this.opts.resumeAuditId !== undefined
+        ? findResumableAuditById(
+            state.audits,
+            this.opts.resumeAuditId,
+            command.mode as AuditMode,
+          )
+        : findResumableAudit(state.audits, command.mode as AuditMode);
       if (existing) {
         const startedAtMs = Date.parse(existing.started_at);
         this.activeAuditStartedAtMs = Number.isFinite(startedAtMs) ? startedAtMs : undefined;
@@ -468,6 +512,11 @@ export class Orchestrator {
           });
         }
         return existing.audit_id;
+      }
+      if (this.opts.resumeAuditId !== undefined) {
+        throw new Error(
+          `cannot resume audit ${this.opts.resumeAuditId}: no matching non-complete ${command.mode} audit was found`,
+        );
       }
     }
     const auditId = buildAuditId();
@@ -489,6 +538,12 @@ export class Orchestrator {
       branch: git.branch,
       repository: git.repository,
       historyAvailable: git.available,
+      ...(command.mode === "knowledge-base" && git.available
+        ? {
+            sourceSnapshotClean:
+              isGitWorktreeCleanForKnowledgeBaseReuse(this.opts.targetDir) === true,
+          }
+        : {}),
       phaseIds,
       ...compact({ context, triggeredVia: this.opts.triggeredVia }),
     });
@@ -505,7 +560,12 @@ export class Orchestrator {
     if (typeof this.opts.expectedBehaviors === "string" && this.opts.expectedBehaviors.length > 0) {
       ctx.expected_behaviors = this.opts.expectedBehaviors;
     }
-    return ctx.focus === undefined && ctx.expected_behaviors === undefined ? undefined : ctx;
+    if (this.opts.knowledgeBase !== undefined) {
+      ctx.knowledge_base = knowledgeBaseReference(this.opts.knowledgeBase);
+    }
+    return ctx.focus === undefined && ctx.expected_behaviors === undefined && ctx.knowledge_base === undefined
+      ? undefined
+      : ctx;
   }
 
   private async runPhase(
@@ -706,6 +766,10 @@ export class Orchestrator {
     const userPrompt = composeUserPrompt(phase, command, auditId, this.opts.targetDir, compact({
       focus: this.opts.focus,
       expectedBehaviors: this.opts.expectedBehaviors,
+      knowledgeBase:
+        this.opts.knowledgeBase !== undefined
+          ? knowledgeBaseReference(this.opts.knowledgeBase)
+          : undefined,
       liveTarget: this.opts.liveTarget,
     }));
     return { systemPrompt, userPrompt, tools };

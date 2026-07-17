@@ -148,7 +148,7 @@ describe("installHarness(claude)", () => {
     expect(result.platform).toBe("claude");
     expect(result.installPath).toBe(claudeDir);
     expect(result.agentsInstalled).toBeGreaterThan(20);
-    expect(result.commandsInstalled).toBe(10);
+    expect(result.commandsInstalled).toBe(11);
     expect(result.skillsInstalled).toBeGreaterThan(15);
     expect(result.excluded).toContain("deep-reviewer");
 
@@ -203,8 +203,9 @@ describe("installHarness(claude)", () => {
     expect(commands).toContain("deep.md");
     expect(commands).toContain("lite.md");
     expect(commands).toContain("balanced.md");
+    expect(commands).toContain("knowledge-base.md");
     expect(commands).toContain("longshot.md");
-    expect(commands.length).toBe(10);
+    expect(commands.length).toBe(11);
   }, INSTALL_TIMEOUT_MS);
 
   test("idempotent — second install replaces first cleanly", async () => {
