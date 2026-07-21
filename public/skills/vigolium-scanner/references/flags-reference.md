@@ -285,8 +285,9 @@ Flags specific to `vigolium agent autopilot`. Also accepts a positional natural-
 | `--record-uuid` | — | string | — | Use an HTTP record from the database as the seed input |
 | `--burp-bridge-url` | `-B` | string | `$VIGOLIUM_BURP_BRIDGE_URL` | Pull live Burp Proxy history into the project DB before the run (e.g. `http://127.0.0.1:9009`), so the operator mines it + prior findings |
 | `--prior-context` | — | string | `auto` | Front-load a bounded summary of the project's existing traffic + findings so the operator mines them instead of starting from scratch: `auto` (default; the bounded table when prior data exists), `summary` (one-line pointer), `off` |
-| `--knowledge-base` | — | string | — | Path to a markdown file or directory of docs describing the app (auth model, login flows, roles, business logic). An LLM distills them into a compact brief + document index front-loaded into the operator; the full docs stay on disk and are read on demand (`read_file`/`grep`), so a big docs tree never floods the context. Works blackbox and whitebox. The distilled brief is cached at `<session-dir>/knowledge-base-brief.md` |
+| `--knowledge-base` | — | string | — | Path to a file or directory describing the app (auth model, login flows, roles, business logic). Prose docs (markdown/txt/rst/…) are LLM-distilled into a compact brief + document index front-loaded into the operator; the full docs stay on disk and are read on demand, so a big docs tree never floods the context (brief cached at `<session-dir>/knowledge-base-brief.md`). HTTP-traffic exports in the same path (HAR, Burp XML, curl, OpenAPI/Swagger, Postman, URL lists, raw HTTP) are auto-detected, parsed, and ingested into the project DB as traffic (`source=knowledge-base`) — disable with `--knowledge-base-no-traffic`. Works blackbox and whitebox |
 | `--knowledge-base-raw` | — | bool | `false` | Skip the LLM distillation of `--knowledge-base`: front-load a deterministic document index only (offline / reproducible). No-op without `--knowledge-base` |
+| `--knowledge-base-no-traffic` | — | bool | `false` | Do not parse HTTP-traffic-format files found in `--knowledge-base` into normal traffic; treat every file as prose docs instead (by default such files are ingested as `source=knowledge-base`). No-op without `--knowledge-base` |
 | `--source` | — | string | — | Path to application source code |
 | `--files` | — | []string | — | Specific files to include (relative to `--source`) |
 | `--audit` | — | string | `lite` | vigolium-audit mode run before the operator: `lite` (3-phase), `balanced` (9-phase), `deep` (12-phase), `mock`, or `off`. Default: `lite` when `--source` is set |
@@ -558,7 +559,7 @@ Flags specific to `vigolium finding` (aliases: `findings`).
 | `--sort` | — | string | `found_at` | Sort by: found_at, created_at, severity, module, confidence |
 | `--asc` | — | bool | `false` | Sort ascending |
 | `--limit` | `-n` | int | `100` | Maximum findings to display |
-| `--offset` | `-o` | int | `0` | Number of findings to skip |
+| `--offset` | — | int | `0` | Number of findings to skip |
 | `--severity` | — | string | — | Filter by severity: `critical,high,medium,low,suspect,info` (comma-separated; single-letter or unambiguous-prefix shorthands OK, e.g. `h,c`). Alias: `--sev` |
 | `--confidence` | — | string | — | Filter by confidence: `certain,firm,tentative` (comma-separated) |
 | `--record-kind` | — | string | `finding` | Filter by record kind: `finding`, `candidate`, `observation` (comma-separated) |
@@ -583,6 +584,18 @@ Flags specific to `vigolium finding` (aliases: `findings`).
 | `--stateless` / `-S` | bool | `false` | Read from `--db` (a `.jsonl` export or standalone `.sqlite`) with project scoping off |
 | `--glob-db` | string | — | Read across a glob of result files merged into one temp DB (e.g. `--glob-db 'scans/*.sqlite'`); implies `-S` |
 
+### Finding → Burp push flags (triage handoff)
+
+Hand each selected finding's evidence request (and its response, where available) to Burp for manual confirmation — the Organizer by default, or a Repeater tab under `--to-repeater`. This is an action, not a display: it returns before any table/JSON render and never runs the scanner. `finding` is the only browse command with these flags (traffic/`db ls` do not register them).
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--push-to-burp` | — | bool | `false` | Push the selected finding(s)' evidence request+response to Burp's Organizer for manual confirmation; requires `--burp-bridge-url` |
+| `--to-repeater` | — | bool | `false` | Push to a Burp Repeater tab instead of the Organizer (respects Burp's 30-tabs/min cap; warns above 20 findings) |
+| `--send-via-burp` | — | bool | `false` | With `--push-to-burp`/`--to-repeater`: re-issue the request through Burp's engine and store the fresh response |
+| `--burp-bridge-url` | `-B` | string | `$VIGOLIUM_BURP_BRIDGE_URL` | Loopback Burp bridge URL used by `--push-to-burp` / `--to-repeater` |
+| `--http-mode` | — | string | — | With `--send-via-burp`: wire protocol — `auto`\|`http1`\|`http2`\|`http2_ignore_alpn` (default `auto`) |
+
 ### Agent JSON flags (shared by `finding`, `traffic`, `db ls`)
 
 With `-j`/`--json`, the read commands emit **one compact, token-aware object** (not the bulk export stream). These shape it:
@@ -599,9 +612,9 @@ With `-j`/`--json`, the read commands emit **one compact, token-aware object** (
 
 ### Finding available columns
 
-ID, SEVERITY, CONFIDENCE, MODULE, MODULE_ID, SHORT_DESC, DESCRIPTION, TYPE, SOURCE, MATCHED_AT, FOUND_AT, SCAN_UUID, TAGS
+ID, SEVERITY, CONFIDENCE, MODULE, MODULE_ID, SHORT_DESC, DESCRIPTION, TYPE, SOURCE, KIND, EVIDENCE, HOST_REPO (renders as "URL / REPO NAME"), MATCHED_AT, FOUND_AT, SCAN_UUID, TAGS
 
-Default columns: ID, SEVERITY, MODULE, SHORT_DESC, TYPE, SOURCE, MATCHED_AT
+Default columns: ID, SEVERITY, CONFIDENCE, MODULE, SHORT_DESC, TYPE, SOURCE, HOST_REPO, MATCHED_AT
 
 ---
 
@@ -618,7 +631,7 @@ Filter flags (shared with the `--replay` mode via PersistentFlags).
 | `--host` | — | string | — | Filter by hostname pattern |
 | `--limit` | `-n` | int | `100` | Maximum records to display |
 | `--method` | — | []string | — | Filter by HTTP method (repeatable) |
-| `--offset` | `-o` | int | `0` | Number of records to skip |
+| `--offset` | — | int | `0` | Number of records to skip |
 | `--path` | — | string | — | Filter by URL path pattern |
 | `--search` | — | []string | — | Search across URL, path, and the raw request/response (headers + body); repeatable, AND-combined |
 | `--exclude-search` | — | []string | — | Exclude records where the term appears in the URL, path, or raw request/response (repeatable; inverse of `--search`) |
@@ -717,9 +730,9 @@ Matchers keep a response (OR across categories; empty = keep all); filters drop 
 | `--match-size` / `--match-words` / `--match-lines` | []int | Match response size / word / line counts |
 | `--match-regex` | string | Match response body against this regex |
 | `--match-time` | int | Match responses taking ≥ this many ms |
-| `--filter-status-code` / `--filter-size` / `--filter-words` / `--filter-lines` | []int | Filter out status / size / word / line counts |
-| `--filter-regex` | string | Filter out responses whose body matches this regex |
-| `--filter-time` | int | Filter out responses taking ≥ this many ms |
+| `--exclude-status-code` / `--exclude-size` / `--exclude-words` / `--exclude-lines` | []int | Exclude status / size / word / line counts |
+| `--exclude-regex` | string | Exclude responses whose body matches this regex |
+| `--exclude-time` | int | Exclude responses taking ≥ this many ms |
 
 Speed, behaviour & output:
 
@@ -735,13 +748,28 @@ Speed, behaviour & output:
 | `--pretty` | — | bool | `false` | Human-readable table instead of JSONL |
 | `--fail-on-match` | — | bool | `false` | Exit non-zero (3) if any result matches (for agent/CI gating) |
 
+Burp engine (needs `--burp-bridge-url`, the extension's loopback listener; neither flag changes the default send path — without them `fuzz` sends via Go's client as before):
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--send-via-burp` | — | bool | `false` | Send each payload through Burp's own HTTP stack (exact bytes — malformed/smuggling preserved) instead of Go's client; requires `--burp-bridge-url` |
+| `--burp-bridge-url` | `-B` | string | `$VIGOLIUM_BURP_BRIDGE_URL` | Loopback Burp bridge URL used by `--send-via-burp` / `--matches-to-organizer` |
+| `--http-mode` | — | string | — | With `--send-via-burp`: wire protocol — `auto`\|`http1`\|`http2`\|`http2_ignore_alpn` (default `auto`; use `http1` for request smuggling/desync so `auto` doesn't reframe them) |
+| `--send-timeout` | — | duration | `0` | With `--send-via-burp`: per-request response timeout (≤2m; default uses the bridge's 30s) |
+| `--matches-to-organizer` | — | bool | `false` | Push each matched result's request to Burp's Organizer (Burp re-issues it) for manual triage; requires `--burp-bridge-url` |
+
 **Agent JSON contract:** with the global `-j/--json`, `fuzz` streams per-payload JSONL to **stderr** and prints ONE summary object to **stdout**: `{target, positions, payloads, sent, matched, calibrated, errors, baseline, top_results, query}` — `top_results` are the ranked anomalies (status-changed / reflected / largest delta first) and `query` is a ready `scan-request` confirmation command. Network policy honors `HTTP_PROXY`/`HTTPS_PROXY` for Burp inspection.
 
 ## Replay Flags
 
-Flags for the top-level `vigolium replay` command (mutate a stored/supplied
+Flags for the top-level `vigolium replay` command (re-send a stored/supplied
 request and diff baseline vs replay; the CLI surface of the in-process
 `replay_request` tool). See also `traffic --replay` for verbatim bulk replay.
+
+> **Note:** `replay` no longer has a `--mutate` flag — payload / insertion-point
+> fuzzing moved to `vigolium fuzz` (wordlists, `--class`, matchers, calibration).
+> `replay` is for re-sending and confirming; use `--raw-request`/`--raw-request-file`
+> to send exact bytes verbatim.
 
 Source (exactly one, or a bulk selector below):
 
@@ -752,12 +780,11 @@ Source (exactly one, or a bulk selector below):
 | `--input` | `-i` | string | — | Raw input: curl, raw HTTP, Burp XML, base64, URL, or `-` for stdin |
 | `--input-file` | — | string | — | Read `--input` value from a file |
 
-Mutation / request override:
+Request override:
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--mutate` | `-m` | []string | — | Insertion-point mutation `name=...,type=...,payload=...` (the `type=` key is optional) or the shorthand `name:type:payload` (repeatable) |
-| `--raw-request` | — | string | — | Full raw HTTP request override (mutually exclusive with `--mutate`) |
+| `--raw-request` | — | string | — | Full raw HTTP request override — send these exact bytes instead of the resolved baseline |
 | `--raw-request-file` | — | string | — | Read `--raw-request` from a file |
 | `--header` | `-H` | []string | — | Extra request header `Name: value` (repeatable, overrides baseline) |
 | `--auth-session` | — | string | — | Auth session name to merge headers from (`vigolium auth list`) |
@@ -772,8 +799,16 @@ Session / network:
 | `--target` | `-t` | string | — | Override scheme/host/port (e.g. `https://staging.example.com`) |
 | `--timeout` | — | duration | `25s` | Per-request timeout |
 | `--proxy` | — | string | — | Route the replay through this proxy (also honors `HTTP_PROXY`/`HTTPS_PROXY`) |
-| `--burp-bridge-url` | `-B` | string | `$VIGOLIUM_BURP_BRIDGE_URL` | Loopback Burp bridge URL to pull/replay against |
-| `--save-to-burp` | — | bool | `false` | Copy the replayed request(s) into Burp's Target site map |
+| `--burp-bridge-url` | `-B` | string | `$VIGOLIUM_BURP_BRIDGE_URL` | Loopback Burp bridge URL used by `--save-to-burp` / `--send-via-burp` / `--to-repeater` / `--to-organizer` |
+| `--save-to-burp` | — | bool | `false` | Add each replayed request + its fresh response to Burp's Target site map |
+| `--send-via-burp` | — | bool | `false` | Send the request through Burp's own HTTP stack (exact bytes — malformed/smuggling preserved) instead of Go's client; requires `--burp-bridge-url` |
+| `--http-mode` | — | string | — | With `--send-via-burp`: wire protocol — `auto`\|`http1`\|`http2`\|`http2_ignore_alpn` (default `auto`; `http1` for smuggling/desync) |
+| `--send-timeout` | — | duration | `0` | With `--send-via-burp`: response timeout (≤2m; default uses the bridge's 30s) |
+| `--to-repeater` | — | bool | `false` | Stage the replayed request in a Burp Repeater tab for manual testing; requires `--burp-bridge-url` |
+| `--repeater-tab` | — | string | — | Repeater tab name for `--to-repeater` (default: `vigolium`) |
+| `--to-organizer` | — | bool | `false` | Store the replayed request + response in Burp's Organizer for manual follow-up; requires `--burp-bridge-url` |
+| `--notes` | — | string | — | Note attached to the `--to-organizer` item (≤200 chars) |
+| `--highlight` | — | string | — | Highlight colour for the `--to-organizer` item: `none`\|`red`\|`orange`\|`yellow`\|`green`\|`cyan`\|`blue`\|`pink`\|`magenta`\|`gray` |
 
 Result handling:
 
@@ -783,22 +818,33 @@ Result handling:
 | `--output` | `-o` | string | — | Write JSON result to this file (default: stdout) |
 | `--pretty` | — | bool | `false` | Human-readable summary instead of JSON |
 
-Bulk selection — setting `--all` or any of these switches replay into "iterate
-the matching stored records" mode (mutually exclusive with the single-source
-flags above). Results stream as JSONL, one object per record; `--mutate` is
-applied to every record that has that insertion point. Pair with `-S/--stateless`
-+ `--db` to replay a standalone `.sqlite`/`.jsonl` export (project scoping off).
+Bulk selection — a positional `[search-term]`, `--all`, or any filter below
+switches replay into "iterate the matching stored records" mode (mutually
+exclusive with the single-source flags above). The selection surface mirrors
+`vigolium traffic`. Each matched record is re-sent verbatim through the diff
+engine and results stream as JSONL, one object per record. For payload /
+insertion-point fuzzing across a batch, use `vigolium fuzz` (`replay` has no
+`--mutate`). Pair with `-S/--stateless` + `--db` to replay a standalone
+`.sqlite`/`.jsonl` export (project scoping off).
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
+| `[search-term]` | — | string (positional) | — | Broad fuzzy match across URL/path/host/method/content-type/source and the raw request/response (like `vigolium traffic <term>`) |
 | `--all` | `-a` | bool | `false` | Replay every matched stored record (lifts the `-n/--limit` cap) |
 | `--host` | — | string | — | Filter records by hostname pattern (wildcard supported) |
 | `--method` | — | []string | — | Filter records by HTTP method (repeatable) |
 | `--status` | — | []int | — | Filter records by stored status code (repeatable) |
 | `--path` | — | string | — | Filter records by URL path pattern |
 | `--source` | — | string | — | Filter records by source (scanner, ingest-cli, ingest-proxy, seed, ...) |
-| `--search` | — | string | — | Fuzzy-search records across URLs, paths, and hostnames |
+| `--search` | — | []string | — | Search across URL, path, and the raw request/response (headers + body); repeatable, AND-combined |
 | `--body` | — | string | — | Filter records whose request/response body contains this text |
+| `--exclude-search` | — | []string | — | Drop records where the term appears in the URL, path, or raw request/response (repeatable; inverse of `--search`) |
+| `--exclude-body` | — | string | — | Drop records whose request/response body contains the term (inverse of `--body`) |
+| `--from` | — | string | — | Only records after this date (`YYYY-MM-DD` or RFC3339) |
+| `--to` | — | string | — | Only records before this date (`YYYY-MM-DD` or RFC3339) |
+| `--sort` | — | string | `created_at` | Sort matched records by: uuid, created_at, sent_at, method, status, time |
+| `--asc` | — | bool | `false` | Sort ascending (default: descending) |
+| `--offset` | — | int | `0` | Skip this many matched records before replaying (pagination) |
 | `--limit` | `-n` | int | `100` | Max records to replay (use `--all` to lift the cap) |
 | `--concurrency` | `-c` | int | `10` | Concurrent replays; keep low to avoid overwhelming an intercepting proxy like Burp |
 | `--stateless` | `-S` | bool | `false` | Read records from `--db` (a `.jsonl` export or standalone `.sqlite`) with project scoping off |
@@ -833,7 +879,7 @@ DB list flags.
 | `--min-risk` | — | int | `0` | Show only records with risk score at or above this value |
 | `--module-type` | — | string | — | Filter findings by module type |
 | `--record-kind` | — | string | `finding` | Filter findings table by record kind: `finding`, `candidate`, `observation` (comma-separated) |
-| `--offset` | `-o` | int | `0` | Number of records to skip |
+| `--offset` | — | int | `0` | Number of records to skip |
 | `--path` | — | string | — | Filter records by URL path pattern |
 | `--raw` | — | bool | `false` | Show full raw HTTP request and response |
 | `--remark` | — | string | — | Filter records containing this text in remarks |

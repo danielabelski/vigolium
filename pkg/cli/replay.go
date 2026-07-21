@@ -31,7 +31,6 @@ var (
 	replayFindingID      int64
 	replayInput          string
 	replayInputFile      string
-	replayMutations      []string
 	replayRawRequest     string
 	replayRawRequestFile string
 	replayHeaders        []string
@@ -46,28 +45,49 @@ var (
 	replayPretty         bool
 	replayBurpBridgeURL  string
 	replaySaveToBurp     bool
+	replaySendViaBurp    bool
+	replayHTTPMode       string
+	replaySendTimeout    time.Duration
+	replayToRepeater     bool
+	replayRepeaterTab    string
+	replayToOrganizer    bool
+	replayNotes          string
+	replayHighlight      string
 
-	// Bulk-selection flags — when any is set, replay iterates the matching
-	// stored records instead of a single source (mirrors `traffic --replay`,
-	// but each record runs through the mutation/diff engine).
-	replayAll         bool
-	replayBulkHost    string
-	replayBulkMethods []string
-	replayBulkStatus  []int
-	replayBulkPath    string
-	replayBulkSource  string
-	replayBulkSearch  string
-	replayBulkBody    string
-	replayBulkLimit   int
-	replayConcurrency int
+	// Bulk-selection flags — when any is set (or a positional search term is
+	// given), replay iterates the matching stored records instead of a single
+	// source (mirrors `traffic --replay`, re-sending each record verbatim through
+	// the diff engine). The filter surface tracks `vigolium traffic`. The
+	// positional term is a local threaded through, not a flag global.
+	replayAll             bool
+	replayBulkHost        string
+	replayBulkMethods     []string
+	replayBulkStatus      []int
+	replayBulkPath        string
+	replayBulkSource      string
+	replayBulkSearch      []string
+	replayBulkBody        string
+	replayBulkExclude     []string
+	replayBulkExcludeBody string
+	replayBulkFrom        string
+	replayBulkTo          string
+	replayBulkSort        string
+	replayBulkAsc         bool
+	replayBulkOffset      int
+	replayBulkLimit       int
+	replayConcurrency     int
 )
 
 var replayCmd = &cobra.Command{
-	Use:   "replay",
-	Short: "Mutate a stored or supplied HTTP request and diff baseline vs replay",
-	Long: `Replay an HTTP request — stored record, finding evidence, curl command, raw HTTP, ` +
-		`Burp XML, base64, or URL — with optional insertion-point mutations, and emit a ` +
-		`baseline-vs-replay diff (status, length, content-hash, payload reflection).
+	Use:   "replay [search-term]",
+	Short: "Re-send a stored or supplied HTTP request and diff baseline vs replay",
+	Args:  cobra.MaximumNArgs(1),
+	Long: `Re-send an HTTP request — stored record, finding evidence, curl command, raw HTTP, ` +
+		`Burp XML, base64, or URL — optionally overriding the raw request bytes, and emit a ` +
+		`baseline-vs-replay diff (status, length, content-hash, timing).
+
+For payload / insertion-point fuzzing (wordlists, --class, matchers, calibration),
+use 'vigolium fuzz' — replay is for re-sending and confirming, not fuzzing.
 
 The same engine that powers the autopilot's in-process replay_request tool. Use this
 to drive vigolium externally (Claude Code, Cursor, Pi, CI scripts) — the JSON output
@@ -75,15 +95,24 @@ shape is stable so an agent can confirm a finding without parsing terminal outpu
 
 Cookies set by one replay persist to the next when --session-id is provided. Routes
 through HTTP_PROXY / HTTPS_PROXY (or --proxy) for Burp-style inspection.
-Use --save-to-burp with --burp-bridge-url to add the actual mutated request and
-fresh replay response directly to Burp's Target Site map without proxying it twice.
 
-Bulk mode: pass --all (or any of --host/--method/--status/--path/--source/--search/
---body) to replay every matching stored record instead of a single source — like
-'vigolium traffic --replay', but each record runs through the mutation/diff engine
-and results stream as JSONL (one object per record). Any --mutate is applied to
-every record that has that insertion point; without --mutate each record is re-sent
-verbatim. Throttle with -c/--concurrency and read a standalone export with -S --db.`,
+Burp bridge (needs --burp-bridge-url, the extension's loopback listener):
+  --send-via-burp  send through Burp's own HTTP stack so exact bytes hit the wire —
+                   the way to replay malformed/smuggling requests (pair with
+                   --http-mode http1 so 'auto' doesn't negotiate HTTP/2 and reframe them)
+  --to-repeater    also stage the request in a Burp Repeater tab for manual testing
+  --to-organizer   also store the request + response in Burp's Organizer (--notes/--highlight)
+  --save-to-burp  add the request + fresh response to Burp's Target Site map
+None of these change the default send path — without them replay behaves exactly as before.
+
+Bulk mode: pass a positional [search-term] (a broad fuzzy match, like
+'vigolium traffic <term>'), --all, or any record filter to replay every matching
+stored record instead of a single source. The selection surface mirrors
+'vigolium traffic': --host/--method/--status/--path/--source, repeatable
+--search (AND-combined), --body, --from/--to date range, --exclude-search/
+--exclude-body, and --sort/--asc/--offset. Each matched record is re-sent
+verbatim through the diff engine and results stream as JSONL (one object per
+record). Throttle with -c/--concurrency and read a standalone export with -S --db.`,
 	// Example is set in usage.go (replayExamples) so it renders colored like the
 	// other commands via FormatExamples.
 	RunE: runReplay,
@@ -99,10 +128,9 @@ func init() {
 	f.StringVarP(&replayInput, "input", "i", "", "Raw input: curl, raw HTTP, Burp XML, base64, URL, or '-' for stdin")
 	f.StringVar(&replayInputFile, "input-file", "", "Read --input value from a file")
 
-	// Mutations / raw override.
-	f.StringArrayVarP(&replayMutations, "mutate", "m", nil,
-		"Insertion-point mutation 'name=...,type=...,payload=...' or 'name:type:payload' (repeatable)")
-	f.StringVar(&replayRawRequest, "raw-request", "", "Full raw HTTP request override (mutually exclusive with --mutate)")
+	// Raw request override — send exact bytes verbatim (for payload/insertion-point
+	// fuzzing use `vigolium fuzz` instead).
+	f.StringVar(&replayRawRequest, "raw-request", "", "Full raw HTTP request override — send these exact bytes instead of the resolved baseline")
 	f.StringVar(&replayRawRequestFile, "raw-request-file", "", "Read --raw-request from a file")
 
 	// Header / auth merges.
@@ -129,23 +157,45 @@ func init() {
 		"burp-bridge-url",
 		"B",
 		burpbridge.URLFromEnvironment(),
-		"Loopback Burp bridge URL used by --save-to-burp")
+		"Loopback Burp bridge URL used by --save-to-burp / --send-via-burp / --to-repeater / --to-organizer")
 	f.BoolVar(
 		&replaySaveToBurp,
 		"save-to-burp",
 		false,
 		"Add each replayed request and its fresh response to Burp's Target Site map")
+	f.BoolVar(&replaySendViaBurp, "send-via-burp", false,
+		"Send the request through Burp's own HTTP stack (exact bytes — malformed/smuggling preserved) instead of Go's client; requires --burp-bridge-url")
+	f.StringVar(&replayHTTPMode, "http-mode", "",
+		"With --send-via-burp: wire protocol — auto|http1|http2|http2_ignore_alpn (default auto; use http1 for request smuggling/desync)")
+	f.DurationVar(&replaySendTimeout, "send-timeout", 0,
+		"With --send-via-burp: response timeout (<=2m; default uses the bridge's 30s)")
+	f.BoolVar(&replayToRepeater, "to-repeater", false,
+		"Stage the replayed request in a Burp Repeater tab for manual testing; requires --burp-bridge-url")
+	f.StringVar(&replayRepeaterTab, "repeater-tab", "", "Repeater tab name for --to-repeater (default: vigolium)")
+	f.BoolVar(&replayToOrganizer, "to-organizer", false,
+		"Store the replayed request + response in Burp's Organizer for manual follow-up; requires --burp-bridge-url")
+	f.StringVar(&replayNotes, "notes", "", "Note attached to the --to-organizer item (<=200 chars)")
+	f.StringVar(&replayHighlight, "highlight", "",
+		"Highlight colour for the --to-organizer item: none|red|orange|yellow|green|cyan|blue|pink|magenta|gray")
 
 	// Bulk selection — mirror the traffic filters. Setting any of these (or
-	// --all) switches replay into bulk mode over the matching stored records.
+	// --all, or a positional search term) switches replay into bulk mode over
+	// the matching stored records.
 	f.BoolVarP(&replayAll, "all", "a", false, "Bulk: replay every matched stored record (lifts the -n/--limit cap); re-send all stored traffic")
 	f.StringVar(&replayBulkHost, "host", "", "Bulk: filter records by hostname pattern (wildcard supported)")
 	f.StringSliceVar(&replayBulkMethods, "method", nil, "Bulk: filter records by HTTP method (repeatable)")
 	f.IntSliceVar(&replayBulkStatus, "status", nil, "Bulk: filter records by stored status code (repeatable)")
 	f.StringVar(&replayBulkPath, "path", "", "Bulk: filter records by URL path pattern")
 	f.StringVar(&replayBulkSource, "source", "", "Bulk: filter records by source (scanner, ingest-cli, ingest-proxy, seed, ...)")
-	f.StringVar(&replayBulkSearch, "search", "", "Bulk: fuzzy-search records across URLs, paths, and hostnames")
+	f.StringArrayVar(&replayBulkSearch, "search", nil, "Bulk: search across URL, path, and the raw request/response (headers + body); repeatable, AND-combined")
 	f.StringVar(&replayBulkBody, "body", "", "Bulk: filter records whose request/response body contains this text")
+	f.StringArrayVar(&replayBulkExclude, "exclude-search", nil, "Bulk: drop records where the term appears in the URL, path, or raw request/response (repeatable; dropped if ANY term matches — inverse of --search)")
+	f.StringVar(&replayBulkExcludeBody, "exclude-body", "", "Bulk: drop records whose request/response body contains the term (inverse of --body)")
+	f.StringVar(&replayBulkFrom, "from", "", "Bulk: only records after this date (YYYY-MM-DD or RFC3339)")
+	f.StringVar(&replayBulkTo, "to", "", "Bulk: only records before this date (YYYY-MM-DD or RFC3339)")
+	f.StringVar(&replayBulkSort, "sort", "created_at", "Bulk: sort matched records by: uuid, created_at, sent_at, method, status, time")
+	f.BoolVar(&replayBulkAsc, "asc", false, "Bulk: sort ascending (default: descending)")
+	f.IntVar(&replayBulkOffset, "offset", 0, "Bulk: skip this many matched records before replaying (pagination)")
 	f.IntVarP(&replayBulkLimit, "limit", "n", 100, "Bulk: max records to replay (use --all to lift the cap)")
 	f.IntVarP(&replayConcurrency, "concurrency", "c", 10, "Bulk: concurrent replays; keep low to avoid overwhelming an intercepting proxy like Burp")
 	f.BoolVarP(&globalStateless, "stateless", "S", false, "Read records from --db (a .jsonl export or standalone .sqlite) with project scoping off; never writes to your project DB")
@@ -156,40 +206,53 @@ func runReplay(cmd *cobra.Command, args []string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if replaySaveToBurp && strings.TrimSpace(replayBurpBridgeURL) == "" {
-		return fmt.Errorf("--save-to-burp requires --burp-bridge-url")
+
+	// A positional argument is a broad fuzzy search term (like `traffic <term>`)
+	// that selects records to replay in bulk. Kept as a local — not a flag
+	// global — and threaded into the bulk path.
+	var bulkFuzzy string
+	if len(args) == 1 {
+		bulkFuzzy = strings.TrimSpace(args[0])
+	}
+	// Any Burp write target needs the loopback bridge URL.
+	needsBridge := replaySaveToBurp || replaySendViaBurp || replayToRepeater || replayToOrganizer
+	if needsBridge && strings.TrimSpace(replayBurpBridgeURL) == "" {
+		return fmt.Errorf("--save-to-burp/--send-via-burp/--to-repeater/--to-organizer require --burp-bridge-url")
+	}
+	httpMode, err := burpbridge.ParseHTTPMode(replayHTTPMode)
+	if err != nil {
+		return fmt.Errorf("--http-mode: %w", err)
+	}
+	if replayHTTPMode != "" && !replaySendViaBurp {
+		fmt.Fprintf(os.Stderr, "%s --http-mode only applies with --send-via-burp; ignoring\n", terminal.WarningSymbol())
 	}
 	var bridgeClient *burpbridge.Client
 	if replayBurpBridgeURL != "" {
-		validated, err := burpbridge.ValidateURL(replayBurpBridgeURL)
-		if err != nil {
-			return fmt.Errorf("--burp-bridge-url: %w", err)
+		validated, verr := burpbridge.ValidateURL(replayBurpBridgeURL)
+		if verr != nil {
+			return fmt.Errorf("--burp-bridge-url: %w", verr)
 		}
 		replayBurpBridgeURL = validated
-		bridgeClient, err = burpbridge.New(validated)
-		if err != nil {
-			return err
+		bridgeClient, verr = burpbridge.New(validated)
+		if verr != nil {
+			return verr
 		}
 	}
-
-	mutations, err := parseReplayMutations()
-	if err != nil {
-		return err
-	}
-	if len(replayMutations) > 0 {
-		// Non-breaking nudge: payload/mutation fuzzing now has a first-class home
-		// with wordlists, payload classes, and anomaly gating. `replay -m` still
-		// works for one-off single-payload confirmations.
-		fmt.Fprintf(os.Stderr, "%s replay -m still works, but `vigolium fuzz` is the fuller fuzzing surface "+
-			"(wordlists, --class, matchers/filters, auto-calibration).\n", terminal.InfoSymbol())
+	// Preflight the listener for the explicit send flags so an unavailable bridge
+	// is a clear up-front error rather than one failure per record mid-run.
+	if bridgeClient != nil && (replaySendViaBurp || replayToRepeater || replayToOrganizer) {
+		info, herr := bridgeClient.Health(ctx)
+		if herr != nil {
+			return fmt.Errorf("burp bridge unavailable: %w", herr)
+		}
+		if info.InScopeOnly {
+			fmt.Fprintf(os.Stderr, "%s Burp bridge is in-scope-only; out-of-scope targets will be refused (403)\n", terminal.WarningSymbol())
+		}
 	}
 
 	rawOverride, err := loadReplayRawOverride()
 	if err != nil {
 		return err
-	}
-	if rawOverride != nil && len(mutations) > 0 {
-		return fmt.Errorf("--mutate and --raw-request / --raw-request-file are mutually exclusive")
 	}
 
 	pj, jarLoaded, jarErr := openReplayJar()
@@ -197,18 +260,24 @@ func runReplay(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "%s replay: cookie jar disabled (%v)\n", terminal.WarningSymbol(), jarErr)
 	}
 	rr := &replayRun{
-		mutations:   mutations,
 		rawOverride: rawOverride,
 		client:      newReplayClient(pj, replayTimeout),
 		pj:          pj,
 		jarLoaded:   jarLoaded,
 		burpClient:  bridgeClient,
 		saveToBurp:  replaySaveToBurp,
+		sendViaBurp: replaySendViaBurp,
+		toRepeater:  replayToRepeater,
+		toOrganizer: replayToOrganizer,
+		sendOpts: burpbridge.SendOptions{
+			Mode:    httpMode,
+			Timeout: replaySendTimeout,
+		},
 	}
 
 	// Bulk mode: iterate every matching stored record through the same engine.
-	if replayBulkRequested() {
-		return runReplayBulk(ctx, rr)
+	if replayBulkRequested(bulkFuzzy) {
+		return runReplayBulk(ctx, rr, bulkFuzzy)
 	}
 
 	src, err := resolveReplaySource(ctx)
@@ -244,13 +313,16 @@ func runReplay(cmd *cobra.Command, args []string) error {
 // records, so the single-source and bulk paths share one call shape instead of
 // threading the same five values through every signature.
 type replayRun struct {
-	mutations   []replay.Mutation
 	rawOverride []byte
 	client      *http.Client
 	pj          *jar.PersistentJar
 	jarLoaded   int
 	burpClient  *burpbridge.Client
 	saveToBurp  bool
+	sendViaBurp bool
+	toRepeater  bool
+	toOrganizer bool
+	sendOpts    burpbridge.SendOptions
 }
 
 // newReplayClient builds the shared HTTP client for replay: the persistent
@@ -292,7 +364,6 @@ func (rr *replayRun) one(ctx context.Context, src *replaySource, overlay map[str
 		BaselineResponse:     src.BaselineResponse,
 		BaselineStatus:       src.BaselineStatus,
 		BaselineResponseTime: src.BaselineResponseTime,
-		Mutations:            rr.mutations,
 		RawRequest:           rr.rawOverride,
 		Scheme:               src.Scheme,
 		Hostname:             src.Hostname,
@@ -300,6 +371,12 @@ func (rr *replayRun) one(ctx context.Context, src *replaySource, overlay map[str
 		HeaderOverlay:        overlay,
 		NoRedirects:          replayNoRedirects,
 		Client:               rr.client,
+	}
+	// --send-via-burp routes the actual send through Burp's engine so the exact bytes
+	// (deliberate Content-Length, smuggling, unusual methods) reach the wire; the
+	// baseline and diff logic are unchanged.
+	if rr.sendViaBurp {
+		opts.Sender = burpbridge.BridgeSender(rr.burpClient, src.Scheme, src.Hostname, src.Port, rr.sendOpts, replay.DefaultExcerptCap)
 	}
 
 	result, err := replay.Do(ctx, opts)
@@ -317,9 +394,17 @@ func (rr *replayRun) one(ctx context.Context, src *replaySource, overlay map[str
 			return nil, fmt.Errorf("save replay to Burp: %w", err)
 		}
 	}
+	if rr.toRepeater || rr.toOrganizer {
+		if err := rr.stageReplayToBurp(ctx, src, result); err != nil {
+			return nil, fmt.Errorf("stage replay to Burp: %w", err)
+		}
+	}
 
 	out := buildReplayOutput(src, result, rr.jarLoaded, rr.pj)
 	out.SavedToBurp = rr.saveToBurp
+	out.SentViaBurp = rr.sendViaBurp
+	out.StagedToRepeater = rr.toRepeater
+	out.SavedToOrganizer = rr.toOrganizer
 	return out, nil
 }
 
@@ -558,21 +643,6 @@ func portFromURL(u *url.URL) int {
 	return 0
 }
 
-func parseReplayMutations() ([]replay.Mutation, error) {
-	var out []replay.Mutation
-	for i, s := range replayMutations {
-		if strings.TrimSpace(s) == "" {
-			continue
-		}
-		m, err := replay.ParseMutationFlag(s)
-		if err != nil {
-			return nil, fmt.Errorf("--mutate[%d]: %w", i, err)
-		}
-		out = append(out, m)
-	}
-	return out, nil
-}
-
 func loadReplayRawOverride() ([]byte, error) {
 	switch {
 	case replayRawRequest != "" && replayRawRequestFile != "":
@@ -718,6 +788,41 @@ func saveReplayResultToBurp(
 	)
 }
 
+// stageReplayToBurp pushes the just-sent request (and, where available, its
+// response) into Burp's Repeater and/or Organizer for manual follow-up. The
+// request was already issued (via Go or, under --send-via-burp, via Burp), so this
+// only stages — it never re-sends.
+func (rr *replayRun) stageReplayToBurp(ctx context.Context, src *replaySource, result *replay.Result) error {
+	if rr.burpClient == nil {
+		return fmt.Errorf("burp bridge client is not configured")
+	}
+	if result == nil || len(result.RawMutatedRequest) == 0 {
+		return fmt.Errorf("replay did not return the complete sent request")
+	}
+	target := replaySourceURL(src)
+	var rawResponse []byte
+	if result.Replay != nil && result.Replay.Status > 0 && result.Replay.Error == "" {
+		rawResponse = rawReplayResponse(result.Replay)
+	}
+	if rr.toRepeater {
+		if _, err := rr.burpClient.SendToRepeater(ctx, target, "", result.RawMutatedRequest, burpbridge.RepeaterOptions{
+			TabName: replayRepeaterTab,
+		}); err != nil {
+			return err
+		}
+	}
+	if rr.toOrganizer {
+		if _, err := rr.burpClient.SendToOrganizer(ctx, target, "", result.RawMutatedRequest, rawResponse, burpbridge.OrganizerOptions{
+			Source:    "vigolium-replay",
+			Notes:     replayNotes,
+			Highlight: replayHighlight,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func replaySourceURL(src *replaySource) string {
 	scheme := src.Scheme
 	if scheme == "" {
@@ -759,6 +864,9 @@ type replayOutput struct {
 	JarPath          string         `json:"jar_path,omitempty"`
 	Result           *replay.Result `json:"result"`
 	SavedToBurp      bool           `json:"saved_to_burp,omitempty"`
+	SentViaBurp      bool           `json:"sent_via_burp,omitempty"`
+	StagedToRepeater bool           `json:"staged_to_repeater,omitempty"`
+	SavedToOrganizer bool           `json:"saved_to_organizer,omitempty"`
 	// Error is set (with Result nil) only in bulk mode when a single record
 	// fails to replay, so one bad record doesn't abort the JSONL stream.
 	Error string `json:"error,omitempty"`
@@ -821,8 +929,17 @@ func emitReplayPretty(out *replayOutput) error {
 		fmt.Printf("  session: %s (preloaded %d cookies, jar: %s)\n",
 			out.SessionID, out.CookiesPreloaded, out.JarPath)
 	}
+	if out.SentViaBurp {
+		fmt.Printf("  sent via Burp's HTTP engine\n")
+	}
 	if out.SavedToBurp {
 		fmt.Printf("  saved to Burp Target Site map\n")
+	}
+	if out.StagedToRepeater {
+		fmt.Printf("  staged in Burp Repeater\n")
+	}
+	if out.SavedToOrganizer {
+		fmt.Printf("  saved to Burp Organizer\n")
 	}
 	if out.Result == nil || out.Result.Replay == nil || out.Result.Baseline == nil {
 		return fmt.Errorf("no result")

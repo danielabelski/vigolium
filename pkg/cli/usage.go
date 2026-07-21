@@ -323,6 +323,7 @@ var listQueryFlagGroups = []flagGroup{
 	{"Pagination & Sort", []string{"limit", "offset", "sort", "asc", "pick", "all"}},
 	{"Data Source", []string{"stateless", "glob-db", "table", "list-tables", "list-columns"}},
 	{"Replay", []string{"replay", "concurrency", "with-browser", "burp-bridge-url", "save-to-vigolium-db", "save-to-burp", "in-replace", "timeout"}},
+	{"Burp Push", []string{"push-to-burp", "to-repeater", "send-via-burp", "http-mode"}},
 }
 
 // fuzzFlagGroups categorizes `vigolium fuzz`. Every visible local flag must land
@@ -334,18 +335,19 @@ var fuzzFlagGroups = []flagGroup{
 	{"Positions", []string{"fuzz", "point", "fuzz-header", "keyword"}},
 	{"Payloads", []string{"class", "wordlist", "payload"}},
 	{"Matchers", []string{"match-status-code", "match-size", "match-words", "match-lines", "match-regex", "match-time"}},
-	{"Filters", []string{"filter-status-code", "filter-size", "filter-words", "filter-lines", "filter-regex", "filter-time"}},
+	{"Exclude", []string{"exclude-status-code", "exclude-size", "exclude-words", "exclude-lines", "exclude-regex", "exclude-time"}},
 	{"Speed & Behaviour", []string{"no-calibrate", "concurrency", "delay", "timeout", "no-redirects"}},
 	{"Output", []string{"output", "all-results", "pretty", "fail-on-match"}},
+	{"Burp Bridge", []string{"send-via-burp", "burp-bridge-url", "http-mode", "send-timeout", "matches-to-organizer"}},
 }
 
 // replayFlagGroups categorizes `vigolium replay`.
 var replayFlagGroups = []flagGroup{
 	{"Input & Selection", []string{"input", "input-file", "raw-request", "raw-request-file", "record-uuid", "finding-id", "target"}},
-	{"Bulk Filter", []string{"host", "method", "status", "path", "source", "search", "body", "limit", "all"}},
-	{"Mutation", []string{"mutate"}},
+	{"Bulk Filter", []string{"host", "method", "status", "path", "source", "search", "body", "exclude-search", "exclude-body", "from", "to", "sort", "asc", "offset", "limit", "all"}},
 	{"Request Options", []string{"header", "auth-session", "session-id", "no-cookies", "no-redirects", "timeout", "concurrency"}},
-	{"Output", []string{"output", "pretty", "in-replace", "save-to-burp", "burp-bridge-url", "stateless"}},
+	{"Output", []string{"output", "pretty", "in-replace", "stateless"}},
+	{"Burp Bridge", []string{"burp-bridge-url", "save-to-burp", "send-via-burp", "http-mode", "send-timeout", "to-repeater", "repeater-tab", "to-organizer", "notes", "highlight"}},
 }
 
 // ingestFlagGroups categorizes `vigolium ingest`.

@@ -6,34 +6,40 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
+	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/terminal"
 )
 
-// replayBulkRequested reports whether any bulk-selection flag switched replay
-// into "iterate the matching stored records" mode. --all or any record filter
-// triggers it; the single-source flags (--record-uuid/--finding-id/--input)
-// stay in single mode.
-func replayBulkRequested() bool {
+// replayBulkRequested reports whether the positional search term or any
+// bulk-selection flag switched replay into "iterate the matching stored records"
+// mode. A fuzzy term, --all, or any record filter triggers it; the single-source
+// flags (--record-uuid/--finding-id/--input) stay in single mode.
+func replayBulkRequested(fuzzy string) bool {
 	return replayAll ||
+		fuzzy != "" ||
 		replayBulkHost != "" ||
 		len(replayBulkMethods) > 0 ||
 		len(replayBulkStatus) > 0 ||
 		replayBulkPath != "" ||
 		replayBulkSource != "" ||
-		replayBulkSearch != "" ||
-		replayBulkBody != ""
+		len(replayBulkSearch) > 0 ||
+		replayBulkBody != "" ||
+		len(replayBulkExclude) > 0 ||
+		replayBulkExcludeBody != "" ||
+		replayBulkFrom != "" ||
+		replayBulkTo != ""
 }
 
 // runReplayBulk re-sends every stored record matching the bulk filters through
-// the replay engine, concurrently. Results stream as JSONL (one replayOutput
-// per record) to stdout / --output, or as per-record diff tables under
-// --pretty. Any --mutate is applied to each record that has that insertion
-// point; without it each record is re-sent verbatim.
-func runReplayBulk(ctx context.Context, rr *replayRun) error {
+// the replay diff engine, concurrently. Each record is re-sent verbatim.
+// Results stream as JSONL (one replayOutput per record) to stdout / --output,
+// or as per-record diff tables under --pretty.
+func runReplayBulk(ctx context.Context, rr *replayRun, fuzzy string) error {
 	if replayRecordUUID != "" || replayFindingID > 0 || replayInput != "" || replayInputFile != "" {
-		return fmt.Errorf("bulk selection flags (--all/--host/--method/--status/--path/--source/--search/--body) can't be combined with --record-uuid/--finding-id/--input")
+		return fmt.Errorf("bulk selection (a positional search term or --all/--host/--method/--status/--path/--source/--search/--body/--exclude-search/--exclude-body/--from/--to) can't be combined with --record-uuid/--finding-id/--input")
 	}
 
 	// Bulk replay re-sends the stored requests, so a --glob-db merge must keep
@@ -43,7 +49,7 @@ func runReplayBulk(ctx context.Context, rr *replayRun) error {
 		return fmt.Errorf("bulk replay requires database access: %w", err)
 	}
 
-	filters, err := buildReplayBulkFilters()
+	filters, err := buildReplayBulkFilters(fuzzy)
 	if err != nil {
 		return err
 	}
@@ -69,7 +75,7 @@ func runReplayBulk(ctx context.Context, rr *replayRun) error {
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	fmt.Fprintf(os.Stderr, "%s Replaying %d record(s) through the mutation/diff engine (concurrency %d)...\n",
+	fmt.Fprintf(os.Stderr, "%s Replaying %d record(s) through the diff engine (concurrency %d)...\n",
 		terminal.InfoSymbol(), len(records), concurrency)
 
 	// JSONL sink. One object per line keeps each entry the existing stable
@@ -163,29 +169,55 @@ func emitBulkEntry(enc *json.Encoder, out *replayOutput) {
 	}
 }
 
-// buildReplayBulkFilters maps replay's bulk flags to a record query. Project
-// scoping follows effectiveProjectUUID (off under -S/--stateless). --all lifts
-// the -n/--limit cap.
-func buildReplayBulkFilters() (database.QueryFilters, error) {
+// buildReplayBulkFilters maps replay's bulk flags (plus the positional fuzzy
+// term) to a record query, tracking the selection surface of `vigolium traffic`.
+// Project scoping follows effectiveProjectUUID (off under -S/--stateless). --all
+// lifts the -n/--limit cap.
+func buildReplayBulkFilters(fuzzy string) (database.QueryFilters, error) {
 	projectUUID, err := effectiveProjectUUID()
 	if err != nil {
 		return database.QueryFilters{}, err
 	}
+
+	var dateFrom, dateTo *time.Time
+	if replayBulkFrom != "" {
+		t, perr := clicommon.ParseDate(replayBulkFrom)
+		if perr != nil {
+			return database.QueryFilters{}, fmt.Errorf("invalid --from date: %w", perr)
+		}
+		dateFrom = &t
+	}
+	if replayBulkTo != "" {
+		t, perr := clicommon.ParseDate(replayBulkTo)
+		if perr != nil {
+			return database.QueryFilters{}, fmt.Errorf("invalid --to date: %w", perr)
+		}
+		dateTo = &t
+	}
+
+	// --all lifts the cap: a zero Limit means "no LIMIT clause" in the query.
 	limit := replayBulkLimit
 	if replayAll {
 		limit = 0
 	}
 	return database.QueryFilters{
-		ProjectUUID: projectUUID,
-		HostPattern: replayBulkHost,
-		Methods:     replayBulkMethods,
-		StatusCodes: replayBulkStatus,
-		PathPattern: replayBulkPath,
-		Source:      replayBulkSource,
-		SearchTerm:  replayBulkSearch,
-		BodySearch:  replayBulkBody,
-		Limit:       limit,
-		SortBy:      "created_at",
+		ProjectUUID:       projectUUID,
+		HostPattern:       replayBulkHost,
+		Methods:           replayBulkMethods,
+		StatusCodes:       replayBulkStatus,
+		PathPattern:       replayBulkPath,
+		Source:            replayBulkSource,
+		FuzzyTerm:         fuzzy,
+		SearchTerms:       replayBulkSearch,
+		BodySearch:        replayBulkBody,
+		ExcludeTerms:      replayBulkExclude,
+		ExcludeBodySearch: replayBulkExcludeBody,
+		DateFrom:          dateFrom,
+		DateTo:            dateTo,
+		Limit:             limit,
+		Offset:            replayBulkOffset,
+		SortBy:            replayBulkSort,
+		SortAsc:           replayBulkAsc,
 	}, nil
 }
 

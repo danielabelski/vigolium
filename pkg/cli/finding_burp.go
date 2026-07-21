@@ -1,0 +1,181 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/vigolium/vigolium/pkg/burpbridge"
+	"github.com/vigolium/vigolium/pkg/database"
+	"github.com/vigolium/vigolium/pkg/terminal"
+)
+
+// findingRepeaterWarnThreshold is the selected-finding count above which
+// --to-repeater warns about Burp's 30-tabs-per-minute cap.
+const findingRepeaterWarnThreshold = 20
+
+// pushFindingsToBurp hands each selected finding's evidence request (and, where
+// available, its response) to Burp for manual confirmation — the Organizer by
+// default, or a Repeater tab under --to-repeater. With --send-via-burp, Burp
+// re-issues the request and stores the fresh response. This is a triage handoff:
+// it never runs the scanner or emits findings.
+func pushFindingsToBurp(ctx context.Context, db *database.DB, findings []*database.Finding) error {
+	if strings.TrimSpace(findingBurpBridgeURL) == "" {
+		return fmt.Errorf("--push-to-burp/--to-repeater require --burp-bridge-url")
+	}
+	httpMode, err := burpbridge.ParseHTTPMode(findingHTTPMode)
+	if err != nil {
+		return fmt.Errorf("--http-mode: %w", err)
+	}
+	if findingHTTPMode != "" && !findingSendViaBurp {
+		fmt.Fprintf(os.Stderr, "%s --http-mode only applies with --send-via-burp; ignoring\n", terminal.WarningSymbol())
+	}
+	validated, err := burpbridge.ValidateURL(findingBurpBridgeURL)
+	if err != nil {
+		return fmt.Errorf("--burp-bridge-url: %w", err)
+	}
+	client, err := burpbridge.New(validated)
+	if err != nil {
+		return err
+	}
+	info, err := client.Health(ctx)
+	if err != nil {
+		return fmt.Errorf("burp bridge unavailable: %w", err)
+	}
+	if info.InScopeOnly && findingSendViaBurp {
+		fmt.Fprintf(os.Stderr, "%s Burp bridge is in-scope-only; out-of-scope targets will be refused (403)\n", terminal.WarningSymbol())
+	}
+
+	toRepeater := findingToRepeater
+	destination := "Organizer"
+	if toRepeater {
+		destination = "Repeater"
+		if len(findings) > findingRepeaterWarnThreshold {
+			fmt.Fprintf(os.Stderr, "%s %d findings selected — Burp caps Repeater at 30 tabs/min; consider --push-to-burp (Organizer) for a large batch\n",
+				terminal.WarningSymbol(), len(findings))
+		}
+	}
+
+	byUUID := batchLoadFindingRecords(ctx, db, findings)
+	pushed, skipped, failed := 0, 0, 0
+	for _, f := range findings {
+		req, resp, url := findingPushEvidence(f, byUUID)
+		if len(req) == 0 || url == "" {
+			skipped++
+			continue
+		}
+		if err := pushOneFinding(ctx, client, f, req, resp, url, toRepeater, httpMode); err != nil {
+			failed++
+			if failed <= 10 {
+				fmt.Fprintf(os.Stderr, "%s finding #%d: %v\n", terminal.WarningSymbol(), f.ID, err)
+			}
+			continue
+		}
+		pushed++
+	}
+
+	if globalJSON {
+		return writeAgentJSON(map[string]any{
+			"destination":    strings.ToLower(destination),
+			"pushed_to_burp": pushed,
+			"skipped":        skipped,
+			"failed":         failed,
+			"via_burp":       findingSendViaBurp,
+		})
+	}
+	fmt.Printf("%s pushed %d finding(s) to Burp %s", terminal.SuccessSymbol(), pushed, destination)
+	if skipped > 0 {
+		fmt.Printf(", skipped %d (no evidence request)", skipped)
+	}
+	if failed > 0 {
+		fmt.Printf(", %d failed", failed)
+	}
+	fmt.Println()
+	return nil
+}
+
+// pushOneFinding sends one finding's evidence to the chosen Burp tool. Under
+// --send-via-burp the request is re-issued by Burp (Send:true) and the supplied
+// response is dropped so the stored item carries a fresh one.
+func pushOneFinding(
+	ctx context.Context,
+	client *burpbridge.Client,
+	f *database.Finding,
+	req, resp []byte,
+	url string,
+	toRepeater bool,
+	httpMode burpbridge.HTTPMode,
+) error {
+	notes := fmt.Sprintf("%s [%s] finding #%d", findingPushLabel(f), f.Severity, f.ID)
+	if toRepeater {
+		_, err := client.SendToRepeater(ctx, url, "", req, burpbridge.RepeaterOptions{
+			TabName: fmt.Sprintf("finding-%d", f.ID),
+			Send:    findingSendViaBurp,
+			Mode:    httpMode,
+		})
+		return err
+	}
+	// Organizer: --send-via-burp fetches a fresh response (drop the stored one so
+	// Send:true actually re-issues); otherwise store the stored pair as-is.
+	organizerResp := resp
+	if findingSendViaBurp {
+		organizerResp = nil
+	}
+	_, err := client.SendToOrganizer(ctx, url, "", req, organizerResp, burpbridge.OrganizerOptions{
+		Source:    "vigolium-finding",
+		Notes:     notes,
+		Highlight: severityHighlight(f.Severity),
+		Send:      findingSendViaBurp,
+		Mode:      httpMode,
+	})
+	return err
+}
+
+// findingPushEvidence resolves the request/response bytes and URL to push for a
+// finding, preferring its first linked HTTP record and falling back to the
+// inline evidence stored on the finding itself.
+func findingPushEvidence(f *database.Finding, byUUID map[string]*database.HTTPRecord) (req, resp []byte, url string) {
+	records := recordsForFinding(byUUID, f)
+	for _, rec := range records {
+		if len(rec.RawRequest) == 0 {
+			continue
+		}
+		var response []byte
+		if rec.HasResponse {
+			response = rec.RawResponse
+		}
+		return rec.RawRequest, response, rec.URL
+	}
+	// Fall back to the finding's inline evidence (e.g. when the linked record was
+	// filtered out of the export).
+	if f.Request != "" {
+		return []byte(f.Request), []byte(f.Response), findingURLValue(f)
+	}
+	return nil, nil, ""
+}
+
+// findingPushLabel is the short human label used in the Burp note.
+func findingPushLabel(f *database.Finding) string {
+	if f.ModuleShort != "" {
+		return f.ModuleShort
+	}
+	return f.ModuleName
+}
+
+// severityHighlight maps a finding severity to a Burp Organizer highlight colour
+// so a pushed batch is visually triageable at a glance.
+func severityHighlight(severity string) string {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "critical", "high":
+		return "red"
+	case "medium":
+		return "orange"
+	case "low":
+		return "yellow"
+	case "suspect":
+		return "cyan"
+	default:
+		return "gray"
+	}
+}

@@ -203,7 +203,7 @@ For each scored file, also compute:
 
 Sort all candidates: `score DESC`, then `path.length ASC`, then `path ASC` (stable lexicographic).
 
-Take the top **1000** entries (`limit = 1000`). On dense repos that produces ~6 hours wall-clock at 3 concurrent hunters; tune the limit down on smaller repos by inspection.
+Take the top **1000** entries (`limit = 1000`). On dense repos that produces ~6 hours wall-clock at `$VIGOLIUM_AUDIT_MAX_AGENTS` concurrent hunters (default 5); tune the limit down on smaller repos by inspection.
 
 ### Step 1.5: Write targets.json
 
@@ -244,9 +244,9 @@ If 0 candidates survive, write a minimal `targets.json` with `targets: []` and s
 
 ## Phase 2: Hunt (file-by-file fan-out)
 
-Group the pending targets into batches of 3. For each batch:
+Group the pending targets into batches of `$VIGOLIUM_AUDIT_MAX_AGENTS` (the hunter burst cap — knob `VIGOLIUM_AUDIT_MAX_AGENTS`, default 5 when unset). For each batch:
 
-1. Spawn three `vigolium-audit:longshot-prober` Tasks **concurrently in a single message**, each with `run_in_background: true` (Claude) / equivalent on Codex. Each Task carries the four input variables in its prompt — nothing more — because the hunter's system prompt already specifies the workflow:
+1. Spawn up to `$VIGOLIUM_AUDIT_MAX_AGENTS` `vigolium-audit:longshot-prober` Tasks **concurrently in a single message**, each with `run_in_background: true` (Claude) / equivalent on Codex. Each Task carries the four input variables in its prompt — nothing more — because the hunter's system prompt already specifies the workflow:
 
    ```
    Anchor: <target.path>
@@ -255,11 +255,11 @@ Group the pending targets into batches of 3. For each batch:
    Rank: <rank>/<total>
    ```
 
-2. Poll `TaskGet`/`TaskList` (or platform equivalent) until **all three Tasks** in the batch have settled (`status: complete` or `failed`). Do NOT spawn the next batch before then.
+2. Poll `TaskGet`/`TaskList` (or platform equivalent) until **all Tasks** in the batch have settled (`status: complete` or `failed`). Do NOT spawn the next batch before then.
 
 3. Re-read `vigolium-results/longshot/targets.json` once per batch to refresh statuses (hunters update their own rows on completion).
 
-The 3-at-a-time cap prevents overwhelming the platform's tool budget on 1000-anchor runs.
+The `$VIGOLIUM_AUDIT_MAX_AGENTS`-at-a-time cap prevents overwhelming the platform's tool budget on 1000-anchor runs.
 
 ### Failure handling
 
@@ -307,5 +307,5 @@ Longshot Audit Complete
 - **No knowledge base, no DFD/CFD, no probe teams**. Longshot is intentionally architecture-blind. If you find yourself building component models, you are running the wrong mode.
 - **No final-audit-report.md**. Longshot writes its own `vigolium-results/longshot/longshot-summary.md`; the deep-mode report is untouched.
 - **Curated findings are not auto-promoted**. The user reviews `longshot-summary.md` and manually promotes high-confidence findings into `vigolium-results/findings/<ID>-<slug>/` if they want them in the canonical findings tree.
-- **Cost**: A 1000-file run at 3-concurrent hunters can spend several USD per file on Opus and burn 6+ wall-clock hours. Tune the `limit` in Phase 1 down for cheaper runs.
+- **Cost**: A 1000-file run at `$VIGOLIUM_AUDIT_MAX_AGENTS`-concurrent hunters (default 5) can spend several USD per file on Opus and burn 6+ wall-clock hours. Tune the `limit` in Phase 1 down for cheaper runs.
 - **Resume is cheap**: targets.json tracks per-anchor state. Killing the run and restarting picks up only the files that didn't complete.

@@ -4,6 +4,7 @@
 package replay
 
 import (
+	"context"
 	gohttp "net/http"
 )
 
@@ -59,8 +60,16 @@ type Options struct {
 
 	NoRedirects bool
 
-	// Client is required.
+	// Client is required unless Sender is set.
 	Client *gohttp.Client
+
+	// Sender, when non-nil, replaces the built-in net/http send for both the
+	// baseline (when re-sent) and the mutated request. It receives the fully
+	// assembled request bytes and returns the same *Summary a Go-client send
+	// would. Used to route the exact bytes through an external engine (the Burp
+	// bridge) that preserves malformed requests instead of normalising them.
+	// When set, Client is not required.
+	Sender func(context.Context, []byte) *Summary
 
 	// ExcerptCap overrides the excerpt clip size. Zero = DefaultExcerptCap.
 	ExcerptCap int

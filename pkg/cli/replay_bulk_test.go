@@ -10,54 +10,59 @@ import (
 // test starts from a known state (they persist across cobra runs in-process).
 func resetReplayBulkFlags(t *testing.T) {
 	t.Helper()
-	replayAll = false
-	replayBulkHost = ""
-	replayBulkMethods = nil
-	replayBulkStatus = nil
-	replayBulkPath = ""
-	replayBulkSource = ""
-	replayBulkSearch = ""
-	replayBulkBody = ""
-	replayBulkLimit = 100
-	globalStateless = false
-	globalProjectUUID = ""
-	globalProjectName = ""
-	t.Cleanup(func() {
+	reset := func() {
 		replayAll = false
 		replayBulkHost = ""
 		replayBulkMethods = nil
 		replayBulkStatus = nil
 		replayBulkPath = ""
 		replayBulkSource = ""
-		replayBulkSearch = ""
+		replayBulkSearch = nil
 		replayBulkBody = ""
+		replayBulkExclude = nil
+		replayBulkExcludeBody = ""
+		replayBulkFrom = ""
+		replayBulkTo = ""
+		replayBulkSort = "created_at"
+		replayBulkAsc = false
+		replayBulkOffset = 0
 		replayBulkLimit = 100
 		globalStateless = false
-	})
+	}
+	reset()
+	globalProjectUUID = ""
+	globalProjectName = ""
+	t.Cleanup(reset)
 }
 
 func TestReplayBulkRequested(t *testing.T) {
 	cases := []struct {
 		name  string
+		fuzzy string
 		setup func()
 		want  bool
 	}{
-		{"no flags", func() {}, false},
-		{"--all", func() { replayAll = true }, true},
-		{"--host", func() { replayBulkHost = "example.com" }, true},
-		{"--method", func() { replayBulkMethods = []string{"POST"} }, true},
-		{"--status", func() { replayBulkStatus = []int{200} }, true},
-		{"--path", func() { replayBulkPath = "/api" }, true},
-		{"--source", func() { replayBulkSource = "ingest-proxy" }, true},
-		{"--search", func() { replayBulkSearch = "admin" }, true},
-		{"--body", func() { replayBulkBody = "token" }, true},
+		{"no flags", "", func() {}, false},
+		{"--all", "", func() { replayAll = true }, true},
+		{"positional fuzzy", "admin", func() {}, true},
+		{"--host", "", func() { replayBulkHost = "example.com" }, true},
+		{"--method", "", func() { replayBulkMethods = []string{"POST"} }, true},
+		{"--status", "", func() { replayBulkStatus = []int{200} }, true},
+		{"--path", "", func() { replayBulkPath = "/api" }, true},
+		{"--source", "", func() { replayBulkSource = "ingest-proxy" }, true},
+		{"--search", "", func() { replayBulkSearch = []string{"admin"} }, true},
+		{"--body", "", func() { replayBulkBody = "token" }, true},
+		{"--exclude-search", "", func() { replayBulkExclude = []string{"logout"} }, true},
+		{"--exclude-body", "", func() { replayBulkExcludeBody = "healthcheck" }, true},
+		{"--from", "", func() { replayBulkFrom = "2026-01-01" }, true},
+		{"--to", "", func() { replayBulkTo = "2026-12-31" }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resetReplayBulkFlags(t)
 			tc.setup()
-			if got := replayBulkRequested(); got != tc.want {
-				t.Errorf("replayBulkRequested() = %v, want %v", got, tc.want)
+			if got := replayBulkRequested(tc.fuzzy); got != tc.want {
+				t.Errorf("replayBulkRequested(%q) = %v, want %v", tc.fuzzy, got, tc.want)
 			}
 		})
 	}
@@ -70,12 +75,17 @@ func TestBuildReplayBulkFilters_MapsFlags(t *testing.T) {
 	replayBulkStatus = []int{200, 302}
 	replayBulkPath = "/api/*"
 	replayBulkSource = "ingest-proxy"
-	replayBulkSearch = "admin"
+	replayBulkSearch = []string{"admin", "api"}
 	replayBulkBody = "token"
+	replayBulkExclude = []string{"logout"}
+	replayBulkExcludeBody = "healthcheck"
+	replayBulkSort = "status"
+	replayBulkAsc = true
+	replayBulkOffset = 20
 	replayBulkLimit = 50
 	globalStateless = true // project scoping off → empty ProjectUUID, no DB lookup
 
-	f, err := buildReplayBulkFilters()
+	f, err := buildReplayBulkFilters("dashboard")
 	if err != nil {
 		t.Fatalf("buildReplayBulkFilters: %v", err)
 	}
@@ -91,8 +101,24 @@ func TestBuildReplayBulkFilters_MapsFlags(t *testing.T) {
 	if f.PathPattern != "/api/*" || f.Source != "ingest-proxy" {
 		t.Errorf("PathPattern=%q Source=%q", f.PathPattern, f.Source)
 	}
-	if f.SearchTerm != "admin" || f.BodySearch != "token" {
-		t.Errorf("SearchTerm=%q BodySearch=%q", f.SearchTerm, f.BodySearch)
+	if f.FuzzyTerm != "dashboard" {
+		t.Errorf("FuzzyTerm = %q, want dashboard", f.FuzzyTerm)
+	}
+	// --search is repeatable and AND-combined, mirroring `vigolium traffic`.
+	if got := f.EffectiveSearchTerms(); len(got) != 2 || got[0] != "admin" || got[1] != "api" {
+		t.Errorf("EffectiveSearchTerms() = %v, want [admin api]", got)
+	}
+	if f.BodySearch != "token" {
+		t.Errorf("BodySearch = %q", f.BodySearch)
+	}
+	if len(f.ExcludeTerms) != 1 || f.ExcludeTerms[0] != "logout" || f.ExcludeBodySearch != "healthcheck" {
+		t.Errorf("ExcludeTerms=%v ExcludeBodySearch=%q", f.ExcludeTerms, f.ExcludeBodySearch)
+	}
+	if f.SortBy != "status" || !f.SortAsc {
+		t.Errorf("SortBy=%q SortAsc=%v, want status/true", f.SortBy, f.SortAsc)
+	}
+	if f.Offset != 20 {
+		t.Errorf("Offset = %d, want 20", f.Offset)
 	}
 	if f.ProjectUUID != "" {
 		t.Errorf("ProjectUUID = %q, want empty under -S", f.ProjectUUID)
@@ -102,13 +128,41 @@ func TestBuildReplayBulkFilters_MapsFlags(t *testing.T) {
 	}
 }
 
+func TestBuildReplayBulkFilters_ParsesDateRange(t *testing.T) {
+	resetReplayBulkFlags(t)
+	replayBulkFrom = "2026-01-01"
+	replayBulkTo = "2026-06-30"
+	globalStateless = true
+
+	f, err := buildReplayBulkFilters("")
+	if err != nil {
+		t.Fatalf("buildReplayBulkFilters: %v", err)
+	}
+	if f.DateFrom == nil || f.DateFrom.Year() != 2026 || f.DateFrom.Month() != 1 {
+		t.Errorf("DateFrom = %v, want 2026-01-01", f.DateFrom)
+	}
+	if f.DateTo == nil || f.DateTo.Month() != 6 {
+		t.Errorf("DateTo = %v, want 2026-06-30", f.DateTo)
+	}
+}
+
+func TestBuildReplayBulkFilters_RejectsBadDate(t *testing.T) {
+	resetReplayBulkFlags(t)
+	replayBulkFrom = "not-a-date"
+	globalStateless = true
+
+	if _, err := buildReplayBulkFilters(""); err == nil {
+		t.Error("expected error for invalid --from date, got nil")
+	}
+}
+
 func TestBuildReplayBulkFilters_AllLiftsLimit(t *testing.T) {
 	resetReplayBulkFlags(t)
 	replayAll = true
 	replayBulkLimit = 100
 	globalStateless = true
 
-	f, err := buildReplayBulkFilters()
+	f, err := buildReplayBulkFilters("")
 	if err != nil {
 		t.Fatalf("buildReplayBulkFilters: %v", err)
 	}

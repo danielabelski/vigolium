@@ -269,34 +269,84 @@ func (c *Client) InspectWithLimit(ctx context.Context, uuid, projectUUID string,
 }
 
 func (c *Client) post(ctx context.Context, path string, input, output any) error {
-	payload, err := json.Marshal(input)
+	status, body, err := c.postStatus(ctx, path, input)
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := c.http.Do(request)
-	if err != nil {
-		return fmt.Errorf("burp bridge at %s is unavailable: %w", c.baseURL, err)
-	}
-	defer func() { _ = response.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
-	if err != nil {
-		return err
-	}
-	if len(body) > maxResponseBytes {
-		return errors.New("burp bridge response exceeds 2 MiB")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("burp bridge HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("burp bridge HTTP %d: %s", status, strings.TrimSpace(string(body)))
 	}
 	if err := json.Unmarshal(body, output); err != nil {
 		return fmt.Errorf("decode Burp bridge response: %w", err)
 	}
 	return nil
+}
+
+// postStatus performs the round trip and returns the HTTP status and body
+// without treating a non-2xx status as an error, so callers that need to react
+// to specific codes (the send/repeater endpoints map 403 → scope block, 429 →
+// rate limit) can. Transport failures and oversized bodies are still errors.
+func (c *Client) postStatus(ctx context.Context, path string, input any) (int, []byte, error) {
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return 0, nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return 0, nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return 0, nil, fmt.Errorf("burp bridge at %s is unavailable: %w", c.baseURL, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(body) > maxResponseBytes {
+		return 0, nil, errors.New("burp bridge response exceeds 2 MiB")
+	}
+	return response.StatusCode, body, nil
+}
+
+// HealthInfo is the subset of the bridge's GET /health report that the send
+// paths care about: whether the listener is reachable and whether it will
+// refuse out-of-scope targets.
+type HealthInfo struct {
+	Service               string   `json:"service"`
+	InScopeOnly           bool     `json:"in_scope_only"`
+	SendRespectsInScope   bool     `json:"send_respects_in_scope_only"`
+	RepeaterTabsPerMinute int      `json:"repeater_tabs_per_minute"`
+	Capabilities          []string `json:"capabilities"`
+}
+
+// Health probes the listener's GET /health endpoint. It is a cheap preflight for
+// the explicit send paths (replay/fuzz --send-via-burp), which want a clear "bridge
+// unavailable" error up front rather than one error per request mid-run.
+func (c *Client) Health(ctx context.Context) (HealthInfo, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)
+	if err != nil {
+		return HealthInfo{}, err
+	}
+	response, err := c.http.Do(request)
+	if err != nil {
+		return HealthInfo{}, fmt.Errorf("burp bridge at %s is unavailable: %w", c.baseURL, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	if err != nil {
+		return HealthInfo{}, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return HealthInfo{}, fmt.Errorf("burp bridge HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var info HealthInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return HealthInfo{}, fmt.Errorf("decode Burp bridge health: %w", err)
+	}
+	return info, nil
 }
 
 type searchResponse struct {

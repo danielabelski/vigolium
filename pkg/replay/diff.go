@@ -31,6 +31,20 @@ func baselineFromResponse(rawResponse []byte, status int, responseTimeMs int64, 
 	}
 }
 
+// SummaryFromRawResponse builds a *Summary from raw HTTP response bytes plus the
+// status and elapsed time reported by an external sender (e.g. the Burp bridge's
+// /send). It mirrors the body-hash/excerpt logic of the built-in send path so a
+// via-Burp exchange yields the same Summary shape a Go-client send would. When
+// errMsg is non-empty the send failed target-side, so Status is left at 0 and
+// only the error and timing are carried — matching how sendRawHTTP reports a
+// transport error.
+func SummaryFromRawResponse(rawResponse []byte, status int, elapsedMs int64, errMsg string, excerptCap int) *Summary {
+	if errMsg != "" {
+		return &Summary{Error: errMsg, ResponseTimeMs: elapsedMs}
+	}
+	return baselineFromResponse(rawResponse, status, elapsedMs, excerptCap)
+}
+
 func extractResponseBody(raw []byte) []byte {
 	if len(raw) == 0 {
 		return nil

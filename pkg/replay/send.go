@@ -169,8 +169,8 @@ func SendRaw(ctx context.Context, client *gohttp.Client, raw []byte, scheme, hos
 // enforcement, cookie persistence between calls (provide a jar on
 // opts.Client), persisting the replay back to DB.
 func Do(ctx context.Context, opts Options) (*Result, error) {
-	if opts.Client == nil {
-		return nil, fmt.Errorf("replay.Do: opts.Client is required")
+	if opts.Client == nil && opts.Sender == nil {
+		return nil, fmt.Errorf("replay.Do: opts.Client or opts.Sender is required")
 	}
 	if len(opts.BaselineRequest) == 0 && len(opts.RawRequest) == 0 {
 		return nil, fmt.Errorf("replay.Do: BaselineRequest or RawRequest is required")
@@ -209,16 +209,26 @@ func Do(ctx context.Context, opts Options) (*Result, error) {
 		mutated = overlayHeaders(mutated, opts.HeaderOverlay)
 	}
 
+	// send routes one request through the caller's Sender (e.g. the Burp bridge)
+	// when set, else the built-in net/http path — so via-Burp and native replays
+	// share the identical baseline/replay/diff logic below.
+	send := func(raw []byte) *Summary {
+		if opts.Sender != nil {
+			return opts.Sender(ctx, raw)
+		}
+		return sendRawHTTP(ctx, opts.Client, raw, opts.Scheme, opts.Hostname, opts.Port, opts.NoRedirects, excerptCap)
+	}
+
 	var baseline *Summary
 	if len(opts.BaselineResponse) > 0 {
 		baseline = baselineFromResponse(opts.BaselineResponse, opts.BaselineStatus, opts.BaselineResponseTime, excerptCap)
 	} else if len(opts.BaselineRequest) > 0 {
-		baseline = sendRawHTTP(ctx, opts.Client, opts.BaselineRequest, opts.Scheme, opts.Hostname, opts.Port, opts.NoRedirects, excerptCap)
+		baseline = send(opts.BaselineRequest)
 	} else {
 		baseline = &Summary{}
 	}
 
-	replay := sendRawHTTP(ctx, opts.Client, mutated, opts.Scheme, opts.Hostname, opts.Port, opts.NoRedirects, excerptCap)
+	replay := send(mutated)
 	diff := computeDiff(baseline, replay, payloads)
 
 	sentReq, sentTrunc := clipBytes(mutated, excerptCap)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/cli/tui"
 	"github.com/vigolium/vigolium/pkg/database"
@@ -54,6 +55,13 @@ var (
 	findingColumns     []string
 	findingExclude     []string
 	findingPick        string
+
+	// Burp bridge push (triage handoff)
+	findingPushToBurp    bool
+	findingToRepeater    bool
+	findingSendViaBurp   bool
+	findingBurpBridgeURL string
+	findingHTTPMode      string
 )
 
 // findingColumnDef defines a displayable column for the findings table.
@@ -157,6 +165,20 @@ func init() {
 	f.StringSliceVar(&findingColumns, "columns", nil, "Columns to show (comma-separated, e.g. ID,SEVERITY,MODULE)")
 	f.StringSliceVar(&findingExclude, "exclude-columns", nil, "Columns to hide (comma-separated)")
 	f.StringVar(&findingPick, "pick", "", "Select finding(s) by 1-based position in the result list (e.g. 2, 1,3, 2-4); applied after --search/filters and sort")
+
+	// Burp bridge push — hand a finding's evidence request to Burp for manual
+	// confirmation. Requires the extension's loopback listener.
+	f.BoolVar(&findingPushToBurp, "push-to-burp", false,
+		"Push the selected finding(s)' evidence request+response to Burp's Organizer for manual confirmation; requires --burp-bridge-url")
+	f.BoolVar(&findingToRepeater, "to-repeater", false,
+		"Push to a Burp Repeater tab instead of the Organizer (respects Burp's 30-tabs/min cap)")
+	f.BoolVar(&findingSendViaBurp, "send-via-burp", false,
+		"With --push-to-burp/--to-repeater: re-issue the request through Burp's engine and store the fresh response")
+	f.StringVarP(&findingBurpBridgeURL, "burp-bridge-url", "B", burpbridge.URLFromEnvironment(),
+		"Loopback Burp bridge URL used by --push-to-burp / --to-repeater")
+	f.StringVar(&findingHTTPMode, "http-mode", "",
+		"With --send-via-burp: wire protocol — auto|http1|http2|http2_ignore_alpn (default auto)")
+
 	registerAgentJSONFlags(f)
 	tui.AddFlags(findingCmd, &findingTUIFlag, &findingNoTUIFlag)
 
@@ -180,7 +202,8 @@ func init() {
 // inline). Under --glob-db this decides whether the merge has to copy the
 // http_records blobs at all — see globDBSkipSet.
 func findingNeedsRecords() bool {
-	return findingRaw || findingBurp || findingMarkdown || findingWithRecords
+	return findingRaw || findingBurp || findingMarkdown || findingWithRecords ||
+		findingPushToBurp || findingToRepeater
 }
 
 func runFinding(cmd *cobra.Command, args []string) error {
@@ -245,6 +268,12 @@ func runFinding(cmd *cobra.Command, args []string) error {
 			findings = picked
 			total = int64(len(findings))
 			findingOffset = 0
+		}
+
+		// Burp push is an action, not a display — hand the selected findings'
+		// evidence to Burp and return before any table/TUI/JSON render.
+		if findingPushToBurp || findingToRepeater {
+			return pushFindingsToBurp(ctx, db, findings)
 		}
 
 		if active, tuiErr := tui.Active(findingTUIFlag, findingNoTUIFlag, globalJSON); tuiErr != nil {

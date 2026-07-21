@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+A **`replay` refocus**: bulk-selection filters now track `vigolium traffic` so you
+can search a slice of stored traffic and re-send it (to a proxy/Burp or straight to
+the wire) in one command, and payload fuzzing is consolidated into `vigolium fuzz`
+by removing `replay`'s `--mutate`. No module changes.
+
+### Added
+
+- **`vigolium replay` bulk mode gains full `traffic`-style pattern search.** A positional `vigolium replay <term>` now does a broad fuzzy match (URL/path/host/method/content-type/source + raw request/response), mirroring `vigolium traffic <term>`, and switches replay into "iterate the matching stored records" mode. New selectors bring the surface to parity with `traffic`: repeatable AND-combined `--search`, `--exclude-search`/`--exclude-body` negative filters, `--from`/`--to` date range, and `--sort`/`--asc`/`--offset` ordering + pagination (on top of the existing `--host`/`--method`/`--status`/`--path`/`--source`/`--body`/`--all`). Each matched record is re-sent verbatim through the diff engine and streams as JSONL; combine with `--proxy`, `--save-to-burp`, or `-S --db <export>` as before.
+
+### Removed
+
+- **`vigolium replay --mutate`/`-m` removed.** Payload / insertion-point fuzzing now lives entirely in `vigolium fuzz` (wordlists, `--class`, matchers, auto-calibration) — `replay` is for re-sending and confirming. Send exact bytes verbatim with `--raw-request`/`--raw-request-file`. The `pkg/replay` library (exported `ParseMutationFlag`, `Options.Mutations`) and the agent's in-process `replay_request` tool are unchanged and still apply mutations.
+
+## [v0.3.4] - 2026-07-20
+
+A **Burp bridge send** release: `replay`, `fuzz`, and `finding` can now push requests through the Vigolium Burp extension's loopback listener — sending exact bytes on the wire via **Burp's own HTTP engine** (malformed/smuggling requests preserved, HTTP/1 vs HTTP/2 selectable) and staging traffic into Burp's Repeater and Organizer for manual work. Without the new flags, every command's send path is byte-for-byte unchanged. No module changes (registry stays at 201 active + 116 passive).
+
+### Added
+
+- **`replay --send-via-burp`** routes the (mutated) request through Burp's HTTP stack instead of Go's client, so deliberate `Content-Length`, request smuggling, and unusual methods reach the wire unnormalised — pair with `--http-mode http1` for classic desync. `--to-repeater` (stage a Repeater tab) and `--to-organizer --notes/--highlight` (store the request+response pair) hand the exchange off for manual testing.
+- **`fuzz --send-via-burp`** sends every payload variant through Burp byte-for-byte (with `--http-mode` control); `--matches-to-organizer` pushes each matched anomaly into Burp's Organizer (Burp re-issues it) for triage.
+- **`finding --push-to-burp`** hands a finding's evidence request+response to Burp's Organizer (severity-coloured, one item per finding) for manual confirmation; `--to-repeater` opens it in a Repeater tab and `--send-via-burp` re-issues it through Burp's engine to capture a fresh response.
+- New `pkg/burpbridge` client methods (`Send`, `SendToRepeater`, `SendToOrganizer`, `Health`) wrap the extension's new `/api/burp-bridge/{send,repeater,organizer}` endpoints. All send flags require `--burp-bridge-url` (loopback-only) and preflight the listener, so an unavailable bridge is a clear up-front error rather than one failure per request. A scope-blocked target (Burp's "in-scope only" setting) surfaces as a clean error; a target-side failure is reported per-request without aborting a fuzzing loop.
+
+### Internal
+
+- A single pluggable `Sender` seam on `pkg/replay` (`replay.Options.Sender`) and `pkg/fuzz` (`fuzz.Job.Sender`) backs all three commands; when unset (the default) the native `net/http` send path is used exactly as before. `burpbridge.SummaryFromSend` adapts a Burp `/send` reply into the same `*replay.Summary` a native send produces, so diff/signal logic stays transport-agnostic.
+
 ## [v0.3.3] - 2026-07-17
 
 A **read-path performance** release: `finding` and `traffic` no longer materialize HTTP request/response bodies they don't render, which turns large `--glob-db` reads from swap-thrashing multi-minute runs into seconds and trims memory across ordinary reads and the REST API too. No module changes (registry stays at 201 active + 116 passive).

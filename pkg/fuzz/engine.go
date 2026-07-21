@@ -22,8 +22,8 @@ var calibrationProbes = []string{
 // every (position, payload) pair through replay.SendRaw, gating each result and
 // streaming it via job.OnResult. It returns once every send completes.
 func Run(ctx context.Context, job Job) (*Report, error) {
-	if job.Client == nil {
-		return nil, fmt.Errorf("fuzz.Run: job.Client is required")
+	if job.Client == nil && job.Sender == nil {
+		return nil, fmt.Errorf("fuzz.Run: job.Client or job.Sender is required")
 	}
 	if job.Hostname == "" {
 		return nil, fmt.Errorf("fuzz.Run: job.Hostname is required")
@@ -43,7 +43,13 @@ func Run(ctx context.Context, job Job) (*Report, error) {
 	if excerptCap <= 0 {
 		excerptCap = replay.DefaultExcerptCap
 	}
+	// send routes through the caller's Sender (e.g. the Burp bridge) when set,
+	// else the built-in replay.SendRaw transport — every send in the run (baseline,
+	// calibration, payloads) shares this one closure.
 	send := func(raw []byte) *replay.Summary {
+		if job.Sender != nil {
+			return job.Sender(ctx, raw)
+		}
 		return replay.SendRaw(ctx, job.Client, raw, job.Scheme, job.Hostname, job.Port, job.NoRedirects, excerptCap)
 	}
 
@@ -90,7 +96,8 @@ func Run(ctx context.Context, job Job) (*Report, error) {
 					}
 				}
 
-				sum := send(pos.build(job.Raw, payload))
+				built := pos.build(job.Raw, payload)
+				sum := send(built)
 				res := makeResult(pos, payload, sum, report.Baseline, calib, job.Matchers, job.Filters)
 
 				mu.Lock()
@@ -103,6 +110,9 @@ func Run(ctx context.Context, job Job) (*Report, error) {
 				}
 				if res.Matched {
 					report.Matched++
+					if job.OnMatch != nil {
+						job.OnMatch(res, built)
+					}
 				}
 				if job.OnResult != nil {
 					job.OnResult(res)

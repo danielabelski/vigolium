@@ -10,7 +10,7 @@ description: >-
   scripting, export, project management, and configuration tuning.
 license: MIT
 metadata:
-  version: "3.5.0"
+  version: "3.6.0"
   domain: security-tooling
   triggers: >-
     vigolium, scan, scan-url, scan-request, run, ingest, server, agent, agent query,
@@ -27,7 +27,9 @@ metadata:
     openai-compatible, ollama, audit driver, fs format, filesystem export,
     fs tree, sqlite export, mirror-fs, live mirror, fail-on, soft-fail,
     split-by-host, exit code gating, compact json, agent json, with-records,
-    min-severity, agentic-scan, coding agent
+    min-severity, agentic-scan, coding agent, burp bridge, burp repeater,
+    burp organizer, push-to-burp, send-via-burp, save-to-burp, matches-to-organizer,
+    knowledge-base, agent triage, fuzz, payload fuzzing
   role: operator
   scope: usage
   output-format: commands
@@ -94,6 +96,7 @@ Use this to find the right command quickly:
 | Autopilot natural-language prompt | `vigolium agent autopilot "scan VAmPI at ~/src/VAmPI on localhost:3005"` |
 | Autopilot with intensity preset | `vigolium agent autopilot -t <url> --intensity deep` |
 | Autopilot scanning a PR diff | `vigolium agent autopilot -t <url> --source ./src --diff main...feature-branch` |
+| Autopilot with app docs / a traffic bundle (knowledge base) | `vigolium agent autopilot -t <url> --knowledge-base ./docs` |
 | Full-scope AI-driven scan (discovery → plan → scan → triage) | `vigolium agent swarm -t <url> --discover` |
 | Deep targeted vulnerability scan on specific endpoint | `vigolium agent swarm -t <url>` |
 | Swarm natural-language prompt | `vigolium agent swarm "scan source at ~/src/app on localhost:3005"` |
@@ -120,9 +123,14 @@ Use this to find the right command quickly:
 | Olium via google-vertex (Gemini-native) | `vigolium olium --provider google-vertex --model gemini-3.1-pro` |
 | Browse stored HTTP traffic | `vigolium traffic` or `vigolium traffic <search>` |
 | Browse findings/vulnerabilities | `vigolium finding` or `vigolium db ls findings` |
-| Replay one request with mutations + baseline diff (external-agent confirm step) | `vigolium replay --record-uuid <uuid> -m 'name=id,payload=1 OR 1=1'` |
-| Replay a finding's HTTP evidence with a payload | `vigolium replay --finding-id 42 -m 'name=q,payload=<svg/onload=alert(1)>'` |
+| Re-send one request + baseline diff (external-agent confirm step) | `vigolium replay --record-uuid <uuid>` |
+| Re-confirm a finding's HTTP evidence | `vigolium replay --finding-id 42` |
+| Bulk re-send stored traffic by pattern (like `traffic`) | `vigolium replay <search-term> --proxy http://127.0.0.1:8080` |
 | Replay an arbitrary curl/raw/burp/base64/URL input | `vigolium replay -i "curl -X POST <url> -d '...'"` |
+| Payload / insertion-point fuzzing (not replay's job) | `vigolium fuzz -u <uuid> --point URL_PARAM:id --class sqli` |
+| Hand a finding's evidence to Burp for manual confirm | `vigolium finding --id 42 --push-to-burp -B http://127.0.0.1:9009` |
+| Stage a replayed request in a Burp Repeater tab | `vigolium replay -u <uuid> --to-repeater -B http://127.0.0.1:9009` |
+| Send fuzz matches to Burp's Organizer for triage | `vigolium fuzz -u <uuid> --class sqli --matches-to-organizer -B http://127.0.0.1:9009` |
 | Persist cookies across replays (multi-step auth) | `vigolium replay --session-id login --record-uuid <uuid>` |
 | Bulk-replay every matched record through the diff engine (JSONL out) | `vigolium replay --all --proxy http://127.0.0.1:8080 -c 5` |
 | Bulk-replay a standalone export through Burp (project scoping off) | `vigolium replay -S --db scan.sqlite --all --proxy http://127.0.0.1:8080` |
@@ -155,6 +163,7 @@ Use this to find the right command quickly:
 | Generate a presigned GET/PUT URL | `vigolium storage presign --key ugc/foo.tar.gz --method GET --expiry 1h` |
 | Delete cloud-storage objects | `vigolium storage rm ugc/foo.tar.gz` (add `--force` to skip confirm) |
 | List agent sessions | `vigolium agent session` or `vigolium agent session <uuid>` |
+| AI-confirm one finding (real vs false positive) | `vigolium agent triage 42` |
 | Seed database with sample data | `vigolium db seed` |
 | Import findings from file | `vigolium finding load findings.jsonl` (positional/stdin, not `-i`) |
 | Import audit output folder or JSONL export | `vigolium import <path>` |
@@ -175,7 +184,7 @@ Load detailed reference based on what you need:
 |-------|-----------|-----------|
 | Scanning commands | `references/scanning-commands.md` | scan, scan-url, scan-request, run flags and options |
 | Server & ingestion | `references/server-and-ingestion.md` | server, ingest, traffic command flags |
-| Agent commands | `references/agent-commands.md` | agent, agent query, agent autopilot, agent swarm, agent olium, agent audit, agent session — flags, intensities, providers, templates |
+| Agent commands | `references/agent-commands.md` | agent, agent query, agent autopilot, agent swarm, agent olium, agent audit, agent triage, agent session — flags, intensities, providers, templates |
 | Session / auth config | `references/session-auth-config.md` | --auth-file/--auth flags, YAML format, extract rules, authenticated scanning setup |
 | Data & management | `references/data-and-management.md` | db, module, extensions, js, config, scope, strategy, export, project, storage |
 | Complete flag index | `references/flags-reference.md` | Looking up any specific flag by name |
@@ -427,6 +436,13 @@ vigolium agent autopilot "test auth bypass on https://app.example.com"
 
 # With source code context (triggers the audit harness automatically)
 vigolium agent autopilot -t https://example.com --source ./src
+
+# With a knowledge base — app docs and/or a traffic bundle describing the target.
+# Prose docs (md/txt/…) are LLM-distilled into a brief front-loaded to the operator;
+# HTTP-traffic files in the same path (HAR, Burp XML, curl, OpenAPI/Postman, raw HTTP)
+# are auto-parsed and ingested into the DB as traffic (--knowledge-base-no-traffic to disable).
+vigolium agent autopilot -t https://example.com --knowledge-base ./app-docs
+vigolium agent autopilot -t https://example.com --knowledge-base ./exports/traffic.har
 
 # Specific files + custom guidance
 vigolium agent autopilot -t https://example.com --source ./src \
@@ -777,9 +793,9 @@ scripts) follow this discover → confirm → review chain:
    ```
    Each line is one record/finding; pipe through `jq` to filter.
 
-2. **Confirm** — mutate one request and diff the result:
+2. **Confirm** — re-send one request and diff the result:
    ```bash
-   vigolium replay --record-uuid <uuid> -m 'name=id,payload=1 OR 1=1' \
+   vigolium replay --record-uuid <uuid> \
                    --session-id login           # persist cookies between calls
    ```
    `vigolium replay` is the CLI surface for the in-process `replay_request`
@@ -787,9 +803,10 @@ scripts) follow this discover → confirm → review chain:
    `--finding-id`, or `--input` for curl / raw HTTP / Burp XML / base64 /
    URL / stdin (`-`). Output is stable JSON: `result.baseline`,
    `result.replay`, `result.diff` (status delta, length delta,
-   content-hash, payload reflection, interpretation). Use `--pretty` for a
-   human summary. For **many** requests at once, see the bulk mode in
-   step 7 below.
+   content-hash, interpretation). Use `--pretty` for a human summary.
+   To send exact bytes verbatim, use `--raw-request`/`--raw-request-file`.
+   For **payload / insertion-point fuzzing**, use `vigolium fuzz` (replay has
+   no `--mutate`). For **many** requests at once, see the bulk mode in step 7.
 
 3. **Persist auth state** — multi-step flows (login → CSRF → action) need
    cookies between calls:
@@ -804,7 +821,7 @@ scripts) follow this discover → confirm → review chain:
    imported source (audit, JSONL) with no linked record, `--finding-id`
    falls back to the finding's stored Request/Response bytes:
    ```bash
-   vigolium replay --finding-id 42 -m 'name=q,payload=<svg/onload=alert(1)>'
+   vigolium replay --finding-id 42
    ```
 
 5. **Confirm against a different env** — `--target` rewrites the
@@ -817,40 +834,66 @@ scripts) follow this discover → confirm → review chain:
    response back to the source record (only when the source is a stored
    HTTPRecord):
    ```bash
-   vigolium replay --record-uuid <uuid> -m '...' --in-replace
+   vigolium replay --record-uuid <uuid> --in-replace
    ```
 
-7. **Bulk replay** — pass `--all` (or any record filter: `--host`,
-   `--method`, `--status`, `--path`, `--source`, `--search`, `--body`) to
-   run **every** matched stored record through the same engine instead of a
-   single source. This mirrors `traffic --replay`, but each record goes
-   through the mutation/diff engine and results stream as **JSONL** (one
-   `result` object per line; single-source mode keeps its one indented
-   object). Any `--mutate` is applied to every record that has that
-   insertion point — a batch fuzz primitive — and without `--mutate` each
-   record is re-sent verbatim. Throttle with `-c/--concurrency` (default
-   10), cap with `-n/--limit` (default 100; `--all` lifts it), and read a
-   standalone export with `-S --db`:
+7. **Bulk replay** — pass a positional `<search-term>` (a broad fuzzy match,
+   like `traffic <term>`), `--all`, or any record filter to re-send **every**
+   matched stored record instead of a single source. The selection surface
+   mirrors `vigolium traffic`: `--host`, `--method`, `--status`, `--path`,
+   `--source`, repeatable AND-combined `--search`, `--body`,
+   `--exclude-search`/`--exclude-body`, `--from`/`--to` date range, and
+   `--sort`/`--asc`/`--offset`. Each matched record is re-sent verbatim through
+   the diff engine and results stream as **JSONL** (one `result` object per
+   line; single-source mode keeps its one indented object). Throttle with
+   `-c/--concurrency` (default 10), cap with `-n/--limit` (default 100; `--all`
+   lifts it), and read a standalone export with `-S --db`:
    ```bash
    # Re-send ALL stored traffic through Burp, 5 at a time
    vigolium replay --all --proxy http://127.0.0.1:8080 -c 5
 
+   # Search stored traffic (fuzzy) and re-send just the matches
+   vigolium replay admin --proxy http://127.0.0.1:8080 -c 5
+
+   # Pattern-search like `traffic`: POSTs to an API host, drop logout
+   vigolium replay --host api.example.com --method POST --search token \
+     --exclude-search logout --proxy http://127.0.0.1:8080 -c 5
+
    # From a standalone .sqlite / .jsonl export (project scoping off)
    vigolium replay -S --db scan.sqlite --all --proxy http://127.0.0.1:8080 -c 5
-
-   # Fuzz an 'id' param across every matching GET record
-   vigolium replay --method GET --host api.example.com -m 'name=id,payload=1 OR 1=1'
    ```
-   Bulk selection flags are mutually exclusive with `--record-uuid` /
-   `--finding-id` / `--input`. `--with-browser` is **not** on `replay` —
+   For payload / insertion-point fuzzing across a batch, use `vigolium fuzz`
+   (replay has no `--mutate`). Bulk selection is mutually exclusive with
+   `--record-uuid` / `--finding-id` / `--input`. `--with-browser` is **not** on `replay` —
    for browser-driven bulk replay use `traffic --replay --with-browser`.
    Pipe the JSONL through `jq` to filter (e.g. only records whose status
    changed).
 
+8. **Hand off to Burp for manual work** — when a request needs a human in
+   Burp Suite, push it there instead of (or in addition to) proxying. Needs the
+   Burp bridge extension's loopback listener (`-B`/`--burp-bridge-url`, or
+   `$VIGOLIUM_BURP_BRIDGE_URL`):
+   ```bash
+   # A finding's evidence → Burp Organizer (default) or a Repeater tab
+   vigolium finding --id 42 --push-to-burp -B http://127.0.0.1:9009
+   vigolium finding --severity high --to-repeater -B http://127.0.0.1:9009
+
+   # A replayed request → a Repeater tab / the Organizer / the Site map
+   vigolium replay -u <uuid> --to-repeater -B http://127.0.0.1:9009
+   vigolium replay -u <uuid> --to-organizer --notes "IDOR candidate" -B http://127.0.0.1:9009
+
+   # Fuzz matches → the Organizer (Burp re-issues each); or send exact bytes
+   # through Burp's own stack (smuggling/desync) with --send-via-burp --http-mode http1
+   vigolium fuzz -u <uuid> --class sqli --matches-to-organizer -B http://127.0.0.1:9009
+   ```
+   Add `--send-via-burp` on `replay`/`fuzz` to route the actual send through
+   Burp's engine byte-for-byte (pair with `--http-mode http1` for
+   smuggling/desync so `auto` doesn't reframe the request).
+
 Routes through `HTTP_PROXY` / `HTTPS_PROXY` (or `--proxy`) for Burp
 inspection. Honors `--project-uuid` / `--project-name` for project
-scoping. Mutations support both forms: `--mutate 'name=id,payload=1 OR 1=1'`
-or shorthand `--mutate 'id:URL_PARAM:1 OR 1=1'`.
+scoping. For payload / insertion-point fuzzing, `replay` has no `--mutate` —
+use `vigolium fuzz` (see recipe 15).
 
 ### 14c. Compact Agent JSON (`-j`/`--json` on finding / traffic / db)
 
@@ -880,6 +923,35 @@ vigolium db ls -j --compact                          # default table = http_reco
 ```
 
 Shaping flags shared by `finding` / `traffic` / `db ls`: `--compact` (metadata only), `--fields a,b,c` (project top-level keys), `--full-body` (complete bodies). `--with-records`, `--min-severity`, and `--agentic-scan` are **finding-only**. Note: `db stats -j` is the exception — it emits its raw stats struct, not the compact view.
+
+### 15. Payload Fuzzing (`vigolium fuzz`)
+
+`vigolium fuzz` is a low-level, agent-driven fuzzing **primitive** — it injects a caller-supplied payload set into chosen positions of ONE request and streams per-payload signals (status/size/words/lines/time/reflection/baseline-delta) with match/filter gating and auto-calibration against the target's catch-all. It makes **no** vulnerability decision and emits **no** findings — the caller brings the intelligence. For confirmation-backed detection of known classes, route to the module scanner (`scan-request -m ...`) instead.
+
+```bash
+# Fuzz a URL param with a built-in payload class (source can be -u <uuid>, -i curl/raw, or stdin)
+vigolium fuzz -u <record-uuid> --point URL_PARAM:id --class sqli
+
+# A literal FUZZ marker anywhere in the request wins over --fuzz/--point
+echo -e "GET /api/FUZZ HTTP/1.1\r\nHost: example.com\r\n" | vigolium fuzz -w dir-short
+
+# Wordlist discovery + matcher gating (keep 200/301; drop the calibrated catch-all)
+vigolium fuzz https://example.com/FUZZ -w file-long --match-status-code 200,301
+
+# Inline payloads across a specific header, with filters
+vigolium fuzz -u <uuid> --fuzz-header X-Forwarded-For -p "127.0.0.1" -p "localhost" --exclude-size 0
+
+# Agent handle: JSONL to stderr, ONE summary object (ranked anomalies + a ready
+# scan-request confirmation) to stdout; exit 3 on any match for CI gating
+vigolium fuzz -u <uuid> --class xss,sqli -j --fail-on-match
+
+# Route through Burp: send exact bytes via Burp's engine (smuggling/desync) and/or
+# hand matches to the Organizer (see recipe 14b step 8)
+vigolium fuzz -u <uuid> --class sqli --send-via-burp --http-mode http1 -B http://127.0.0.1:9009
+vigolium fuzz -u <uuid> --class sqli --matches-to-organizer -B http://127.0.0.1:9009
+```
+
+Positions: a `FUZZ` marker wins if present; else `--fuzz method|path|params|param-name|headers|cookies|all` (default all insertion points), `--point TYPE:name`, or `--fuzz-header`. Payloads combine `--class` (`sqli,xss,ssti,ssrf,lfi,path_traversal,xxe,cmdi,open_redirect,crlf`) + `-w/--wordlist` (builtin or file) + `-p/--payload` (inline). Full flag list: `references/flags-reference.md` (Fuzz Flags). `replay` re-sends and confirms; payload fuzzing lives entirely in `fuzz` (`replay` has no `--mutate`).
 
 ### 16. Export and Reports
 ```bash
@@ -1294,6 +1366,7 @@ These flags apply to `scan`, `scan-url`, `scan-request`, and `run` commands:
 - `--fail-on <sev>` gates the exit code (`scan`/`run`/`scan-url`/`scan-request`); output is written first, `--soft-fail` (global) forces exit 0, and under `-P`/`--split-by-host` it is evaluated per child (the parent batch fails only when every target fails)
 - `--split-by-host` only takes effect in stateless multi-target mode (`-S -T <file>`); it is required for `-P > 1` parallel fan-out and ignored for a single target or under `--db-isolate`
 - Server `--mirror-fs <dir>` (config `server.mirror_fs_path`) mirrors ingested traffic + findings to a live `<dir>/traffic`+`<dir>/findings` tree (append-only `index.jsonl`); it is server-ingestion-only and never blocks the DB save — CLI scans are unaffected
+- Burp handoff (all need `-B`/`--burp-bridge-url` or `$VIGOLIUM_BURP_BRIDGE_URL` — the bridge extension's loopback listener): `finding --push-to-burp`/`--to-repeater` (evidence → Organizer/Repeater; finding-only), `replay --to-repeater`/`--to-organizer`/`--save-to-burp`, `fuzz --matches-to-organizer`. `--send-via-burp` (on `replay`/`fuzz`) routes the send through Burp's engine byte-for-byte; `--http-mode auto|http1|http2|http2_ignore_alpn` only applies with `--send-via-burp` (use `http1` for smuggling/desync)
 - `--target/-t` and `--spec-url` are mutually exclusive for ingest
 - `--stateless` requires `-o/--output`; `--stateless` and `--db` are mutually exclusive
 - `--ci-output-format` sets JSONL output, suppresses banners and color (implies `--json --silent`)

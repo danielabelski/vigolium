@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/fuzz"
 	"github.com/vigolium/vigolium/pkg/replay"
@@ -49,13 +50,13 @@ var (
 	fuzzMR string
 	fuzzMT int64
 
-	// Filters (drop).
-	fuzzFC []int
-	fuzzFS []int
-	fuzzFW []int
-	fuzzFL []int
-	fuzzFR string
-	fuzzFT int64
+	// Exclude (drop).
+	fuzzEC []int
+	fuzzES []int
+	fuzzEW []int
+	fuzzEL []int
+	fuzzER string
+	fuzzET int64
 
 	// Behaviour / output.
 	fuzzNoCalibrate bool
@@ -67,6 +68,13 @@ var (
 	fuzzAllResults  bool
 	fuzzPretty      bool
 	fuzzFailOnMatch bool
+
+	// Burp bridge.
+	fuzzSendViaBurp        bool
+	fuzzBurpBridgeURL      string
+	fuzzHTTPMode           string
+	fuzzSendTimeout        time.Duration
+	fuzzMatchesToOrganizer bool
 )
 
 var fuzzCmd = &cobra.Command{
@@ -74,7 +82,7 @@ var fuzzCmd = &cobra.Command{
 	Short: "Inject payloads into a request and report per-payload response anomalies",
 	Long: `Fuzz a single HTTP request: inject a payload set into chosen positions and stream
 per-payload response signals (status, size, words, lines, time, reflection, baseline
-delta) with match/filter gating and auto-calibration against the target's
+delta) with match/exclude gating and auto-calibration against the target's
 catch-all.
 
 fuzz is a low-level PRIMITIVE, not a scanner. It sends exactly the payloads you give it
@@ -100,9 +108,9 @@ PAYLOADS (combine freely):
   -w/--wordlist <file|builtin>   builtins: ` + strings.Join(fuzz.BuiltinNames(), ", ") + `
   -p/--payload <literal>         inline payload (repeatable)
 
-MATCHERS keep a response (OR; empty = keep all), FILTERS drop it (OR):
+MATCHERS keep a response (OR; empty = keep all), EXCLUDES drop it (OR):
   --match-status-code 200,301  --match-size N  --match-words N  --match-lines N
-  --match-regex <re>  --match-time <ms>   (and the --filter-* equivalents to drop)
+  --match-regex <re>  --match-time <ms>   (and the --exclude-* equivalents to drop)
   --match-status-code all keeps every status. Auto-calibration (on by default) suppresses
   the target's wildcard/catch-all response; suppressed results carry "calibrated":true.
 
@@ -111,6 +119,14 @@ OUTPUT:
   -j/--json      stream JSONL to stderr, print ONE summary object to stdout (agent handle:
                  baseline, counts, ranked top anomalies, a ready follow-up query)
 Honors HTTP_PROXY / HTTPS_PROXY for Burp inspection.
+
+BURP ENGINE (needs --burp-bridge-url, the extension's loopback listener):
+  --send-via-burp         send every payload through Burp's own HTTP stack so exact bytes
+                          hit the wire — the way to fuzz malformed/smuggling requests
+                          (pair with --http-mode http1 so 'auto' doesn't reframe them)
+  --matches-to-organizer  hand each matched request to Burp's Organizer (Burp re-issues it)
+                          for manual triage
+Neither changes the default send path — without them fuzz sends via Go's client as before.
 
 fuzz reports raw signals, not verdicts — for confirmation-backed detection of known
 classes use 'vigolium scan-request -m xss,sqli -j' instead.`,
@@ -152,13 +168,13 @@ func init() {
 	f.StringVar(&fuzzMR, "match-regex", "", "Match response body against this regex")
 	f.Int64Var(&fuzzMT, "match-time", 0, "Match responses taking at least this many ms")
 
-	// Filters.
-	f.IntSliceVar(&fuzzFC, "filter-status-code", nil, "Filter out status codes")
-	f.IntSliceVar(&fuzzFS, "filter-size", nil, "Filter out response sizes (bytes)")
-	f.IntSliceVar(&fuzzFW, "filter-words", nil, "Filter out response word counts")
-	f.IntSliceVar(&fuzzFL, "filter-lines", nil, "Filter out response line counts")
-	f.StringVar(&fuzzFR, "filter-regex", "", "Filter out responses whose body matches this regex")
-	f.Int64Var(&fuzzFT, "filter-time", 0, "Filter out responses taking at least this many ms")
+	// Exclude (drop) — the inverse of the matchers above.
+	f.IntSliceVar(&fuzzEC, "exclude-status-code", nil, "Exclude these status codes")
+	f.IntSliceVar(&fuzzES, "exclude-size", nil, "Exclude these response sizes (bytes)")
+	f.IntSliceVar(&fuzzEW, "exclude-words", nil, "Exclude these response word counts")
+	f.IntSliceVar(&fuzzEL, "exclude-lines", nil, "Exclude these response line counts")
+	f.StringVar(&fuzzER, "exclude-regex", "", "Exclude responses whose body matches this regex")
+	f.Int64Var(&fuzzET, "exclude-time", 0, "Exclude responses taking at least this many ms")
 
 	// Behaviour / output.
 	f.BoolVar(&fuzzNoCalibrate, "no-calibrate", false, "Disable auto-calibration of the target's catch-all response")
@@ -170,7 +186,24 @@ func init() {
 	f.BoolVar(&fuzzAllResults, "all-results", false, "Emit every result, not just matched ones")
 	f.BoolVar(&fuzzPretty, "pretty", false, "Human-readable table instead of JSONL")
 	f.BoolVar(&fuzzFailOnMatch, "fail-on-match", false, "Exit non-zero (3) if any result matches (for agent/CI gating)")
+
+	// Burp bridge — route each payload through Burp's engine (exact bytes) and,
+	// optionally, hand matched anomalies to Burp's Organizer for triage.
+	f.BoolVar(&fuzzSendViaBurp, "send-via-burp", false,
+		"Send each payload through Burp's own HTTP stack (exact bytes — malformed/smuggling preserved) instead of Go's client; requires --burp-bridge-url")
+	f.StringVarP(&fuzzBurpBridgeURL, "burp-bridge-url", "B", burpbridge.URLFromEnvironment(),
+		"Loopback Burp bridge URL used by --send-via-burp / --matches-to-organizer")
+	f.StringVar(&fuzzHTTPMode, "http-mode", "",
+		"With --send-via-burp: wire protocol — auto|http1|http2|http2_ignore_alpn (default auto; use http1 for request smuggling/desync)")
+	f.DurationVar(&fuzzSendTimeout, "send-timeout", 0,
+		"With --send-via-burp: per-request response timeout (<=2m; default uses the bridge's 30s)")
+	f.BoolVar(&fuzzMatchesToOrganizer, "matches-to-organizer", false,
+		"Push each matched result's request to Burp's Organizer (Burp re-issues it) for manual triage; requires --burp-bridge-url")
 }
+
+// fuzzOrganizerCap bounds how many matched requests are pushed to Burp's
+// Organizer, so a wide-open match set can't flood Burp with tabs/items.
+const fuzzOrganizerCap = 200
 
 func runFuzz(cmd *cobra.Command, args []string) error {
 	defer closeDatabaseOnExit()
@@ -188,6 +221,11 @@ func runFuzz(cmd *cobra.Command, args []string) error {
 	// A line-trimming stdin reader can strip the request's header terminator;
 	// repair it so insertion-point analysis and the send path both parse.
 	src.BaselineRequest = fuzz.NormalizeRawRequest(src.BaselineRequest)
+
+	bridge, err := setupFuzzBurpBridge(ctx, src)
+	if err != nil {
+		return err
+	}
 
 	positions, err := fuzz.ResolvePositions(src.BaselineRequest, fuzz.Selectors{
 		Mode:        fuzzSelector,
@@ -263,6 +301,28 @@ func runFuzz(cmd *cobra.Command, args []string) error {
 			}
 		},
 	}
+	// --send-via-burp: every send goes through Burp's engine byte-for-byte.
+	if bridge != nil && bridge.sendViaBurp {
+		job.Sender = burpbridge.BridgeSender(bridge.client, src.Scheme, src.Hostname, src.Port, bridge.sendOpts, fuzzExcerptCap())
+	}
+	// --matches-to-organizer: collect matched requests (cheap, on the engine's
+	// serialized path) so they can be handed to Burp's Organizer after the run
+	// without blocking sends.
+	var organizerMatches []fuzzOrganizerMatch
+	var organizerOverflow int
+	if bridge != nil && bridge.toOrganizer {
+		job.OnMatch = func(r fuzz.Result, rawRequest []byte) {
+			if len(organizerMatches) >= fuzzOrganizerCap {
+				organizerOverflow++
+				return
+			}
+			organizerMatches = append(organizerMatches, fuzzOrganizerMatch{
+				rawRequest: append([]byte(nil), rawRequest...),
+				notes:      fmt.Sprintf("fuzz %s:%s=%s", r.PositionType, r.Position, r.Payload),
+				highlight:  fuzzMatchHighlight(r),
+			})
+		}
+	}
 
 	report, runErr := fuzz.Run(ctx, job)
 	if report != nil {
@@ -273,8 +333,14 @@ func runFuzz(cmd *cobra.Command, args []string) error {
 	if runErr != nil {
 		return runErr
 	}
+
+	organizerPushed := 0
+	if bridge != nil && bridge.toOrganizer {
+		organizerPushed = pushFuzzMatchesToOrganizer(ctx, bridge, src, organizerMatches, organizerOverflow)
+	}
+
 	if globalJSON && report != nil {
-		if err := emitFuzzJSONSummary(src, args, len(positions), len(payloads), report, topResults); err != nil {
+		if err := emitFuzzJSONSummary(src, args, len(positions), len(payloads), report, topResults, bridge != nil && bridge.sendViaBurp, organizerPushed); err != nil {
 			return err
 		}
 	}
@@ -282,6 +348,121 @@ func runFuzz(cmd *cobra.Command, args []string) error {
 		os.Exit(3)
 	}
 	return nil
+}
+
+// fuzzBurpBridge holds the resolved bridge client and send settings for a fuzz
+// run; nil when no Burp flag was set.
+type fuzzBurpBridge struct {
+	client      *burpbridge.Client
+	sendViaBurp bool
+	toOrganizer bool
+	sendOpts    burpbridge.SendOptions
+}
+
+// fuzzOrganizerMatch is one matched request queued for Burp's Organizer.
+type fuzzOrganizerMatch struct {
+	rawRequest []byte
+	notes      string
+	highlight  string
+}
+
+// setupFuzzBurpBridge validates the bridge flags and preflights the listener so
+// an unavailable bridge fails clearly up front. Returns nil (no error) when no
+// Burp flag is set — the default send path is untouched.
+func setupFuzzBurpBridge(ctx context.Context, _ *replaySource) (*fuzzBurpBridge, error) {
+	if !fuzzSendViaBurp && !fuzzMatchesToOrganizer {
+		if fuzzHTTPMode != "" {
+			fmt.Fprintf(os.Stderr, "%s --http-mode only applies with --send-via-burp; ignoring\n", terminal.WarningSymbol())
+		}
+		return nil, nil
+	}
+	if strings.TrimSpace(fuzzBurpBridgeURL) == "" {
+		return nil, fmt.Errorf("--send-via-burp/--matches-to-organizer require --burp-bridge-url")
+	}
+	httpMode, err := burpbridge.ParseHTTPMode(fuzzHTTPMode)
+	if err != nil {
+		return nil, fmt.Errorf("--http-mode: %w", err)
+	}
+	if fuzzHTTPMode != "" && !fuzzSendViaBurp {
+		fmt.Fprintf(os.Stderr, "%s --http-mode only applies with --send-via-burp; ignoring\n", terminal.WarningSymbol())
+	}
+	validated, err := burpbridge.ValidateURL(fuzzBurpBridgeURL)
+	if err != nil {
+		return nil, fmt.Errorf("--burp-bridge-url: %w", err)
+	}
+	client, err := burpbridge.New(validated)
+	if err != nil {
+		return nil, err
+	}
+	info, err := client.Health(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("burp bridge unavailable: %w", err)
+	}
+	if info.InScopeOnly {
+		fmt.Fprintf(os.Stderr, "%s Burp bridge is in-scope-only; out-of-scope targets will be refused (403)\n", terminal.WarningSymbol())
+	}
+	return &fuzzBurpBridge{
+		client:      client,
+		sendViaBurp: fuzzSendViaBurp,
+		toOrganizer: fuzzMatchesToOrganizer,
+		sendOpts:    burpbridge.SendOptions{Mode: httpMode, Timeout: fuzzSendTimeout},
+	}, nil
+}
+
+// pushFuzzMatchesToOrganizer hands each collected match to Burp's Organizer,
+// letting Burp re-issue the request (send:true) so the stored item carries a
+// live response for manual triage. Runs after the fuzz loop so it never slows
+// sending; per-item failures are counted, not fatal.
+func pushFuzzMatchesToOrganizer(ctx context.Context, bridge *fuzzBurpBridge, src *replaySource, matches []fuzzOrganizerMatch, overflow int) int {
+	if len(matches) == 0 {
+		return 0
+	}
+	target := replaySourceURL(src)
+	pushed, failed := 0, 0
+	for _, m := range matches {
+		_, err := bridge.client.SendToOrganizer(ctx, target, "", m.rawRequest, nil, burpbridge.OrganizerOptions{
+			Source:    "vigolium-fuzz",
+			Notes:     m.notes,
+			Highlight: m.highlight,
+			Send:      true,
+			Mode:      bridge.sendOpts.Mode,
+			Timeout:   bridge.sendOpts.Timeout,
+		})
+		if err != nil {
+			failed++
+			continue
+		}
+		pushed++
+	}
+	fmt.Fprintf(os.Stderr, "%s pushed %d matched request(s) to Burp Organizer", terminal.InfoSymbol(), pushed)
+	if failed > 0 {
+		fmt.Fprintf(os.Stderr, " (%d failed)", failed)
+	}
+	if overflow > 0 {
+		fmt.Fprintf(os.Stderr, "; %d more matched but the %d-item cap was hit", overflow, fuzzOrganizerCap)
+	}
+	fmt.Fprintln(os.Stderr)
+	return pushed
+}
+
+// fuzzMatchHighlight picks a Burp Organizer highlight colour by anomaly type so
+// a batch is visually triageable: status change (red), reflection (orange), else
+// yellow.
+func fuzzMatchHighlight(r fuzz.Result) string {
+	switch {
+	case r.StatusChanged:
+		return "red"
+	case r.Reflected:
+		return "orange"
+	default:
+		return "yellow"
+	}
+}
+
+// fuzzExcerptCap returns the excerpt clip size used for the run (mirrors the
+// engine default) so the Burp sender's Summary excerpt matches the native path.
+func fuzzExcerptCap() int {
+	return replay.DefaultExcerptCap
 }
 
 // resolveFuzzSource picks the request to fuzz from a positional URL, -i/--input,
@@ -364,11 +545,11 @@ func buildMatchers() (fuzz.Matchers, error) {
 }
 
 func buildFilters() (fuzz.Filters, error) {
-	f := fuzz.Filters{Status: fuzzFC, Sizes: fuzzFS, Words: fuzzFW, Lines: fuzzFL, TimeMs: fuzzFT}
-	if fuzzFR != "" {
-		re, err := regexp.Compile(fuzzFR)
+	f := fuzz.Filters{Status: fuzzEC, Sizes: fuzzES, Words: fuzzEW, Lines: fuzzEL, TimeMs: fuzzET}
+	if fuzzER != "" {
+		re, err := regexp.Compile(fuzzER)
 		if err != nil {
-			return f, fmt.Errorf("bad --filter-regex: %w", err)
+			return f, fmt.Errorf("bad --exclude-regex: %w", err)
 		}
 		f.Regex = re
 	}
@@ -386,34 +567,38 @@ const (
 // agent-friendly handle on the run (baseline, counts, ranked anomalies, and a
 // ready confirmation command) so an agent needn't parse the JSONL stream.
 type fuzzJSONSummary struct {
-	Target     string        `json:"target"`
-	Positions  int           `json:"positions"`
-	Payloads   int           `json:"payloads"`
-	Sent       int           `json:"sent"`
-	Matched    int           `json:"matched"`
-	Calibrated int           `json:"calibrated"`
-	Errors     int           `json:"errors"`
-	Baseline   fuzz.Baseline `json:"baseline"`
-	TopResults []fuzz.Result `json:"top_results"`
-	Query      string        `json:"query,omitempty"`
+	Target          string        `json:"target"`
+	Positions       int           `json:"positions"`
+	Payloads        int           `json:"payloads"`
+	Sent            int           `json:"sent"`
+	Matched         int           `json:"matched"`
+	Calibrated      int           `json:"calibrated"`
+	Errors          int           `json:"errors"`
+	Baseline        fuzz.Baseline `json:"baseline"`
+	TopResults      []fuzz.Result `json:"top_results"`
+	Query           string        `json:"query,omitempty"`
+	SentViaBurp     bool          `json:"sent_via_burp,omitempty"`
+	OrganizerPushed int           `json:"organizer_pushed,omitempty"`
 }
 
-func emitFuzzJSONSummary(src *replaySource, args []string, positions, payloadCount int, report *fuzz.Report, top []fuzz.Result) error {
+func emitFuzzJSONSummary(src *replaySource, args []string, positions, payloadCount int, report *fuzz.Report, top []fuzz.Result, sentViaBurp bool, organizerPushed int) error {
 	sort.SliceStable(top, func(i, j int) bool { return fuzzResultRank(top[i]) > fuzzResultRank(top[j]) })
 	if len(top) > fuzzTopResultsEmit {
 		top = top[:fuzzTopResultsEmit]
 	}
 	return writeAgentJSON(fuzzJSONSummary{
-		Target:     fmt.Sprintf("%s://%s", src.Scheme, src.Hostname),
-		Positions:  positions,
-		Payloads:   payloadCount,
-		Sent:       report.Sent,
-		Matched:    report.Matched,
-		Calibrated: report.Calibrated,
-		Errors:     report.Errors,
-		Baseline:   report.Baseline,
-		TopResults: top,
-		Query:      fuzzFollowUpQuery(args, report.Matched),
+		Target:          fmt.Sprintf("%s://%s", src.Scheme, src.Hostname),
+		Positions:       positions,
+		Payloads:        payloadCount,
+		Sent:            report.Sent,
+		Matched:         report.Matched,
+		Calibrated:      report.Calibrated,
+		Errors:          report.Errors,
+		Baseline:        report.Baseline,
+		TopResults:      top,
+		Query:           fuzzFollowUpQuery(args, report.Matched),
+		SentViaBurp:     sentViaBurp,
+		OrganizerPushed: organizerPushed,
 	})
 }
 

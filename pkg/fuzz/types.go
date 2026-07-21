@@ -17,10 +17,12 @@
 package fuzz
 
 import (
+	"context"
 	gohttp "net/http"
 	"regexp"
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/replay"
 )
 
 // positionKind distinguishes how a payload is injected at a Position.
@@ -168,6 +170,14 @@ type Job struct {
 	NoRedirects bool
 	ExcerptCap  int
 
+	// Sender, when non-nil, replaces the default replay.SendRaw transport for
+	// every send (baseline, calibration probes, and each payload variant). It
+	// lets the caller route the exact request bytes through an external engine
+	// (the Burp bridge) that preserves malformed requests. Must be safe for
+	// concurrent use — the engine sends from up to Concurrency goroutines. When
+	// set, Client is not required.
+	Sender func(context.Context, []byte) *replay.Summary
+
 	Concurrency int
 	DelayMs     int
 
@@ -175,4 +185,11 @@ type Job struct {
 	// invoked from multiple goroutines; the callback must be safe to call
 	// concurrently (the CLI serializes it behind a mutex).
 	OnResult func(Result)
+
+	// OnMatch, if set, is called only for results that pass the matcher/filter
+	// gate, with the exact request bytes that were sent — Result carries only
+	// signals, so this is how a caller recovers a matched request (e.g. to hand
+	// it to Burp's Organizer). Invoked on the same serialized path as OnResult;
+	// keep it cheap (append, don't do blocking I/O here).
+	OnMatch func(r Result, rawRequest []byte)
 }

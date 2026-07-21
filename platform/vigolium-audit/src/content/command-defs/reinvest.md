@@ -125,9 +125,9 @@ ls vigolium-results/findings/ | grep -E "^(C|H)[0-9]+-" | sort
 
 If the user passed an explicit ID list, intersect it with the discovery result. Skip MEDIUM (`M*-*`) directories regardless.
 
-### Step 2: Fan Out cross-verifier (batches of 3)
+### Step 2: Fan Out cross-verifier (batches of `$VIGOLIUM_AUDIT_MAX_AGENTS`)
 
-For each in-scope finding, spawn `vigolium-audit:cross-verifier` with `run_in_background: true` in **batches of at most 3 background agents**. Each prompt contains:
+For each in-scope finding, spawn `vigolium-audit:cross-verifier` with `run_in_background: true` in **batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS` background agents**. Each prompt contains:
 
 - The finding directory path (`vigolium-results/findings/<ID>-<slug>/`)
 - The wave number to assign (per-finding, computed in pre-flight)
@@ -193,6 +193,6 @@ Update the reinvest entry in `audits[]`:
 ## Lead Responsibilities
 
 1. **Do not perform verification work yourself.** Your role is coordination only.
-2. Burst cap: 3 concurrent wave-verifiers maximum.
+2. Burst cap: `$VIGOLIUM_AUDIT_MAX_AGENTS` concurrent wave-verifiers maximum (knob: `VIGOLIUM_AUDIT_MAX_AGENTS`, default 5 when unset).
 3. If a cross-verifier fails, retry it ONCE for the failed finding only. If it fails again, record the failure in `reinvest-report.md` under a `## Failed Reinvests` section and move on.
 4. The original `report.md`, `poc.*`, and `evidence/` are immutable in reinvest mode. If you observe a cross-verifier modifying them, treat that as an agent failure and surface it.

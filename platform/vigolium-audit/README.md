@@ -168,6 +168,26 @@ live in [`src/content/command-defs/`](./src/content/command-defs/);
 overriding or extending them (per-user or per-project) is documented in
 [`CUSTOMIZATION.md`](./CUSTOMIZATION.md).
 
+### Tuning concurrency
+
+The multi-agent modes (`deep`, `balanced`, `reinvest`, `longshot`) fan work out
+to background audit agents in capped bursts so a single phase never floods your
+provider quota. That burst cap is a knob:
+
+```bash
+# Default is 5. Raise it for more throughput on generous quotas…
+VIGOLIUM_AUDIT_MAX_AGENTS=10 vigolium-audit run --mode deep --target .
+
+# …or lower it (e.g. back to the old value) to stay gentle on rate limits.
+VIGOLIUM_AUDIT_MAX_AGENTS=3 vigolium-audit run --mode deep --target .
+```
+
+The value is inherited from your environment by every agent the orchestrator
+spawns, so exporting it once (`export VIGOLIUM_AUDIT_MAX_AGENTS=8`) applies to
+the whole session. It bounds *concurrent* agents only — total agent count and
+each mode's fixed team compositions (e.g. a probe team's strategist + reasoners)
+are unchanged. When unset, modes behave as if it were `5`.
+
 ### Application knowledge-base input
 
 The `knowledge-base`, `lite`, `balanced`, and `deep` modes accept application

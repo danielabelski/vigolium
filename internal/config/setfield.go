@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -51,12 +52,21 @@ func SetField(settings *Settings, key string, value string) error {
 		}
 	}
 
-	// Navigate to the parent map
+	// Navigate to the parent map, creating containers for segments that the
+	// omitempty YAML round-trip dropped (an unset field like notify.telegram is
+	// absent from `raw`). A missing segment is only created after the full key
+	// validates against the Settings struct schema, so typos still error.
 	current := raw
 	for i := 0; i < len(parts)-1; i++ {
 		child, ok := current[parts[i]]
 		if !ok {
-			return fmt.Errorf("key %q not found (unknown segment %q)", key, parts[i])
+			if _, valid := resolveSettingKind(key); !valid {
+				return fmt.Errorf("key %q not found (unknown segment %q)", key, parts[i])
+			}
+			newMap := map[string]any{}
+			current[parts[i]] = newMap
+			current = newMap
+			continue
 		}
 		childMap, ok := child.(map[string]any)
 		if !ok {
@@ -65,17 +75,105 @@ func SetField(settings *Settings, key string, value string) error {
 		current = childMap
 	}
 
-	// Check the leaf key exists
+	// Set the leaf. When it already exists in the round-tripped map, coerce
+	// against its present value; when it was dropped by omitempty, coerce
+	// against the field's declared kind (validating the key on the way).
 	leafKey := parts[len(parts)-1]
-	existing, ok := current[leafKey]
-	if !ok {
-		return fmt.Errorf("key %q not found (unknown segment %q)", key, leafKey)
+	if existing, ok := current[leafKey]; ok {
+		current[leafKey] = coerceValue(value, existing)
+	} else {
+		kind, valid := resolveSettingKind(key)
+		if !valid {
+			return fmt.Errorf("key %q not found (unknown segment %q)", key, leafKey)
+		}
+		current[leafKey] = coerceValueForKind(value, kind)
 	}
 
-	// Coerce value to match the existing type
-	current[leafKey] = coerceValue(value, existing)
-
 	return marshalBack(raw, settings)
+}
+
+// resolveSettingKind walks the Settings struct type along the dot-notation key,
+// following yaml tag names, and returns the reflect.Kind of the leaf value.
+// ok is false when any segment names a field that does not exist (a typo).
+// Descending through a map[string]X consumes one segment as a dynamic key and
+// continues into X, so arbitrary keys under maps (e.g.
+// known_issue_scan.severity_overrides.<code>) validate.
+func resolveSettingKind(key string) (reflect.Kind, bool) {
+	t := reflect.TypeOf(Settings{})
+	for _, seg := range strings.Split(key, ".") {
+		for t.Kind() == reflect.Ptr {
+			t = t.Elem()
+		}
+		switch t.Kind() {
+		case reflect.Struct:
+			ft, ok := yamlFieldType(t, seg)
+			if !ok {
+				return reflect.Invalid, false
+			}
+			t = ft
+		case reflect.Map:
+			// seg is a dynamic map key; descend into the element type.
+			t = t.Elem()
+		default:
+			// More segments remain but the current type is a scalar/slice.
+			return reflect.Invalid, false
+		}
+	}
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t.Kind(), true
+}
+
+// yamlFieldType returns the type of the struct field whose yaml tag name matches
+// name. Fields tagged `yaml:"-"` are skipped; an empty tag name falls back to
+// the yaml default (the lowercased field name).
+func yamlFieldType(t reflect.Type, name string) (reflect.Type, bool) {
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		tag := f.Tag.Get("yaml")
+		if tag == "-" {
+			continue
+		}
+		tagName, _, _ := strings.Cut(tag, ",")
+		if tagName == "" {
+			tagName = strings.ToLower(f.Name)
+		}
+		if tagName == name {
+			return f.Type, true
+		}
+	}
+	return nil, false
+}
+
+// coerceValueForKind converts value to the concrete type implied by a struct
+// field's declared reflect.Kind. It is used when the leaf key was dropped by
+// omitempty (so there is no existing value to sniff the type from).
+func coerceValueForKind(value string, kind reflect.Kind) any {
+	switch kind {
+	case reflect.Bool:
+		return strings.EqualFold(value, "true") || value == "1"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if n, err := strconv.Atoi(value); err == nil {
+			return n
+		}
+		return value
+	case reflect.Float32, reflect.Float64:
+		if n, err := strconv.ParseFloat(value, 64); err == nil {
+			return n
+		}
+		return value
+	case reflect.Slice, reflect.Array:
+		parts := strings.Split(value, ",")
+		result := make([]any, len(parts))
+		for i, p := range parts {
+			result[i] = strings.TrimSpace(p)
+		}
+		return result
+	default:
+		return value
+	}
 }
 
 // navigateToParent walks `raw` along `parts[:len(parts)-1]` and returns the

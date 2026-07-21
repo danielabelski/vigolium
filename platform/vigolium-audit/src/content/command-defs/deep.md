@@ -347,9 +347,15 @@ You are the swarm orchestrator. Dispatch domain-specialist agents directly — n
 
 ### Swarm Burst Cap
 
-To avoid quota spikes, keep a hard cap of **3 concurrent background agents** at all times.
+The concurrency cap is a knob: **`VIGOLIUM_AUDIT_MAX_AGENTS`** (default **5** when unset). Resolve it once during Lead Setup and treat that value as the burst cap for every fan-out below — wherever this methodology says "at most `$VIGOLIUM_AUDIT_MAX_AGENTS`", "batched ≤`$VIGOLIUM_AUDIT_MAX_AGENTS`", or "max `$VIGOLIUM_AUDIT_MAX_AGENTS`", it means this value:
 
-- If a phase wants more than 3 agents, split it into batches or staged rounds.
+```bash
+MAX_AGENTS="${VIGOLIUM_AUDIT_MAX_AGENTS:-5}"   # raise for more throughput; set to 3 to stay gentle on quota
+```
+
+To avoid quota spikes, keep a hard cap of **`$VIGOLIUM_AUDIT_MAX_AGENTS` concurrent background agents** at all times.
+
+- If a phase wants more than `$VIGOLIUM_AUDIT_MAX_AGENTS` agents, split it into batches or staged rounds.
 - Do not launch the next batch until the current batch has finished and its outputs are usable.
 - Treat the orchestrator as coordination-only; the cap applies to spawned audit agents.
 
@@ -406,7 +412,7 @@ If `VIGOLIUM_AUDIT_GIT_AVAILABLE=true`, also process `history-miner` output from
 
 If `VIGOLIUM_AUDIT_GIT_AVAILABLE=true`, for each patch (from cve-scout) AND each HIGH-risk
 undisclosed commit (from history-miner), spawn `vigolium-audit:patch-auditor` in
-**batches of at most 3 background agents**. Wait for the current batch to finish before
+**batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS` background agents**. Wait for the current batch to finish before
 launching the next batch.
 
 If `VIGOLIUM_AUDIT_GIT_AVAILABLE=false`, do **not** spawn `history-miner` or `patch-auditor`. Instead write an explicit Phase D3 note into `vigolium-results/attack-surface/knowledge-base-report.md` such as:
@@ -441,13 +447,13 @@ Spawn `vigolium-audit:threat-modeler` (foreground) with the following addition t
 
 Mark T3 complete.
 
-**Step 3: Burst-capped execution waves (max 3 background agents)**
+**Step 3: Burst-capped execution waves (max `$VIGOLIUM_AUDIT_MAX_AGENTS` background agents)**
 
 Run the post-KB phases in these waves instead of one large fan-out:
 
 1. **Wave A** — run `vigolium-audit:code-scanner` (T4) and wait for structural extraction plus the full D5 artifact gate.
 2. **Wave B** — run `vigolium-audit:access-auditor` (T6) using D5's entry-point inventory; wait for the authz gate.
-3. **Wave C** — run Deep Probe teams (T5), one team at a time, using staged rounds that never exceed 3 active agents. See below. Seed teams with D7's matrix and drafts where relevant.
+3. **Wave C** — run Deep Probe teams (T5), one team at a time, using staged rounds that never exceed `$VIGOLIUM_AUDIT_MAX_AGENTS` active agents. See below. Seed teams with D7's matrix and drafts where relevant.
 
 **Static analysis + cross-service edge enumeration (T4):** Phase D5 code-scanner runs SAST, structural extraction, and inline enrichment. Prompt addition:
 
@@ -475,7 +481,7 @@ Run the post-KB phases in these waves instead of one large fan-out:
    **Round C2 -- Dual reasoning**
    - Keep the strategist active
    - Spawn `vigolium-audit:goal-backtracer` and `vigolium-audit:assumption-breaker` with `run_in_background: true`
-   - This is the heaviest probe burst and it is capped at 3 active agents total: strategist + 2 reasoners
+   - This is the heaviest probe burst — strategist + 2 reasoners is 3 active agents; keep it within the `$VIGOLIUM_AUDIT_MAX_AGENTS` burst cap (split the reasoners into separate rounds if the cap is set below 3)
    - Wait for both reasoners to finish
 
    **Round C3 -- Evidence harvest (includes causal challenge)**
@@ -503,7 +509,7 @@ Before dispatching: all of T4, T5, T6 must be `complete`. Phase D5 must also hav
 2. **Read probe results**: `cat vigolium-results/probe-workspace/*/probe-summary.md` to collect all validated hypotheses across all probe teams. Group by threat cluster affinity.
 3. Read `vigolium-results/attack-surface/knowledge-base-report.md`. Form threat clusters from `## High-Risk DFD Slices` and `## High-Risk CFD Slices` — group by shared trust boundary or component affinity. If `vigolium-results/attack-surface/cross-service-edges.json` exists, treat each inter-service edge as an additional cross-service threat cluster.
 4. Assign NNN ranges: Chamber 1 = p10-001 to p10-019, Chamber 2 = p10-020 to p10-039, etc.
-5. For each cluster, process **one chamber at a time** and never exceed 3 active agents.
+5. For each cluster, process **one chamber at a time** and never exceed `$VIGOLIUM_AUDIT_MAX_AGENTS` active agents.
 
 For each chamber:
 
@@ -543,9 +549,9 @@ Cross-service taint reasoning is likewise inline (Ideator + Tracer over
 
    **Stage 1 (fp-check):** apply the `fp-check` skill to all `vigolium-results/findings-draft/p10-*.md` files with `Verdict: VALID` (including the inline cross-service and variant drafts the chamber filed in the p10-* namespace). Write verdicts back into drafts. Prioritize findings with `Pre-FP-Flag` annotations.
 
-   **Stage 2 (cold-verify, CRITICAL only):** for each **CRITICAL** finding still `VALID` after Stage 1, spawn `vigolium-audit:independent-verifier` in **batches of at most 3 background agents**. The prompt contains ONLY the finding draft file path — no debate transcript, no context. **HIGH and MEDIUM findings skip Stage 2** — the Devil's Advocate challenge in the chamber is sufficient for them; the cold pass is reserved for CRITICAL claims where a false positive is most costly. Wait for each independent-verifier batch before launching the next one.
+   **Stage 2 (cold-verify, CRITICAL only):** for each **CRITICAL** finding still `VALID` after Stage 1, spawn `vigolium-audit:independent-verifier` in **batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS` background agents**. The prompt contains ONLY the finding draft file path — no debate transcript, no context. **HIGH and MEDIUM findings skip Stage 2** — the Devil's Advocate challenge in the chamber is sufficient for them; the cold pass is reserved for CRITICAL claims where a false positive is most costly. Wait for each independent-verifier batch before launching the next one.
 
-   **Stage 3 (Triage Pass, cheap-tier model):** for every `vigolium-results/findings-draft/*.md` still `Verdict: VALID` after Stages 1 and 2 — including HIGH/MEDIUM findings the independent-verifier did not touch — spawn `vigolium-audit:finding-grader` in **batches of at most 3 background agents**. Each triager prompt contains ONLY the draft path. The triager runs on a cheaper model (Sonnet on Claude, defaults on others), reads only the draft (and optionally the sibling `adversarial-review.md` plus `vigolium-results/INFO.md` Known FP Sources), and writes `Triage-Priority` (P0/P1/P2/skip), `Triage-Exploitability`, `Triage-Impact`, and `Triage-Reasoning` back into the draft frontmatter. Do NOT invoke the triager on drafts already carrying a `Triage-Priority` line. Drafts marked `skip` are routed to `vigolium-results/findings-theoretical/` (as full finding directories) during Phase D10 consolidation; the remaining drafts feed Phase D10 PoC building in P0-first order. Wait for the triage batches to complete.
+   **Stage 3 (Triage Pass, cheap-tier model):** for every `vigolium-results/findings-draft/*.md` still `Verdict: VALID` after Stages 1 and 2 — including HIGH/MEDIUM findings the independent-verifier did not touch — spawn `vigolium-audit:finding-grader` in **batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS` background agents**. Each triager prompt contains ONLY the draft path. The triager runs on a cheaper model (Sonnet on Claude, defaults on others), reads only the draft (and optionally the sibling `adversarial-review.md` plus `vigolium-results/INFO.md` Known FP Sources), and writes `Triage-Priority` (P0/P1/P2/skip), `Triage-Exploitability`, `Triage-Impact`, and `Triage-Reasoning` back into the draft frontmatter. Do NOT invoke the triager on drafts already carrying a `Triage-Priority` line. Drafts marked `skip` are routed to `vigolium-results/findings-theoretical/` (as full finding directories) during Phase D10 consolidation; the remaining drafts feed Phase D10 PoC building in P0-first order. Wait for the triage batches to complete.
 10. Mark T7 complete (chambers + inline taint + inline variant + inline FP elimination all done).
 
 **Step 5: Intent Reconciliation (T8)**
@@ -570,7 +576,7 @@ python3 ~/.config/vigolium-audit/runtime-skills/audit/scripts/consolidate_drafts
 
 The script writes `vigolium-results/findings-draft/consolidation-manifest.json` (and prints it) with three arrays: `findings` (actionable → poc-author), `theoretical` (triage-skipped / intent-skipped → reporter only, no PoC), and `dropped`. Exit 1 with empty `findings` and `theoretical` arrays is a clean no-findings result: skip PoC/partition/finding-writer work and continue to D12 so the final report records zero findings. Other helper errors are fatal. An empty `findings` array with non-empty `theoretical` is also normal: skip PoC building and partition, then finalize the theoretical bucket.
 
-Read the manifest. For each entry in its `findings` array, spawn `vigolium-audit:poc-author` in **batches of at most 3 background agents**. Each poc-author receives the entry's `draft_path` and its `id`, and writes `PoC-Status` back into the finding's `draft.md`.
+Read the manifest. For each entry in its `findings` array, spawn `vigolium-audit:poc-author` in **batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS` background agents**. Each poc-author receives the entry's `draft_path` and its `id`, and writes `PoC-Status` back into the finding's `draft.md`.
 
 Wait for each PoC-builder batch before launching the next one.
 
@@ -584,10 +590,10 @@ It is idempotent and a no-op when there were no PoC builds. Mark T9 complete. po
 
 **Step 7: Finding Finalization (T10)**
 
-After every poc-author completes, fan out `vigolium-audit:finding-writer` in **batches of at most 3 background agents** to author `report.md` from cold context. This is the structural fix that prevents `report.md` from being starved by heavyweight PoC work.
+After every poc-author completes, fan out `vigolium-audit:finding-writer` in **batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS` background agents** to author `report.md` from cold context. This is the structural fix that prevents `report.md` from being starved by heavyweight PoC work.
 
 1. Enumerate every finding directory across **both** buckets: `vigolium-results/findings/*/` AND `vigolium-results/findings-theoretical/*/` (`C*-*`, `H*-*`, `M*-*`).
-2. For each directory, spawn `vigolium-audit:finding-writer` with `run_in_background: true` in capped batches of 3. The prompt contains ONLY the finding directory path — no chamber context, no KB. Finding Reporter reads draft / debate / adversarial-review / poc / evidence from the folder and writes the nine-section `report.md` in place. Theoretical-bucket folders get the same report (the `Proof of concept & Evidence` section states the no-PoC reason).
+2. For each directory, spawn `vigolium-audit:finding-writer` with `run_in_background: true` in capped batches of `$VIGOLIUM_AUDIT_MAX_AGENTS`. The prompt contains ONLY the finding directory path — no chamber context, no KB. Finding Reporter reads draft / debate / adversarial-review / poc / evidence from the folder and writes the nine-section `report.md` in place. Theoretical-bucket folders get the same report (the `Proof of concept & Evidence` section states the no-PoC reason).
 3. Wait for each reporter batch before launching the next one.
 4. **Phase gate (MANDATORY)**: enumerate `vigolium-results/findings/*/report.md` AND `vigolium-results/findings-theoretical/*/report.md`. For every finding directory in both buckets, assert `report.md` exists and is larger than 500 bytes. If any are missing or truncated:
    - Respawn `vigolium-audit:finding-writer` ONCE for the missing/truncated folders.
@@ -639,28 +645,28 @@ Phase D7 (Authorization Audit): single `vigolium-audit:access-auditor` invocatio
 
 Enrichment is handled inline by `vigolium-audit:code-scanner` in Phase D5 — no separate phase. Cross-service edge enumeration is also inline in Phase D5 (only when `Multi-service: true`). Cross-service taint reasoning and per-finding variant expansion are handled inline by the Phase D8 chamber (Ideator + Code Tracer) — no separate taint or variant phase. State/concurrency and spec-compliance no longer have dedicated phases; the Review Chamber Ideator covers those classes per its prompt.
 
-Phase D8 (Review Chamber + Inline Taint/Variant + FP Elimination): In solo mode, spawn a single chamber, but run it in staged rounds so the chamber never exceeds 2 live helper roles at once. Use the same chamber protocol as Swarm Mode but with one chamber covering all DFD slices (and, when present, all `cross-service-edges.json` edges). NNN range: p10-001 to p10-049. Include all Deep Probe validated hypotheses AND all Phase D7 drafts (`vigolium-results/findings-draft/p6-*.md`) as pre-seeded drafts in the Ideator prompt — instruct the Ideator to chain and extend them rather than regenerating, to add cross-service taint hypotheses for any supplied edges, and instruct the Code Tracer to run an inline same-pattern variant search on every VALID finding (filing variant drafts in the p10-* namespace with `Origin-Finding:`/`Origin-Pattern:` frontmatter). After the chamber closes, run the inline FP elimination tail (Stage 1 fp-check; Stage 2 cold-verify CRITICAL only, batched ≤3; Stage 3 triage pass, batched ≤3) exactly as in Swarm Step 4, then mark phase `D8` complete.
+Phase D8 (Review Chamber + Inline Taint/Variant + FP Elimination): In solo mode, spawn a single chamber, but run it in staged rounds so the chamber never exceeds 2 live helper roles at once. Use the same chamber protocol as Swarm Mode but with one chamber covering all DFD slices (and, when present, all `cross-service-edges.json` edges). NNN range: p10-001 to p10-049. Include all Deep Probe validated hypotheses AND all Phase D7 drafts (`vigolium-results/findings-draft/p6-*.md`) as pre-seeded drafts in the Ideator prompt — instruct the Ideator to chain and extend them rather than regenerating, to add cross-service taint hypotheses for any supplied edges, and instruct the Code Tracer to run an inline same-pattern variant search on every VALID finding (filing variant drafts in the p10-* namespace with `Origin-Finding:`/`Origin-Pattern:` frontmatter). After the chamber closes, run the inline FP elimination tail (Stage 1 fp-check; Stage 2 cold-verify CRITICAL only, batched ≤`$VIGOLIUM_AUDIT_MAX_AGENTS`; Stage 3 triage pass, batched ≤`$VIGOLIUM_AUDIT_MAX_AGENTS`) exactly as in Swarm Step 4, then mark phase `D8` complete.
 
 Phase D9 (Intent Reconciliation): single `vigolium-audit:context-reviewer` invocation (foreground), AUDIT CONTRACT, dispatched after Phase D8's FP/triage tail. Reconciles every VALID draft against documented intent; reuses the `Triage-Priority: skip` channel for strongly-intentional findings. Skip-and-continue — never blocks the pipeline. Mark phase `D9` complete (or `failed` with `policy: skip-and-continue`).
 
-Phase D10 (PoC Construction): run the consolidation helper (`python3 ~/.config/vigolium-audit/runtime-skills/audit/scripts/consolidate_drafts.py vigolium-results`) — it materialises finding directories, routing triage-skipped / intent-skipped ones to `vigolium-results/findings-theoretical/` and the rest to `vigolium-results/findings/`. Exit 1 with an empty manifest is a clean no-findings result; other helper errors are fatal. Read the manifest and for each entry in `findings` spawn `vigolium-audit:poc-author` in batches of at most 3 with `run_in_background: true` (passing `draft_path` and `id`). Wait for each batch, then run `partition_findings.py` when actionable entries existed. Mark phase `D10` complete.
+Phase D10 (PoC Construction): run the consolidation helper (`python3 ~/.config/vigolium-audit/runtime-skills/audit/scripts/consolidate_drafts.py vigolium-results`) — it materialises finding directories, routing triage-skipped / intent-skipped ones to `vigolium-results/findings-theoretical/` and the rest to `vigolium-results/findings/`. Exit 1 with an empty manifest is a clean no-findings result; other helper errors are fatal. Read the manifest and for each entry in `findings` spawn `vigolium-audit:poc-author` in batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS` with `run_in_background: true` (passing `draft_path` and `id`). Wait for each batch, then run `partition_findings.py` when actionable entries existed. Mark phase `D10` complete.
 
-Phase D11 (Finding Finalization): for each directory under **both** `vigolium-results/findings/` and `vigolium-results/findings-theoretical/`, spawn `vigolium-audit:finding-writer` in batches of at most 3 with `run_in_background: true`. Prompt contains ONLY the finding directory path. Wait for each batch. Enumerate `vigolium-results/findings/*/report.md` AND `vigolium-results/findings-theoretical/*/report.md` and verify each exists and is larger than 500 bytes — retry once for missing/truncated folders, then STOP if any remain incomplete. Mark phase `D11` complete only when every finding directory in both buckets has a non-empty `report.md`.
+Phase D11 (Finding Finalization): for each directory under **both** `vigolium-results/findings/` and `vigolium-results/findings-theoretical/`, spawn `vigolium-audit:finding-writer` in batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS` with `run_in_background: true`. Prompt contains ONLY the finding directory path. Wait for each batch. Enumerate `vigolium-results/findings/*/report.md` AND `vigolium-results/findings-theoretical/*/report.md` and verify each exists and is larger than 500 bytes — retry once for missing/truncated folders, then STOP if any remain incomplete. Mark phase `D11` complete only when every finding directory in both buckets has a non-empty `report.md`.
 
 Phase D12 (Final Report): spawn `vigolium-audit:report-composer` (foreground). When `audits[-1].history_available` is `false`, append the no-git disclaimer instruction to the assembler prompt (same wording as Swarm Step 8). After report assembly, run post-audit cleanup (same as Swarm Mode). Mark phase `D12` complete.
 
 **Burst-capped scheduling in solo mode**:
 - After Phase D4: run Phase D5 (`vigolium-audit:code-scanner`) and require its structural/SAST artifact gate.
 - Then run Phase D7, followed by Phase D6 probe teams. Both consume D5 structural output; D6 also consumes D7 coverage gaps and drafts.
-- Phase D3: `vigolium-audit:patch-auditor` per patch in batches of at most 3 only when `VIGOLIUM_AUDIT_GIT_AVAILABLE=true`.
-- Phase D8 inline FP Stage 2: cold verifiers (CRITICAL only) in batches of at most 3.
+- Phase D3: `vigolium-audit:patch-auditor` per patch in batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS` only when `VIGOLIUM_AUDIT_GIT_AVAILABLE=true`.
+- Phase D8 inline FP Stage 2: cold verifiers (CRITICAL only) in batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS`.
 - Phase D9: single `vigolium-audit:context-reviewer` (foreground); skip-and-continue.
-- Phase D10: PoC builders in batches of at most 3.
-- Phase D11: finding reporters in batches of at most 3.
+- Phase D10: PoC builders in batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS`.
+- Phase D11: finding reporters in batches of at most `$VIGOLIUM_AUDIT_MAX_AGENTS`.
 
 **Phase sequence**:
 ```
-D1/D2 -> D3 (per-patch batched, max 3) -> D4 -> D5 (structural extraction + SAST + enrichment + multi-service edge enumeration) -> D7 -> D6 -> D8 (staged single chamber + inline cross-service taint + inline variant search + inline FP: fp-check, CRITICAL-only cold-verify, triage) -> D9 (Intent Reconciliation; skip-and-continue) -> D10 (consolidate -> PoC batched, max 3 -> partition confirmed/theoretical) -> D11 (Finalize both finding buckets; GATE: every report.md present) -> D12 (Final report assembly)
+D1/D2 -> D3 (per-patch batched, max `$VIGOLIUM_AUDIT_MAX_AGENTS`) -> D4 -> D5 (structural extraction + SAST + enrichment + multi-service edge enumeration) -> D7 -> D6 -> D8 (staged single chamber + inline cross-service taint + inline variant search + inline FP: fp-check, CRITICAL-only cold-verify, triage) -> D9 (Intent Reconciliation; skip-and-continue) -> D10 (consolidate -> PoC batched, max `$VIGOLIUM_AUDIT_MAX_AGENTS` -> partition confirmed/theoretical) -> D11 (Finalize both finding buckets; GATE: every report.md present) -> D12 (Final report assembly)
 ```
 
 After Phase D12, return the summary. When state is engine-owned, the engine sets the terminal audit status.
@@ -684,15 +690,15 @@ When `$ARGUMENTS` is a phase identifier (one of: D1, D2, D3, D4, D5, D6, D7, D8,
 | Phase | Name | Agent / Execution |
 |-------|------|-------------------|
 | D1/D2 | Intelligence Pass | Always `vigolium-audit:cve-scout`; add `vigolium-audit:history-miner` only when `VIGOLIUM_AUDIT_GIT_AVAILABLE=true` |
-| D3 | Patch Audit | `vigolium-audit:patch-auditor` (batched up to 3 at a time with `run_in_background: true`) only when local patch history exists; otherwise record a skipped/no-history result and continue |
+| D3 | Patch Audit | `vigolium-audit:patch-auditor` (batched up to `$VIGOLIUM_AUDIT_MAX_AGENTS` at a time with `run_in_background: true`) only when local patch history exists; otherwise record a skipped/no-history result and continue |
 | D4 | Threat Model | `vigolium-audit:threat-modeler` — must emit `Multi-service: true|false` in `## Architecture Model` |
 | D5 | Code Scan (+ inline enrichment + multi-service edge enumeration) | `vigolium-audit:code-scanner` — runs SAST, classifies candidates for security relevance in the same pass, and writes `cross-service-edges.json` when the project is multi-service |
 | D6 | Deep Probe | Probe teams processed in staged rounds: `vigolium-audit:probe-lead` + `vigolium-audit:goal-backtracer` + `vigolium-audit:assumption-breaker`, then `vigolium-audit:evidence-collector` (one team per component group; strategist authors Code Anatomy inline, harvester owns causal challenge) |
 | D7 | Access Audit | `vigolium-audit:access-auditor` (single agent) |
-| D8 | Review Panel + Inline Taint/Variant + FP Elimination | Chamber staged rounds: `vigolium-audit:review-adjudicator` + `vigolium-audit:attack-designer` (Ideator also reasons cross-service taint over `cross-service-edges.json`), then `vigolium-audit:flow-tracer` (Code Tracer also runs the inline same-pattern variant search), then `vigolium-audit:red-challenger`; then inline FP tail — Stage 1 fp-check, Stage 2 `vigolium-audit:independent-verifier` CRITICAL only (batched ≤3), Stage 3 `vigolium-audit:finding-grader` (batched ≤3) |
+| D8 | Review Panel + Inline Taint/Variant + FP Elimination | Chamber staged rounds: `vigolium-audit:review-adjudicator` + `vigolium-audit:attack-designer` (Ideator also reasons cross-service taint over `cross-service-edges.json`), then `vigolium-audit:flow-tracer` (Code Tracer also runs the inline same-pattern variant search), then `vigolium-audit:red-challenger`; then inline FP tail — Stage 1 fp-check, Stage 2 `vigolium-audit:independent-verifier` CRITICAL only (batched ≤`$VIGOLIUM_AUDIT_MAX_AGENTS`), Stage 3 `vigolium-audit:finding-grader` (batched ≤`$VIGOLIUM_AUDIT_MAX_AGENTS`) |
 | D9 | Intent Reconciliation | `vigolium-audit:context-reviewer` (single agent, AUDIT CONTRACT; reconciles VALID drafts against documented intent, reuses `Triage-Priority: skip`; skip-and-continue) |
-| D10 | PoC Authoring | consolidate (routes triage-skip / intent-skip → `findings-theoretical/`) → `vigolium-audit:poc-author` per finding (batched ≤3) → `partition_findings.py` (demote non-`executed` → `findings-theoretical/`) |
-| D11 | Finding Finalize | `vigolium-audit:finding-writer` per finding over BOTH `vigolium-results/findings/` and `vigolium-results/findings-theoretical/` (batched ≤3) — authors nine-section `report.md`; gate: every finding in both buckets has non-empty `report.md` |
+| D10 | PoC Authoring | consolidate (routes triage-skip / intent-skip → `findings-theoretical/`) → `vigolium-audit:poc-author` per finding (batched ≤`$VIGOLIUM_AUDIT_MAX_AGENTS`) → `partition_findings.py` (demote non-`executed` → `findings-theoretical/`) |
+| D11 | Finding Finalize | `vigolium-audit:finding-writer` per finding over BOTH `vigolium-results/findings/` and `vigolium-results/findings-theoretical/` (batched ≤`$VIGOLIUM_AUDIT_MAX_AGENTS`) — authors nine-section `report.md`; gate: every finding in both buckets has non-empty `report.md` |
 | D12 | Report Compose | `vigolium-audit:report-composer` — produces `vigolium-results/final-audit-report.md` |
 
 ---

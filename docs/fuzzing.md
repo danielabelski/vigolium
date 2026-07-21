@@ -59,14 +59,14 @@ Classes come from the shared `pkg/payloads` catalog (the same set behind the JS
 
 ## Anomaly gating
 
-Matchers **keep** a response (OR across categories; empty = keep all); filters
+Matchers **keep** a response (OR across categories; empty = keep all); excludes
 **drop** it (OR):
 
 ```
---match-status-code 200,301   --match-size N   --match-words N   --match-lines N
+--match-status-code 200,301   --match-size N    --match-words N    --match-lines N
 --match-regex <re>            --match-time <ms>
---filter-status-code 404      --filter-size N  --filter-words N  --filter-lines N
---filter-regex <re>           --filter-time <ms>
+--exclude-status-code 404     --exclude-size N  --exclude-words N  --exclude-lines N
+--exclude-regex <re>          --exclude-time <ms>
 ```
 
 `--match-status-code all` keeps every status. **Auto-calibration** is on by default: `fuzz`
@@ -118,7 +118,7 @@ gating. Network policy honors `HTTP_PROXY`/`HTTPS_PROXY` (route through Burp).
 vigolium fuzz 'https://acme.test/item?id=FUZZ' --class sqli --match-status-code 500
 
 # One exact point, custom wordlist, drop 404s (auto-calibrated)
-vigolium fuzz -i req.txt --point URL_PARAM:id -w /list/sqli.txt --filter-status-code 404
+vigolium fuzz -i req.txt --point URL_PARAM:id -w /list/sqli.txt --exclude-status-code 404
 
 # Content discovery on a path segment
 vigolium fuzz 'https://acme.test/FUZZ' -w dir-short --match-status-code 200,301,403
@@ -135,8 +135,9 @@ vigolium fuzz 'https://acme.test/item?id=FUZZ' --class sqli,xss --match-status-c
 
 ## Relationship to `replay`
 
-`replay` is relay + single-payload confirmation (diff baseline vs one mutated
-send); `fuzz` is payload/wordlist-scale fuzzing with anomaly gating. `replay -m`
-still works for one-offs but prints a nudge toward `fuzz`. Both share the same
-`pkg/replay` send library; the agent's in-process `replay_request` tool is
-unchanged.
+`replay` re-sends a request and diffs baseline vs replay (including bulk
+pattern-search re-send of stored traffic, and exact-byte `--raw-request`
+overrides); `fuzz` is payload/wordlist-scale fuzzing with anomaly gating. All
+payload / insertion-point fuzzing lives in `fuzz` — `replay` has no `--mutate`
+flag. Both share the same `pkg/replay` send library; the agent's in-process
+`replay_request` tool still supports mutations and is unchanged.
