@@ -207,6 +207,14 @@ type ScanContext struct {
 	decoyOnce   sync.Once
 	decoyCache  *lru.Cache[string, *decoyResult]
 	decoyFlight singleflight.Group
+
+	// Endpoint-volatility verdict cache: whether a host answers the SAME
+	// unmodified request with different pages is a property of the record, so the
+	// sampling round-trips are paid once per observed record and reused by every
+	// differential module that gates on it. See EndpointVolatile.
+	stabilityOnce   sync.Once
+	stabilityCache  *lru.Cache[string, bool]
+	stabilityFlight singleflight.Group
 }
 
 func (sc *ScanContext) cookiePolicies() *CookiePolicyRegistry {

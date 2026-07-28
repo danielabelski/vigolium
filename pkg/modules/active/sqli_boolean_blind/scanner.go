@@ -202,6 +202,19 @@ ipScan:
 			}
 
 			if result != nil {
+				// Last gate: the whole differential above assumes the endpoint is a
+				// function of the request. On a host that round-robins between
+				// mismatched backends the same unmodified `GET /` returns two
+				// different pages, so TRUE-vs-FALSE, each-vs-baseline, and every
+				// single-retry stability check reduce to coin flips that the scan's
+				// payload × insertion-point fan-out will eventually line up. Prove
+				// determinism from the unmodified request before reporting — and
+				// discard the request's earlier results too, since they rode on the
+				// same broken assumption. Memoized per record, so this costs nothing
+				// on the requests that never reach a candidate.
+				if modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
+					return nil, nil
+				}
 				result.URL = urlx.String()
 				results = append(results, result)
 				continue ipScan
@@ -223,6 +236,12 @@ ipScan:
 			continue
 		}
 		if hpp != nil {
+			// Same endpoint-determinism gate as the direct differential above: HPP
+			// only changes how the payload is delivered, so it inherits the same
+			// coin-flip failure mode on a non-deterministic endpoint.
+			if modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
+				return nil, nil
+			}
 			hpp.URL = urlx.String()
 			results = append(results, hpp)
 			continue ipScan

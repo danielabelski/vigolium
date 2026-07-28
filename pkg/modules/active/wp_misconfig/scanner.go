@@ -285,6 +285,18 @@ func (m *Module) probeFile(
 		return nil
 	}
 
+	// Endpoint-determinism gate. Both catch-all guards above compare this probe
+	// against a SINGLE control fetch, so they are decided by a coin flip on a host
+	// that round-robins between mismatched backends: the control lands on the other
+	// backend, the bodies differ, and the wildcard shell is declared "not a soft
+	// 404" even though every path on the host returns one of the same two pages.
+	// That is how a parked pool earned a Critical WordPress-installer finding off a
+	// marker in an Apache default page. Memoized per record, so the probe sweep
+	// above is unaffected.
+	if modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
+		return nil
+	}
+
 	urlx, _ := ctx.URL()
 	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 

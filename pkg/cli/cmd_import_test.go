@@ -54,6 +54,24 @@ func TestGatherImportSources(t *testing.T) {
 		}
 	})
 
+	t.Run("glob with ~ resolves to home", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		for _, name := range []string{"home-a.sqlite", "home-b.sqlite"} {
+			if err := os.WriteFile(filepath.Join(home, name), []byte("x"), 0o644); err != nil {
+				t.Fatalf("write %s: %v", name, err)
+			}
+		}
+		got, err := gatherImportSources(nil, "~/home-*.sqlite")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{filepath.Join(home, "home-a.sqlite"), filepath.Join(home, "home-b.sqlite")}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+
 	t.Run("gcs alias normalized", func(t *testing.T) {
 		got, err := gatherImportSources([]string{"gcs://proj/key.sqlite"}, "")
 		if err != nil {

@@ -46,7 +46,7 @@ import {
   resolveKnowledgeBaseInput,
   type ResolvedKnowledgeBase,
 } from "../engine/knowledge-base.js";
-import { parsePositiveUsd, statusArrow } from "./util.js";
+import { parseCloneDepth, parsePositiveUsd, statusArrow } from "./util.js";
 import { resolveModel } from "./run-models.js";
 import { runInteractive } from "./run-interactive.js";
 import {
@@ -106,6 +106,21 @@ export async function runCommand(opts: RunOptions): Promise<void> {
     }
   }
 
+  // --clone-depth: shallow-clone depth for a remote --target (0/"full" = full
+  // history). Validate up front so a typo fails fast even though it only
+  // applies to remote URL targets (no-op for local paths).
+  let cloneDepth: number | undefined;
+  if (opts.cloneDepth !== undefined) {
+    const parsed = parseCloneDepth(opts.cloneDepth);
+    if (parsed === null) {
+      fail(
+        `--clone-depth must be a non-negative integer, or 0/"full" for full history (got ${JSON.stringify(opts.cloneDepth)})`,
+      );
+    } else {
+      cloneDepth = parsed;
+    }
+  }
+
   // --target / --source: when it's a remote git URL (https://github.com/...,
   // https://gitlab.com/..., git@host:..., etc.), clone it into
   // ./<repo-slug>/ under the current working directory and continue against
@@ -123,7 +138,10 @@ export async function runCommand(opts: RunOptions): Promise<void> {
       fail(`--resume is incompatible with a remote --target (a fresh clone has no resume state).`);
     }
     try {
-      const cloned = cloneRemoteTarget(opts.target);
+      const cloned = cloneRemoteTarget(
+        opts.target,
+        cloneDepth !== undefined ? { depth: cloneDepth } : {},
+      );
       opts.target = cloned.clonedTargetDir;
       if (!json) console.log(chalk.blue("[clone]") + ` ${cloned.summary}`);
     } catch (err) {

@@ -85,6 +85,16 @@ func (m *Module) ScanPerRequest(
 	results = append(results, probePaths(ctx, httpClient, baseline)...)
 	results = append(results, probeDebugParams(ctx, httpClient, baseline)...)
 
+	// Every probe verdict is a diff against that one baseline, so none of them mean
+	// anything on an endpoint that answers the SAME unmodified request two
+	// different ways — a host round-robining between mismatched backends (a parked
+	// pool serving either a 5.9 KB or an 11.3 KB Apache default page) makes every
+	// probe "diverge". Checked only once a probe has diverged, and memoized per
+	// record, so the probing above is unaffected.
+	if len(results) > 0 && modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
+		return nil, nil
+	}
+
 	// Collapse every probe that diverged for this endpoint into ONE finding so the
 	// run writes a single http_record instead of one per probe (the rest ride along
 	// as inline AdditionalEvidence) — keeps probe traffic from flooding the table.
@@ -134,6 +144,12 @@ func (m *Module) ScanPerInsertionPoint(
 
 	// Per-char param fuzzing
 	results = append(results, probeParamFuzz(ctx, ip, httpClient, baseline)...)
+
+	// Same endpoint-determinism gate as ScanPerRequest: a diff-only verdict is not
+	// evidence on a non-deterministic endpoint.
+	if len(results) > 0 && modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
+		return nil, nil
+	}
 
 	// Collapse to a single finding (one http_record) per insertion point; the other
 	// diverging char/polyglot probes become inline AdditionalEvidence.

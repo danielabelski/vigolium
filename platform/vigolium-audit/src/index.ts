@@ -148,8 +148,9 @@ const runCmd = cli
   .option("--mode <mode>", "Audit mode (lite|balanced|deep|knowledge-base|diff|confirm|merge|revisit|reinvest|longshot|refresh|resume). 'resume' is an alias for `vigolium-audit resume`: auto-detect the latest non-complete audit and continue it.")
   .option("--modes <list>", "Run multiple modes in sequence (comma-separated, e.g. deep,refresh,confirm). Mutually exclusive with --mode. Stops on first non-complete mode; --max-cost is an aggregate cap.")
   .option("--model <model>", "Model name forwarded to the agent runtime. Defaults to the agent's own configured model; set this flag or the VIGOLIUM_AUDIT_MODEL env var to override.")
-  .option("--target <path-or-url>", "Target directory, or a remote git URL (https://github.com/..., https://gitlab.com/..., git@host:owner/repo, git://, ssh://). A URL is cloned with --depth=1 into ./<owner-repo>/ under the current working directory and used as the audit target; an existing same-remote checkout there is reused in place.", { default: "." })
+  .option("--target <path-or-url>", "Target directory, or a remote git URL (https://github.com/..., https://gitlab.com/..., git@host:owner/repo, git://, ssh://). A URL is shallow-cloned into ./<owner-repo>/ under the current working directory and used as the audit target; an existing same-remote checkout there is reused in place. Clone depth is set by --clone-depth.", { default: "." })
   .option("--source <path-or-url>", "Alias of --target (parity with `vigolium agent audit --source`); accepts the same path or remote git URL forms.")
+  .option("--clone-depth <n>", "When --target is a remote git URL, the shallow-clone depth (git clone --depth). Pass 0 or 'full' to clone full history (unshallow). No-op for local-path targets. Default: 10.")
   .option("-i, --interactive", "Enable Ink TUI (auto-disabled when stdout is not a TTY)")
   .option("--tmux", "Interactive runs (-i): launch the agent handoff command inside a detached tmux session and stream its output to stdout (attach with `tmux attach -t <session>`). Requires tmux on PATH.")
   .option("--agent-binary <path>", "Interactive runs (-i): path or command name of the agent binary to exec (e.g. a wrapper like 'cc'/'cw' that pre-loads env). Overrides auto-detection. Leading ~/ is expanded; a bare name is resolved via PATH.")
@@ -603,7 +604,9 @@ cli.version(pkg.version);
 // Unknown subcommand (e.g. `vigolium-audit something wrong`). cac emits
 // `command:*` when there's a positional arg but no command matched; without a
 // listener it would exit silently. Guide the user to `vigolium-audit run` and exit non-zero.
-cli.on("command:*", () => {
+// cac 7 replaced the EventEmitter `.on()` API with an `EventTarget`, so we
+// register via `addEventListener` (the CustomEvent detail is unused here).
+cli.addEventListener("command:*", () => {
   printUnknownCommand(String(cli.args[0] ?? ""));
   process.exit(1);
 });

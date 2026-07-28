@@ -127,7 +127,7 @@ func (m *Module) ScanPerInsertionPoint(
 		if isUUIDv1(paramValue) {
 			neighbors := generateUUIDv1Neighbors(paramValue)
 			for _, neighbor := range neighbors {
-				result, err := m.tryPredictedID(ctx, ip, httpClient, urlx.String(), paramName, neighbor, baselineBody, baselineStatus, "UUIDv1 time-neighbor")
+				result, err := m.tryPredictedID(ctx, ip, httpClient, scanCtx, urlx.String(), paramName, neighbor, baselineBody, baselineStatus, "UUIDv1 time-neighbor")
 				if err != nil {
 					if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 						return results, nil
@@ -151,7 +151,7 @@ func (m *Module) ScanPerInsertionPoint(
 		}
 		for _, delta := range []int64{-1, 1} {
 			neighbor := strconv.FormatInt(numVal+delta, 10)
-			result, tryErr := m.tryPredictedID(ctx, ip, httpClient, urlx.String(), paramName, neighbor, baselineBody, baselineStatus, "sequential integer")
+			result, tryErr := m.tryPredictedID(ctx, ip, httpClient, scanCtx, urlx.String(), paramName, neighbor, baselineBody, baselineStatus, "sequential integer")
 			if tryErr != nil {
 				if errors.Is(tryErr, hosterrors.ErrUnresponsiveHost) {
 					return results, nil
@@ -174,6 +174,7 @@ func (m *Module) tryPredictedID(
 	ctx *httpmsg.HttpRequestResponse,
 	ip httpmsg.InsertionPoint,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	urlStr string,
 	paramName string,
 	predictedID string,
@@ -243,6 +244,12 @@ func (m *Module) tryPredictedID(
 			modkit.CrossIDConfig{},
 		)
 		if verdict.Ran && !verdict.Trustworthy {
+			return nil, nil
+		}
+
+		// Same endpoint-determinism gate as idor_detection.probeNeighbor: the
+		// SelfRounds envelope above is too few samples to see a bimodal endpoint.
+		if modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
 			return nil, nil
 		}
 

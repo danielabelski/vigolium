@@ -50,6 +50,13 @@ export interface RunOptions {
   target: string;
   /** Alias of `target` (mirrors `vigolium agent audit --source`); folded into `target` at the CLI boundary. Accepts the same path or remote git URL forms. */
   source?: string;
+  /**
+   * Shallow-clone depth used when `target` is a remote git URL. A non-negative
+   * integer (`--clone-depth 50`) or the sentinels `0` / `"full"` for a
+   * full-history clone. No-op for local-path targets. Defaults to a depth of
+   * 10. Parsed and validated at the CLI boundary.
+   */
+  cloneDepth?: string | number;
   interactive?: boolean;
   /**
    * Interactive runs (`-i`) only: launch the underlying agent handoff command

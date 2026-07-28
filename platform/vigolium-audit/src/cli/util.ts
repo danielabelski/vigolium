@@ -46,6 +46,21 @@ export function parsePositiveUsd(raw: number | string): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+/**
+ * Parse `--clone-depth`. Accepts a non-negative integer (the shallow-clone
+ * depth) or the sentinels `0` / `"full"` / `"unshallow"` / `"all"`, all of
+ * which mean a full-history clone and normalize to `0`. Returns null for
+ * anything else (negatives, non-integers, junk).
+ */
+export function parseCloneDepth(raw: number | string): number | null {
+  if (typeof raw === "string") {
+    const s = raw.trim().toLowerCase();
+    if (s === "full" || s === "unshallow" || s === "all") return 0;
+  }
+  const n = typeof raw === "number" ? raw : Number(raw.toString().trim());
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
 const STATUS_ARROW_COLORS: Record<string, (s: string) => string> = {
   Platform: chalk.cyan,
   Adapter: chalk.magenta,

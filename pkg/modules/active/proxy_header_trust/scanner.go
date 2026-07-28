@@ -139,7 +139,7 @@ func (m *Module) ScanPerRequest(
 	}
 
 	// Test 3: X-Forwarded-For IP trust bypass.
-	if result := m.testForwardedFor(ctx, httpClient, baselineStatus, baselineBody, urlx.String(), baselineEvidence); result != nil {
+	if result := m.testForwardedFor(ctx, httpClient, scanCtx, baselineStatus, baselineBody, urlx.String(), baselineEvidence); result != nil {
 		results = append(results, result)
 	}
 
@@ -347,6 +347,7 @@ func (m *Module) testForwardedProto(
 func (m *Module) testForwardedFor(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	baselineStatus int,
 	baselineBody string,
 	targetURL string,
@@ -433,7 +434,7 @@ func (m *Module) testForwardedFor(
 	// Skip entirely when either side is a WAF/denied page — that size is noise, and
 	// a WAF reacting to the spoofed header is the opposite of trusting it.
 	if !isAccessDenied(baselineStatus) && !isAccessDenied(probeStatus) && len(baselineBody) > 0 {
-		if shift, confirmationEvidence, ok := m.confirmForwardedForSizeShift(ctx, httpClient, len(baselineBody), len(probeBody)); ok {
+		if shift, confirmationEvidence, ok := m.confirmForwardedForSizeShift(ctx, httpClient, scanCtx, len(baselineBody), len(probeBody)); ok {
 			evidence := append(append([]string{}, baselineEvidence...), confirmationEvidence...)
 			return &output.ResultEvent{
 				ModuleID:           ModuleID,
@@ -612,6 +613,7 @@ func rootGetRaw(ctx *httpmsg.HttpRequestResponse, name, value string) ([]byte, b
 func (m *Module) confirmForwardedForSizeShift(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	baselineLen, probeLen int,
 ) (string, []string, bool) {
 	control, ok := m.captureFetch(ctx, httpClient, "", "")
@@ -627,6 +629,13 @@ func (m *Module) confirmForwardedForSizeShift(
 	// Attribute the shift to the header only when both spoofed-IP samples land on
 	// the same side of, and clear of, the no-header band by more than its variance.
 	if _, ok := modkit.SizeShiftGap(baselineLen, controlLen, probeLen, probe2Len); !ok {
+		return "", nil, false
+	}
+
+	// Those bands are two samples each, so they only describe natural variance on an
+	// endpoint that is a function of the request (see SizeShiftGap). Last gate, after
+	// the free band check has rejected the common case.
+	if modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
 		return "", nil, false
 	}
 

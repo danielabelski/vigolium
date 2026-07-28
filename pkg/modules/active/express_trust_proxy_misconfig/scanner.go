@@ -167,7 +167,7 @@ func (m *Module) ScanPerRequest(
 			finding = checkHostInjection(probeBody, probeHeaders, probeLocation)
 
 		case "X-Forwarded-For":
-			finding = m.checkIPBypass(ctx, httpClient, modifiedRaw, baselineStatus, probeStatus, baselineBody, probeBody)
+			finding = m.checkIPBypass(ctx, httpClient, scanCtx, modifiedRaw, baselineStatus, probeStatus, baselineBody, probeBody)
 
 		case "X-Forwarded-Port":
 			finding = checkPortInjection(probeBody, probeLocation)
@@ -491,6 +491,7 @@ func checkHostInjection(
 func (m *Module) checkIPBypass(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	modifiedRaw []byte,
 	baselineStatus, probeStatus int,
 	baselineBody, probeBody string,
@@ -509,7 +510,7 @@ func (m *Module) checkIPBypass(
 	// only when it reproducibly exceeds the page's natural jitter. Skip when either
 	// side is a WAF/denied page (that size is noise, not the app's content).
 	if !isAccessDenied(baselineStatus) && !isAccessDenied(probeStatus) && len(baselineBody) > 0 {
-		if shift, ok := m.confirmSizeShift(ctx, httpClient, modifiedRaw, len(baselineBody), len(probeBody)); ok {
+		if shift, ok := m.confirmSizeShift(ctx, httpClient, scanCtx, modifiedRaw, len(baselineBody), len(probeBody)); ok {
 			return shift
 		}
 	}
@@ -545,6 +546,7 @@ func (m *Module) confirmIPBypass(ctx *httpmsg.HttpRequestResponse, httpClient *h
 func (m *Module) confirmSizeShift(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	modifiedRaw []byte,
 	baselineLen, probeLen int,
 ) (string, bool) {
@@ -560,6 +562,13 @@ func (m *Module) confirmSizeShift(
 	// Attribute the shift to the header only when both spoofed-IP samples land on
 	// the same side of, and clear of, the no-header band by more than its variance.
 	if _, ok := modkit.SizeShiftGap(baselineLen, controlLen, probeLen, probe2Len); !ok {
+		return "", false
+	}
+
+	// Those bands are two samples each, so they only describe natural variance on an
+	// endpoint that is a function of the request (see SizeShiftGap). Last gate, after
+	// the free band check has rejected the common case.
+	if modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
 		return "", false
 	}
 

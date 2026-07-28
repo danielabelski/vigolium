@@ -101,7 +101,16 @@ var wpProbes = []wpProbe{
 		// Require installer-page tokens, not the bare "WordPress" brand string (every
 		// WP page carries it). The "Already Installed" screen is the same endpoint
 		// returning a benign 200, so anti-marker it out.
-		markers:     []string{"wp-install", "installation"},
+		//
+		// "installation" was removed: markers are matched case-sensitively against the
+		// raw body, so the lowercase word never matched WordPress's own
+		// "WordPress &rsaquo; Installation" title — it only ever matched incidental
+		// English prose, and it awarded Critical for it (an Apache "after installation
+		// on Ubuntu systems" default page on a host that 200s every path). The
+		// replacements are unique to install.php and cover both of its steps: the
+		// installer stylesheet is loaded by the language chooser AND the setup form,
+		// and weblog_title is the setup form's site-title field.
+		markers:     []string{"wp-install", "weblog_title", "wp-admin/css/install"},
 		antiMarkers: []string{"Already Installed", "already installed", "already been installed"},
 		sev:         severity.Critical,
 		desc:        "WordPress installer endpoint accessible — site may be in an unfinished installation state",

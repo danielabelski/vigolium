@@ -4,10 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-A **`replay` refocus**: bulk-selection filters now track `vigolium traffic` so you
-can search a slice of stored traffic and re-send it (to a proxy/Burp or straight to
-the wire) in one command, and payload fuzzing is consolidated into `vigolium fuzz`
-by removing `replay`'s `--mutate`. No module changes.
+## [v0.3.5] - 2026-07-28
+
+A **false-positive hardening** release. Hosts behind a load balancer that
+round-robins between mismatched backends answer the *same* request with two
+different pages, which breaks every body-differential oracle in the scanner; a new
+shared gate proves an endpoint is a function of the request before any diff-based
+finding is reported. Also ships the **`replay` refocus**: bulk-selection filters now
+track `vigolium traffic`, and payload fuzzing is consolidated into `vigolium fuzz`.
+Registry stays at 201 active + 116 passive.
+
+### Fixed
+
+- **False positives on round-robin backend pools, across 10 modules.** Parked hosts serving one of two Apache default pages at random produced High findings with no application behind them — blind SQLi, path normalization, IDOR, header-trust size shifts, and several diff-based Info leads. New `modkit.EndpointVolatile` re-samples the unmodified request and drops the finding when the endpoint isn't deterministic.
+- **`dashboard-exposure` reported any JSON `/version` endpoint as vLLM at High.** The signature matched on the mere presence of `"version"` — a near-universal health-endpoint convention — and flagged unrelated services. It now requires vLLM's exact response shape and confirms via the vLLM-specific `/v1/models`.
+- **`wp-misconfig` awarded Critical for the word "installation".** The installer probe accepted that bare token, so an Apache default page mentioning an installation read as an exposed WordPress installer. Replaced with installer-specific markers.
 
 ### Added
 
@@ -16,6 +27,11 @@ by removing `replay`'s `--mutate`. No module changes.
 ### Removed
 
 - **`vigolium replay --mutate`/`-m` removed.** Payload / insertion-point fuzzing now lives entirely in `vigolium fuzz` (wordlists, `--class`, matchers, auto-calibration) — `replay` is for re-sending and confirming. Send exact bytes verbatim with `--raw-request`/`--raw-request-file`. The `pkg/replay` library (exported `ParseMutationFlag`, `Options.Mutations`) and the agent's in-process `replay_request` tool are unchanged and still apply mutations.
+
+### Internal
+
+- **`modkit.EndpointVolatile` is the shared determinism primitive** any future differential oracle should gate on. It is memoized per record and runs only when a module is about to report, so wiring it into ten modules costs about the same as one.
+- **`modtest.RoundRobinHandler`** gives module tests a one-line mismatched-backend pool, replacing five per-package copies of the same fixture.
 
 ## [v0.3.4] - 2026-07-20
 

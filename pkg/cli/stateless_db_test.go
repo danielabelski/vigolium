@@ -54,6 +54,56 @@ func TestOpenGlobDBMergesMatches(t *testing.T) {
 	}
 }
 
+// A --glob-db pattern must be quoted to survive the shell, which also suppresses
+// the shell's tilde expansion — so the leading ~ reaches openGlobDB literally and
+// has to be resolved here or filepath.Glob matches nothing.
+func TestOpenGlobDBExpandsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeGlobFixture(t, filepath.Join(home, "stryk-a.jsonl"), "a.example", "hash-a", "xss-reflected")
+	writeGlobFixture(t, filepath.Join(home, "stryk-b.jsonl"), "b.example", "hash-b", "sqli-error")
+
+	defer clicommon.ResetDBCache()
+
+	db, err := openGlobDB("~/stryk-*.jsonl", globDBSkipSet{})
+	if err != nil {
+		t.Fatalf("openGlobDB with ~ pattern: %v", err)
+	}
+	var findings []*database.Finding
+	if err := db.NewSelect().Model(&findings).Scan(context.Background()); err != nil {
+		t.Fatalf("scan findings: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings merged from the ~ glob, got %d", len(findings))
+	}
+}
+
+func TestExpandUserHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare tilde", "~", home},
+		{"tilde slash pattern", "~/scans/*.sqlite", filepath.Join(home, "scans", "*.sqlite")},
+		{"absolute untouched", "/tmp/scans/*.sqlite", "/tmp/scans/*.sqlite"},
+		{"relative untouched", "scans/*.sqlite", "scans/*.sqlite"},
+		// ~user is not resolved, and a mid-path ~ is a legitimate filename char.
+		{"tilde user untouched", "~other/scans/*.sqlite", "~other/scans/*.sqlite"},
+		{"embedded tilde untouched", "scans/~backup/*.sqlite", "scans/~backup/*.sqlite"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := expandUserHome(tc.in); got != tc.want {
+				t.Fatalf("expandUserHome(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestOpenGlobDBErrors(t *testing.T) {
 	t.Run("no match", func(t *testing.T) {
 		defer clicommon.ResetDBCache()

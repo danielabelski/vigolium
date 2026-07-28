@@ -330,6 +330,15 @@ func absInt(n int) int {
 // ONE side of, and clear of, the no-payload band — and whether that gap exceeds
 // the variance threshold max(30% of baselineLen, 256 bytes). When the two bands
 // overlap (jitter) or the gap is within the threshold, gap is 0 and ok is false.
+//
+// Two samples per band describe "natural variance" only on an endpoint that is a
+// function of the request. A host round-robining between mismatched backends has
+// a BIMODAL size distribution for the unmodified request alone — a parked pool
+// answering `GET /` with either a 5.9 KB or an 11.3 KB Apache default page — so
+// the two bands land on opposite modes often enough (always, against a strict
+// round robin) for this to report a shift the payload had nothing to do with.
+// Callers must therefore pair an ok verdict with EndpointVolatile; run it AFTER
+// this function, which is free and rejects the common case.
 func SizeShiftGap(baselineLen, controlLen, probeLen, probe2Len int) (gap int, ok bool) {
 	noHdrMin, noHdrMax := min(baselineLen, controlLen), max(baselineLen, controlLen)
 	probeMin, probeMax := min(probeLen, probe2Len), max(probeLen, probe2Len)

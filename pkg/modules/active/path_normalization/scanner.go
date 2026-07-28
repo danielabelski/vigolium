@@ -346,6 +346,22 @@ func (m *Module) ScanPerRequest(
 					}
 				}
 
+				// Endpoint-determinism gate. Every guard above is pairwise — backed
+				// vs baseline, vs root, vs nonExistent, vs a re-fetch — and each
+				// reference is a single sample. On a host that round-robins between
+				// mismatched backends the same unmodified request returns two
+				// different pages, so "the traversal reached a materially different
+				// resource than the clean path" is satisfied by the load balancer
+				// alone: the observed false positive was a parked pool answering
+				// `GET /` with either a Red Hat or an Ubuntu Apache default page.
+				// The root-resolution guard above cannot catch it either, since it is
+				// skipped outright when the scanned path already IS "/". Prove the
+				// endpoint is a function of the request before reporting; memoized
+				// per record, so only candidate-producing hosts pay for it.
+				if modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
+					return
+				}
+
 				ev := m.buildFinding(urlx, payload, fuzzedPath, backedOffPath, baseline, fuzz, backed, confirm, accessUnlock)
 
 				mutex.Lock()

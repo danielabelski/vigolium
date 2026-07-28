@@ -227,12 +227,14 @@ function sessionCall(callId: string, name: string): string {
 function emptyUsage(): {
   input_tokens: number;
   cached_input_tokens: number;
+  cache_write_input_tokens: number;
   output_tokens: number;
   reasoning_output_tokens: number;
 } {
   return {
     input_tokens: 0,
     cached_input_tokens: 0,
+    cache_write_input_tokens: 0,
     output_tokens: 0,
     reasoning_output_tokens: 0,
   };

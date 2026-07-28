@@ -131,7 +131,7 @@ func (m *Module) ScanPerInsertionPoint(
 			continue
 		}
 
-		result, err := m.testPayload(ctx, ip, httpClient, payload, baselineBody, baselineStatus)
+		result, err := m.testPayload(ctx, ip, httpClient, scanCtx, payload, baselineBody, baselineStatus)
 		if err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 				return nil, nil
@@ -160,6 +160,7 @@ func (m *Module) testPayload(
 	ctx *httpmsg.HttpRequestResponse,
 	ip httpmsg.InsertionPoint,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	payload nosqliPayload,
 	baselineBody string,
 	baselineStatus int,
@@ -245,9 +246,19 @@ func (m *Module) testPayload(
 		// Beyond the captured-baseline delta, confirmSizeIncrease must reproduce
 		// the growth against a FRESH clean fetch AND find the payload body
 		// structurally divergent from it.
+		//
+		// The clean/payload size comparison — including confirmSizeIncrease's fresh
+		// re-fetch — assumes the endpoint is a function of the request. A host
+		// round-robining between mismatched backends serves a small and a large page
+		// for the SAME request (a parked pool answering `GET /` with either a 5.9 KB
+		// or an 11.3 KB Apache default page), so "the operator grew the body" is the
+		// load balancer talking. The boolean-differential path above already defends
+		// itself with interleaved neutral-control samples; this size path had no
+		// equivalent, and it is what fired on such a pool.
 		if baselineStatus >= 200 && baselineStatus < 300 && len(baselineBody) > 0 &&
 			analyzeSizeIncrease(len(baselineBody), len(body)) &&
-			m.confirmSizeIncrease(ctx, ip, httpClient, fuzzedValue, body) {
+			m.confirmSizeIncrease(ctx, ip, httpClient, fuzzedValue, body) &&
+			!modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
 			detected = true
 			detectionDesc = fmt.Sprintf("Data exfiltration: body size increased from %d to %d bytes", len(baselineBody), len(body))
 		}

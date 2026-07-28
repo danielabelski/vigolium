@@ -127,6 +127,14 @@ func (m *Module) ScanPerInsertionPoint(
 		return nil, nil
 	}
 
+	// Same gate as smart_behavior_detection: every signal in that report is a
+	// response diff, so a non-deterministic endpoint makes the break and escape
+	// probes diverge on every metric the differ tracks — here reported as a
+	// confidently matched template engine.
+	if modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
+		return nil, nil
+	}
+
 	zap.L().Info("SSTI: Found issues",
 		zap.String("param", paramName),
 		zap.Int("count", len(results)/2))

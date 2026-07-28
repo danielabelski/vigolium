@@ -123,7 +123,7 @@ func (m *Module) ScanPerInsertionPoint(
 
 	// Probe each neighbor
 	for _, neighborID := range neighbors {
-		result, err := m.probeNeighbor(ctx, ip, neighborID, httpClient, baseline, compareOpts, host, urlStr, classification)
+		result, err := m.probeNeighbor(ctx, ip, neighborID, httpClient, scanCtx, baseline, compareOpts, host, urlStr, classification)
 		if err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 				return nil, nil
@@ -216,6 +216,7 @@ func (m *Module) probeNeighbor(
 	ip httpmsg.InsertionPoint,
 	neighborID string,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	baseline *baselineSummary,
 	compareOpts authzutil.CompareOptions,
 	host string,
@@ -321,6 +322,19 @@ func (m *Module) probeNeighbor(
 		modkit.CrossIDConfig{Evidence: ev},
 	)
 	if idVerdict.Ran && !idVerdict.Trustworthy {
+		return nil, nil
+	}
+
+	// Endpoint-determinism gate. The cross-ID noise envelope above measures the
+	// endpoint's own variation from SelfRounds same-id refetches, which is the right
+	// shape but too few samples for a bimodal endpoint: a host round-robining
+	// between mismatched backends serves two different renderings of the SAME
+	// template for the SAME id, and when every refetch happens to land on the
+	// baseline's backend the envelope reads as deterministic and the changed-id
+	// difference looks like broken object-level authorization. Sampling the
+	// unmodified request harder settles it, and the verdict is memoized per record
+	// so it is paid once no matter how many ids this endpoint offers.
+	if modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
 		return nil, nil
 	}
 

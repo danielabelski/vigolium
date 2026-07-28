@@ -76,14 +76,17 @@ function makeAudit(overrides: Partial<AuditRecord>): AuditRecord {
 }
 
 describe("repoSlug", () => {
-  test("git@github.com:owner/repo.git → owner-repo", () => {
-    expect(repoSlug("git@github.com:owner/repo.git")).toBe("owner-repo");
+  test("git@github.com:owner/repo.git → owner--repo", () => {
+    expect(repoSlug("git@github.com:owner/repo.git")).toBe("owner--repo");
   });
-  test("https://github.com/owner/repo → owner-repo", () => {
-    expect(repoSlug("https://github.com/owner/repo")).toBe("owner-repo");
+  test("https://github.com/owner/repo → owner--repo", () => {
+    expect(repoSlug("https://github.com/owner/repo")).toBe("owner--repo");
   });
-  test("https://github.com/owner/repo.git → owner-repo", () => {
-    expect(repoSlug("https://github.com/owner/repo.git")).toBe("owner-repo");
+  test("https://github.com/owner/repo.git → owner--repo", () => {
+    expect(repoSlug("https://github.com/owner/repo.git")).toBe("owner--repo");
+  });
+  test("owner/repo boundary stays splittable when repo name has dashes", () => {
+    expect(repoSlug("https://github.com/google/osv-scanner")).toBe("google--osv-scanner");
   });
   test("plain local path → basename", () => {
     expect(repoSlug("/tmp/some-repo")).toBe("some-repo");

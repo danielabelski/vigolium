@@ -31,6 +31,18 @@ export interface CloneRemoteTargetResult {
   reused: boolean;
 }
 
+/** Default shallow-clone depth for a remote `--target`. Overridable via `--clone-depth`. */
+export const DEFAULT_CLONE_DEPTH = 10;
+
+export interface CloneRemoteTargetOptions {
+  /**
+   * Shallow-clone depth. A positive integer maps to `git clone --depth=<n>`;
+   * `0` requests a full-history clone (no `--depth`). Defaults to
+   * DEFAULT_CLONE_DEPTH when unset.
+   */
+  depth?: number;
+}
+
 /**
  * Clone a remote repo into `./<repo-slug>/` under the current working
  * directory. If the destination already exists and points at the same
@@ -40,8 +52,16 @@ export interface CloneRemoteTargetResult {
  *
  * Persistent clone — no cleanup hook. The user can rm -rf the slug
  * directory themselves once they're done.
+ *
+ * `options.depth` controls the shallow-clone depth: a positive integer is
+ * passed through as `--depth=<n>`, while `0` performs a full-history clone.
+ * Defaults to DEFAULT_CLONE_DEPTH.
  */
-export function cloneRemoteTarget(repository: string): CloneRemoteTargetResult {
+export function cloneRemoteTarget(
+  repository: string,
+  options: CloneRemoteTargetOptions = {},
+): CloneRemoteTargetResult {
+  const depth = options.depth ?? DEFAULT_CLONE_DEPTH;
   const cwd = process.cwd();
   const slug = repoSlug(repository);
   if (slug.length === 0) {
@@ -74,11 +94,14 @@ export function cloneRemoteTarget(repository: string): CloneRemoteTargetResult {
     mkdirSync(dest, { recursive: true });
   }
   // existing.kind === "empty" || "missing" → safe to clone in.
-  const r = spawnSync(
-    "git",
-    ["clone", "--depth=1", repository, dest],
-    { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
-  );
+  const cloneArgs =
+    depth > 0
+      ? ["clone", `--depth=${depth}`, repository, dest]
+      : ["clone", repository, dest];
+  const r = spawnSync("git", cloneArgs, {
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+  });
   if (r.status !== 0) {
     throw new Error(
       `git clone failed (exit ${r.status ?? "null"}): ${r.stderr.trim() || r.stdout.trim() || "(no output)"}`,
@@ -86,7 +109,10 @@ export function cloneRemoteTarget(repository: string): CloneRemoteTargetResult {
   }
   return {
     clonedTargetDir: dest,
-    summary: `cloned ${repository} → ${dest} (depth=1)`,
+    summary:
+      depth > 0
+        ? `cloned ${repository} → ${dest} (depth=${depth})`
+        : `cloned ${repository} → ${dest} (full history)`,
     reused: false,
   };
 }

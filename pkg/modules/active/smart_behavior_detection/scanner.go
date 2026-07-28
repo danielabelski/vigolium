@@ -166,6 +166,16 @@ func (m *Module) ScanPerInsertionPoint(
 		return nil, nil
 	}
 
+	// Every signal in that report is a response diff, so it means nothing on an
+	// endpoint that answers the SAME unmodified request two different ways: a host
+	// round-robining between mismatched backends (a parked pool serving either a
+	// 5.9 KB or an 11.3 KB Apache default page) makes the break and escape probes
+	// diverge on every metric the differ tracks. Checked only once a report exists,
+	// and memoized per record, so the probing above is unaffected.
+	if modkit.EndpointVolatile(scanCtx, ctx, httpClient) {
+		return nil, nil
+	}
+
 	zap.L().Info("SmartBehavior: Found issues",
 		zap.String("param", paramName),
 		zap.Int("count", len(results)/2))

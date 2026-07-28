@@ -442,8 +442,24 @@ var Catalog = []Product{
 		Tags: []string{"vllm", "ai", "llm", "dashboard"},
 		Ref:  "https://github.com/vllm-project/vllm",
 		Confirmers: []Confirmer{
-			{Path: "/version", Markers: [][]string{{`"version"`}},
-				Primary: true, UnauthLeak: true, LeakName: "version", VersionRe: `"version"\s*:\s*"([^"]+)"`},
+			// The OpenAI-compatible model list is the vLLM-UNIQUE endpoint: vLLM
+			// stamps every entry with owned_by "vllm" and a max_model_len that
+			// upstream OpenAI (and most other compatible servers) do not emit.
+			{Path: "/v1/models", Markers: [][]string{
+				{`"object":"list"`, `"object": "list"`},
+				{`"owned_by":"vllm"`, `"owned_by": "vllm"`, `"max_model_len"`},
+			},
+				Primary: true, UnauthLeak: true, LeakName: "served model list"},
+			// vLLM's /version returns EXACTLY {"version":"<v>"} and nothing else.
+			// Matching the whole-body SHAPE rather than the mere presence of a
+			// "version" key is what separates it from the ubiquitous microservice
+			// /version health endpoint — the false positive here reported a
+			// marketing-tracking service whose /version returns
+			// {"serviceName":"tracking","serviceVersion":{...},"asrVersion":{...}}
+			// as an unauthenticated vLLM deployment, at High severity, because that
+			// body happens to contain the substring "version".
+			{Path: "/version", BodyRe: `\A\s*\{\s*"version"\s*:\s*"[^"]+"\s*\}\s*\z`,
+				UnauthLeak: true, LeakName: "version", VersionRe: `"version"\s*:\s*"([^"]+)"`},
 		},
 	},
 	{

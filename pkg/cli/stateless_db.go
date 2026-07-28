@@ -81,6 +81,28 @@ func (s globDBSkipSet) skipRecordFileMap() bool {
 	return s.Records || s.RecordFileMap
 }
 
+// expandUserHome resolves a leading ~ (bare, or "~/…") in a path or glob pattern
+// to the current user's home directory, leaving everything else byte-for-byte
+// intact so glob metacharacters survive.
+//
+// It matters most for --glob-db: the pattern has to be single-quoted to keep the
+// shell from expanding the glob itself, which also suppresses the shell's tilde
+// expansion — so '~/scans/*.sqlite' arrives here literally, and filepath.Glob
+// has no notion of ~ and would match nothing. ~user is not resolved.
+func expandUserHome(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	return filepath.Join(home, p[2:])
+}
+
 // globDBSource is one --glob-db file and the findings id range it added.
 type globDBSource struct {
 	file      string
@@ -275,7 +297,7 @@ func loadStatelessJSONL(path string) (*database.DB, error) {
 // with a warning rather than aborting the whole read. Returns an error when the
 // pattern is invalid, matches nothing, or nothing could be loaded.
 func openGlobDB(pattern string, skip globDBSkipSet) (*database.DB, error) {
-	matches, err := filepath.Glob(pattern)
+	matches, err := filepath.Glob(expandUserHome(pattern))
 	if err != nil {
 		return nil, fmt.Errorf("invalid --glob-db pattern %q: %w", pattern, err)
 	}

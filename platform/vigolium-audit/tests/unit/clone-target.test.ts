@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { cloneRemoteTarget, isRemoteTargetUrl, normalizeRemote } from "../../src/cli/clone-target.js";
+import { parseCloneDepth } from "../../src/cli/util.js";
 
 describe("isRemoteTargetUrl", () => {
   test("https GitHub URL → remote", () => {
@@ -59,7 +60,7 @@ describe("normalizeRemote", () => {
   });
 });
 
-/** Init a bare "remote" repo we can clone from without network access. */
+/** Init a bare "remote" repo (3 commits) we can clone from without network access. */
 function makeBareRepo(): { url: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "vigolium-audit-clone-test-fixture-"));
   const work = join(root, "work");
@@ -68,14 +69,22 @@ function makeBareRepo(): { url: string; cleanup: () => void } {
   spawnSync("git", ["init", "-q", "-b", "main", work], { stdio: "ignore" });
   spawnSync("git", ["-C", work, "config", "user.email", "test@example.com"], { stdio: "ignore" });
   spawnSync("git", ["-C", work, "config", "user.name", "Test"], { stdio: "ignore" });
-  writeFileSync(join(work, "README.md"), "hello\n");
-  spawnSync("git", ["-C", work, "add", "."], { stdio: "ignore" });
-  spawnSync("git", ["-C", work, "commit", "-q", "-m", "init"], { stdio: "ignore" });
+  for (let i = 1; i <= 3; i++) {
+    writeFileSync(join(work, "README.md"), `hello ${i}\n`);
+    spawnSync("git", ["-C", work, "add", "."], { stdio: "ignore" });
+    spawnSync("git", ["-C", work, "commit", "-q", "-m", `commit ${i}`], { stdio: "ignore" });
+  }
   spawnSync("git", ["clone", "--bare", work, remote], { stdio: "ignore" });
   return {
     url: remote,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
+}
+
+/** Count commits reachable from HEAD in a checkout. */
+function commitCount(dir: string): number {
+  const r = spawnSync("git", ["-C", dir, "rev-list", "--count", "HEAD"], { encoding: "utf8" });
+  return Number(r.stdout.trim());
 }
 
 describe("cloneRemoteTarget", () => {
@@ -124,5 +133,83 @@ describe("cloneRemoteTarget", () => {
       rmSync(cwd, { recursive: true, force: true });
       fixture.cleanup();
     }
+  });
+
+  test("default clone is shallow (depth 10 reported in the summary)", () => {
+    const fixture = makeBareRepo();
+    const originalCwd = process.cwd();
+    process.chdir(mkdtempSync(join(tmpdir(), "vigolium-audit-clone-target-depth-")));
+    const cwd = process.cwd();
+    try {
+      const result = cloneRemoteTarget(fixture.url);
+      expect(result.summary).toMatch(/depth=10/);
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(cwd, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  test("explicit depth truncates history to that many commits", () => {
+    const fixture = makeBareRepo();
+    const originalCwd = process.cwd();
+    process.chdir(mkdtempSync(join(tmpdir(), "vigolium-audit-clone-target-depth1-")));
+    const cwd = process.cwd();
+    try {
+      // file:// forces the git-aware transport so --depth is honored; a plain
+      // local path would be hardlink-cloned and ignore --depth.
+      const result = cloneRemoteTarget(`file://${fixture.url}`, { depth: 1 });
+      expect(result.summary).toMatch(/depth=1\b/);
+      expect(commitCount(result.clonedTargetDir)).toBe(1);
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(cwd, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  test("depth 0 clones full history", () => {
+    const fixture = makeBareRepo();
+    const originalCwd = process.cwd();
+    process.chdir(mkdtempSync(join(tmpdir(), "vigolium-audit-clone-target-full-")));
+    const cwd = process.cwd();
+    try {
+      const result = cloneRemoteTarget(`file://${fixture.url}`, { depth: 0 });
+      expect(result.summary).toMatch(/full history/);
+      // The fixture has 3 commits; a full clone sees all of them.
+      expect(commitCount(result.clonedTargetDir)).toBe(3);
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(cwd, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+});
+
+describe("parseCloneDepth", () => {
+  test("positive integer string → number", () => {
+    expect(parseCloneDepth("50")).toBe(50);
+  });
+  test("numeric input passes through", () => {
+    expect(parseCloneDepth(25)).toBe(25);
+  });
+  test("0 → full clone sentinel", () => {
+    expect(parseCloneDepth("0")).toBe(0);
+  });
+  test('"full" → 0', () => {
+    expect(parseCloneDepth("full")).toBe(0);
+  });
+  test('"unshallow"/"all" (any case) → 0', () => {
+    expect(parseCloneDepth("Unshallow")).toBe(0);
+    expect(parseCloneDepth("ALL")).toBe(0);
+  });
+  test("negative → null", () => {
+    expect(parseCloneDepth("-5")).toBeNull();
+  });
+  test("non-integer → null", () => {
+    expect(parseCloneDepth("2.5")).toBeNull();
+  });
+  test("junk → null", () => {
+    expect(parseCloneDepth("deep")).toBeNull();
   });
 });

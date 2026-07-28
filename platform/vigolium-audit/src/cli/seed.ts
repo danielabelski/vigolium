@@ -158,8 +158,11 @@ function resolveCloneDestination(targetOverride: string | undefined, repository:
 }
 
 /**
- * Best-effort owner-repo slug pulled from common git URL forms. Falls back to
- * the URL's last path component, then "repo", so the result is always non-empty.
+ * Best-effort `owner--repo` slug pulled from common git URL forms. The owner
+ * and repo are joined with a double dash (`--`) so the org/repo boundary stays
+ * unambiguous even when the repo name itself contains single dashes
+ * (`google/osv-scanner` → `google--osv-scanner`). Falls back to the URL's last
+ * path component, then "repo", so the result is always non-empty.
  */
 export function repoSlug(repository: string): string {
   const trimmed = repository.trim().replace(/\.git$/, "");
@@ -168,9 +171,9 @@ export function repoSlug(repository: string): string {
     return tail.length > 0 ? tail : "repo";
   }
   const sshMatch = /:([^/]+)\/([^/]+)$/.exec(trimmed);
-  if (sshMatch) return `${sshMatch[1]}-${sshMatch[2]}`;
+  if (sshMatch) return `${sshMatch[1]}--${sshMatch[2]}`;
   const urlMatch = /\/([^/]+)\/([^/]+)$/.exec(trimmed);
-  if (urlMatch) return `${urlMatch[1]}-${urlMatch[2]}`;
+  if (urlMatch) return `${urlMatch[1]}--${urlMatch[2]}`;
   const tail = basename(trimmed);
   return tail.length > 0 ? tail : "repo";
 }
