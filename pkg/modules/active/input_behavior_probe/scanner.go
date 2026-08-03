@@ -20,6 +20,9 @@ type Module struct {
 	modkit.BaseActiveModule
 	rhm dedup.Lazy[dedup.RequestHashManager]
 	ds  dedup.Lazy[dedup.DiskSet]
+	// jitter memoizes per-endpoint tag-jitter calibration so the control
+	// re-fetches happen once per record instead of once per insertion point.
+	jitter *jitterCache
 }
 
 func New() *Module {
@@ -37,6 +40,8 @@ func New() *Module {
 		),
 		rhm: dedup.LazyDefaultRHM("input_behavior_probe"),
 		ds:  dedup.LazyDiskSet("input_behavior_probe"),
+
+		jitter: newJitterCache(),
 	}
 	m.ModuleTags = ModuleTags
 	return m
@@ -78,7 +83,7 @@ func (m *Module) ScanPerRequest(
 	if baseline.edgeBlocked {
 		return nil, nil
 	}
-	calibrateTagJitter(ctx, httpClient, baseline)
+	calibrateTagJitter(ctx, httpClient, baseline, m.jitter)
 
 	var results []*output.ResultEvent
 	results = append(results, probeHeaders(ctx, httpClient, baseline)...)
@@ -135,7 +140,7 @@ func (m *Module) ScanPerInsertionPoint(
 	if baseline.edgeBlocked {
 		return nil, nil
 	}
-	calibrateTagJitter(ctx, httpClient, baseline)
+	calibrateTagJitter(ctx, httpClient, baseline, m.jitter)
 
 	var results []*output.ResultEvent
 

@@ -65,18 +65,36 @@ func newDetectionBaseline(entry *modkit.BaselineEntry) *detectionBaseline {
 // challenge scripts, A/B widgets) AND a stale cached baseline (up to 5 min old)
 // both surface here, so detectChange can demand a probe diverge by MORE than this
 // before treating it as input-driven behavior rather than ambient page noise.
-func calibrateTagJitter(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, baseline *detectionBaseline) {
+//
+// The measurement is a property of the ENDPOINT, not of any one insertion point:
+// it re-fetches ctx's unmodified request, which is identical for every insertion
+// point on the record. So it is memoized per endpoint via jitterCache. It used to
+// run inside every ScanPerInsertionPoint call, which on a browser-captured
+// request (~20 insertion points) meant 40 uncached round trips to learn one
+// number that 2 would have established — in the most expensive module in the
+// registry, against a target where every round trip is the scan's actual cost.
+func calibrateTagJitter(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, baseline *detectionBaseline, cache *jitterCache) {
+	baseline.tagJitter = cache.get(ctx, func() int {
+		return measureTagJitter(ctx, httpClient, baseline)
+	})
+}
+
+// measureTagJitter performs the actual control re-fetches. It is the uncached
+// body of calibrateTagJitter.
+func measureTagJitter(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, baseline *detectionBaseline) int {
 	const controlSamples = 2
 	raw := ctx.Request().Raw()
+	jitter := 0
 	for range controlSamples {
 		counts, ok := fetchTagCounts(ctx, httpClient, raw)
 		if !ok {
 			continue
 		}
-		if d := tagDistance(baseline.tagCounts, counts); d > baseline.tagJitter {
-			baseline.tagJitter = d
+		if d := tagDistance(baseline.tagCounts, counts); d > jitter {
+			jitter = d
 		}
 	}
+	return jitter
 }
 
 // fetchProbeResponse re-issues raw and returns its response status code and body.
