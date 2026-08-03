@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Indicated when injected expressions are evaluated, quotes are consumed, or unicode characters are normalized by the server"
 	ModuleSeverity     = severity.Suspect
 	ModuleConfidence   = severity.Firm
-	ModuleTags         = []string{"behavior-analysis", "injection", "moderate"}
+	ModuleTags         = []string{"behavior-analysis", "injection", "heavy"}
 )

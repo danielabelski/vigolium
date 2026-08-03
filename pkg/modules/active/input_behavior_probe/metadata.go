@@ -23,5 +23,5 @@ var (
 	// buildProbeResult in detect.go) and are surfaced as informational leads.
 	ModuleSeverity   = severity.Info
 	ModuleConfidence = severity.Tentative
-	ModuleTags       = []string{"injection", "probe", "moderate"}
+	ModuleTags       = []string{"injection", "probe", "heavy"}
 )

@@ -23,5 +23,5 @@ var (
 	// See ScanPerInsertionPoint.
 	ModuleSeverity   = severity.Info
 	ModuleConfidence = severity.Tentative
-	ModuleTags       = []string{"behavior-analysis", "injection", "moderate"}
+	ModuleTags       = []string{"behavior-analysis", "injection", "heavy"}
 )

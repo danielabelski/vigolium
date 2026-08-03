@@ -112,3 +112,51 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// The costliest modules in the registry must be tagged so that --intensity quick
+// actually drops them. Measured on a real 1.8s-RTT target, these four dominated
+// dynamic-assessment wall clock (input-behavior-probe alone: 22h58m aggregate
+// across 452 invocations, ~3m03s each) while producing zero findings on that run.
+// Tagged "moderate" they survived even the quick ceiling, which made a "quick"
+// scan anything but.
+//
+// This pins the tier only. It deliberately does NOT assert they are dropped at
+// balanced/deep — heavy (rank 3) is below the intrusive ceiling (rank 4), so the
+// default scan still runs all four. Retagging trades quick-scan coverage for
+// quick-scan speed and changes nothing else.
+func TestCostliestModulesAreHeavyTier(t *testing.T) {
+	costly := []string{
+		"input-behavior-probe",
+		"reflected-ssti",
+		"suspect-transform",
+		"smart-behavior-detection",
+		"ssti-blind",
+	}
+
+	byID := make(map[string]modules.ActiveModule)
+	for _, m := range modules.GetActiveModules() {
+		byID[m.ID()] = m
+	}
+
+	quick := intensityTierCeiling("quick")
+	balanced := intensityTierCeiling("balanced")
+
+	for _, id := range costly {
+		m, ok := byID[id]
+		if !ok {
+			t.Errorf("module %q not found in the active registry", id)
+			continue
+		}
+		rank := modules.ModuleTierRank(m.Tags())
+		if rank != modules.TierRankHeavy {
+			t.Errorf("module %q tier rank = %d, want heavy (%d); tags=%v",
+				id, rank, modules.TierRankHeavy, m.Tags())
+		}
+		if rank <= quick {
+			t.Errorf("module %q (rank %d) must be dropped by the quick ceiling %d", id, rank, quick)
+		}
+		if rank > balanced {
+			t.Errorf("module %q (rank %d) must still run at the balanced ceiling %d", id, rank, balanced)
+		}
+	}
+}

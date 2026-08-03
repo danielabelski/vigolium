@@ -18,5 +18,5 @@ var (
 	ModuleConfirmation = "Confirmed when injected math expressions (e.g., {{7*7}}=49) are evaluated and the computed result appears in the response"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Certain
-	ModuleTags         = []string{"injection", "ssti", "moderate"}
+	ModuleTags         = []string{"injection", "ssti", "heavy"}
 )
