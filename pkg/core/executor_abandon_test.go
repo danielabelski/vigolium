@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestRunActiveWithTimeout_AbandonedModuleStopsIssuingRequests(t *testing.T) 
 			// timed-out module's loop does.
 			<-release
 			_, _, execErr := client.Execute(item, http.Options{})
-			abandonedErr.Store(execErr == http.ErrRequestAbandoned)
+			abandonedErr.Store(errors.Is(execErr, http.ErrRequestAbandoned))
 			close(loopDone)
 			return []*output.ResultEvent{{}}, nil
 		},
@@ -78,7 +79,7 @@ func TestRunActiveWithTimeout_CompletedModuleNotAbandoned(t *testing.T) {
 			// No network here: just prove the abandon gate is open. A real send
 			// would need a live server, and the gate is checked before dialing.
 			_, _, execErr := client.Execute(item, http.Options{})
-			sawAbandon.Store(execErr == http.ErrRequestAbandoned)
+			sawAbandon.Store(errors.Is(execErr, http.ErrRequestAbandoned))
 			return want, nil
 		},
 		&fakeActiveModule{id: "prompt"}, item, reqClient, func() {}, 0)
