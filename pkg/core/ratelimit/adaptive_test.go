@@ -455,7 +455,7 @@ func TestPreArm_NoOpInStaticMode(t *testing.T) {
 // The adaptive ramp ceiling defaults by mode. Adaptive is an opt-in to
 // concurrency discovery so it gets headroom; WAF-auto-arm is a throttle, so a
 // host recovering from a block returns to MaxPerHost and stops there.
-func TestEffectiveCeilingPerHost(t *testing.T) {
+func TestResolveCeilingPerHost(t *testing.T) {
 	tests := []struct {
 		name       string
 		maxPerHost int
@@ -474,8 +474,13 @@ func TestEffectiveCeilingPerHost(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := EffectiveCeilingPerHost(tc.maxPerHost, tc.configured, tc.adaptive); got != tc.want {
-				t.Fatalf("EffectiveCeilingPerHost(%d, %d, %v) = %d, want %d",
+			cfg := HostRateLimiterConfig{
+				MaxPerHost:     tc.maxPerHost,
+				CeilingPerHost: tc.configured,
+				Adaptive:       tc.adaptive,
+			}
+			if got := resolveCeilingPerHost(cfg); got != tc.want {
+				t.Fatalf("resolveCeilingPerHost(max=%d, ceiling=%d, adaptive=%v) = %d, want %d",
 					tc.maxPerHost, tc.configured, tc.adaptive, got, tc.want)
 			}
 		})
@@ -536,5 +541,26 @@ func TestWafAutoArm_RecoveryStopsAtMaxPerHost(t *testing.T) {
 	}
 	if got := h.currentLimit(host); got > 8 {
 		t.Fatalf("waf-armed recovery must stop at MaxPerHost=8, got %d", got)
+	}
+}
+
+// The transport sizes its idle-connection pool from this accessor, so it must
+// report the ramp ceiling the limiter actually resolved — not the value it
+// starts at.
+func TestCeilingPerHostAccessor(t *testing.T) {
+	adaptive := NewHostRateLimiter(HostRateLimiterConfig{
+		MaxPerHost: 8, Adaptive: true, EvictInterval: time.Hour,
+	})
+	defer func() { _ = adaptive.Close() }()
+	if got := adaptive.CeilingPerHost(); got != 8*defaultAdaptiveCeilingFactor {
+		t.Errorf("adaptive CeilingPerHost() = %d, want %d", got, 8*defaultAdaptiveCeilingFactor)
+	}
+
+	static := NewHostRateLimiter(HostRateLimiterConfig{
+		MaxPerHost: 8, EvictInterval: time.Hour,
+	})
+	defer func() { _ = static.Close() }()
+	if got := static.CeilingPerHost(); got != 8 {
+		t.Errorf("static CeilingPerHost() = %d, want MaxPerHost=8", got)
 	}
 }

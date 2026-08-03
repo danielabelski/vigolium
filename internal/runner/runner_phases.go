@@ -593,9 +593,6 @@ func (r *Runner) buildInfrastructure() (*phaseInfra, error) {
 		maxPerHost = 10
 	}
 	adaptive, minPerHost, ceilingPerHost := adaptiveHostLimiterSettings(r.settings)
-	// Publish the resolved ramp ceiling so the HTTP transport sizes its idle-conn
-	// pool to the concurrency the limiter can actually reach, not just its start.
-	r.options.MaxPerHostCeiling = hostlimit.EffectiveCeilingPerHost(maxPerHost, ceilingPerHost, adaptive)
 	hostLimiter := hostlimit.NewHostRateLimiter(hostlimit.HostRateLimiterConfig{
 		MaxPerHost:     maxPerHost,
 		MaxEntries:     1000,

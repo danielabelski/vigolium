@@ -1377,9 +1377,12 @@ func (e *Executor) persistAndCheckScope(ctx context.Context, item *work.WorkItem
 }
 
 func (e *Executor) runActiveStage(ctx context.Context, req *httpmsg.HttpRequestResponse, filter *moduleFilter, elig *requestEligibility) {
-	// One context-bound requester clone per item, shared by every active-module
-	// task below — they all run under the same PHASE ctx. Cloning inside each task
-	// (the old behavior) allocated a Requester copy on the hottest fan-out loop.
+	// One context-bound requester clone per item, handed to every active-module
+	// task below — they all run under the same PHASE ctx. Binding the context once
+	// here keeps that work off the hottest fan-out loop; runActiveWithTimeout still
+	// takes a second shallow clone per call to attach that call's abandon flag,
+	// which is the minimum needed to carry per-call state into a module that takes
+	// a *http.Requester.
 	// Bound to the phase context, NOT any per-module timeout, so the shared request
 	// clusterer isn't poisoned by one module's timeout (see runActiveWithTimeout).
 	var reqClient *http.Requester
@@ -1846,22 +1849,22 @@ func (e *Executor) runActiveWithTimeout(
 	callCtx, timeoutC, stop := callGuard(ctx, timeout, needCancel)
 	defer stop()
 
-	// Abandon signal: cancelled the moment this wrapper stops waiting, on every
-	// path. A module that outlives its timeout keeps running (a goroutine cannot
-	// be killed) and used to keep issuing requests whose results are discarded by
+	// Abandon signal: set the moment this wrapper stops waiting, on every path. A
+	// module that outlives its timeout keeps running (a goroutine cannot be
+	// killed) and used to keep issuing requests whose results are discarded by
 	// definition — stealing per-host concurrency from live work and holding its
-	// active-task slot until it finally unwound. With this bound, its next
-	// Execute returns ErrRequestAbandoned immediately, so it unwinds promptly and
-	// stops generating load. In-flight requests are untouched, so a request the
+	// active-task slot until it finally unwound. Once set, its next Execute
+	// returns ErrRequestAbandoned immediately, so it unwinds promptly and stops
+	// generating load. In-flight requests are untouched, so a request the
 	// clusterer shares with other modules is never severed.
 	//
-	// Deferring the cancel is correct on all three exits: on the normal path the
+	// Deferring the set is correct on all three exits: on the normal path the
 	// scan goroutine has already delivered its result, and on the timeout /
-	// parent-cancel paths cancelling is precisely the intent.
+	// parent-cancel paths flagging it is precisely the intent.
 	if reqClient != nil {
-		abandonCtx, abandonCancel := context.WithCancel(ctx)
-		defer abandonCancel()
-		reqClient = reqClient.WithAbandonSignal(abandonCtx)
+		var abandoned atomic.Bool
+		defer abandoned.Store(true)
+		reqClient = reqClient.WithAbandonFlag(&abandoned)
 	}
 
 	start := time.Now()

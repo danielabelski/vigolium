@@ -28,6 +28,19 @@ func (h *HostRateLimiter) usesAdaptiveEntries() bool {
 	return h.adaptive || h.wafAutoArm
 }
 
+// CeilingPerHost is the highest per-host concurrency this limiter can ever reach:
+// the AIMD ramp ceiling in adaptive mode, and MaxPerHost otherwise.
+//
+// It exists so the HTTP transport can size its idle-connection pool to the
+// concurrency the limiter can actually reach rather than the value it starts at.
+// A pool sized to the start would close every connection above it on return and
+// pay a fresh TCP+TLS handshake — manufacturing connection churn at exactly the
+// concurrency a ramp unlocked. Read it from the limiter instead of re-deriving
+// it: two independent derivations drift silently, as churn rather than an error.
+func (h *HostRateLimiter) CeilingPerHost() int {
+	return h.ceilingPerHost
+}
+
 // PreArmable reports whether PreArm can throttle a host — true only when hosts use
 // adaptive token pools (plain Adaptive or WafAutoArm) AND proactive pacing has not
 // been disabled (--no-waf-pacing). It lets a caller skip the per-response edge

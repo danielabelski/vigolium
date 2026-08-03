@@ -296,9 +296,7 @@ func DefaultHostRateLimiterConfig() HostRateLimiterConfig {
 // a sustained run of clean responses, and any distress signal halves it back.
 const defaultAdaptiveCeilingFactor = 2
 
-// EffectiveCeilingPerHost returns the AIMD ramp ceiling implied by a per-host
-// concurrency setting, an optionally-configured ceiling, and whether adaptive
-// mode is on.
+// resolveCeilingPerHost returns the AIMD ramp ceiling for a limiter config.
 //
 // The default is mode-dependent on purpose. Adaptive is an explicit opt-in to
 // concurrency discovery, so it gets headroom to ramp into. WAF-auto-arm is a
@@ -306,28 +304,15 @@ const defaultAdaptiveCeilingFactor = 2
 // host recovering from that should return to the configured concurrency and
 // stop there — never use a WAF block as licence to exceed MaxPerHost.
 //
-// An explicit configuredCeiling always wins, and the result is floored at
-// maxPerHost so a ceiling below the start can't strand the pool below its
-// initial fill.
-//
-// Exported because the HTTP transport must size its idle-connection pool to the
-// same number (see types.Options.MaxPerHostCeiling). Callers that derive the two
-// independently WILL drift, and the failure mode is silent connection churn at
-// the ramped concurrency rather than an error.
-func EffectiveCeilingPerHost(maxPerHost, configuredCeiling int, adaptive bool) int {
-	ceiling := configuredCeiling
-	if ceiling <= 0 {
-		ceiling = maxPerHost
-		if adaptive {
-			ceiling = maxPerHost * defaultAdaptiveCeilingFactor
-		}
-	}
-	return max(ceiling, maxPerHost)
-}
-
-// resolveCeilingPerHost applies EffectiveCeilingPerHost to a limiter config.
+// An explicit CeilingPerHost always wins, and the result is floored at
+// MaxPerHost so a ceiling below the start can't strand the pool below its
+// initial fill (which also makes the unset/non-adaptive case fall out for free).
 func resolveCeilingPerHost(cfg HostRateLimiterConfig) int {
-	return EffectiveCeilingPerHost(cfg.MaxPerHost, cfg.CeilingPerHost, cfg.Adaptive)
+	ceiling := cfg.CeilingPerHost
+	if ceiling <= 0 && cfg.Adaptive {
+		ceiling = cfg.MaxPerHost * defaultAdaptiveCeilingFactor
+	}
+	return max(ceiling, cfg.MaxPerHost)
 }
 
 // NewHostRateLimiter creates a new HostRateLimiter with the given configuration.

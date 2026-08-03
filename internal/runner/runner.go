@@ -181,9 +181,6 @@ func BuildSharedInfra(opts *types.Options, settings *config.Settings, repo *data
 		maxPerHost = 10
 	}
 	adaptive, minPerHost, ceilingPerHost := adaptiveHostLimiterSettings(settings)
-	// Publish the resolved ramp ceiling so the HTTP transport sizes its idle-conn
-	// pool to the concurrency the limiter can actually reach, not just its start.
-	opts.MaxPerHostCeiling = hostlimit.EffectiveCeilingPerHost(maxPerHost, ceilingPerHost, adaptive)
 	hostLimiter := hostlimit.NewHostRateLimiter(hostlimit.HostRateLimiterConfig{
 		MaxPerHost:     maxPerHost,
 		MaxEntries:     1000,

@@ -46,14 +46,6 @@ type Options struct {
 
 	// MaxPerHost is the maximum concurrent requests per host
 	MaxPerHost int
-	// MaxPerHostCeiling is the highest per-host concurrency the adaptive limiter
-	// may ramp to (0 = never ramps above MaxPerHost). The HTTP transport sizes its
-	// idle-connection pool from this rather than MaxPerHost: if the pool were sized
-	// to MaxPerHost while the limiter ramped past it, every request above the pool
-	// size would close its connection on return and the next would pay a fresh
-	// TCP+TLS handshake — manufacturing connection churn at exactly the concurrency
-	// the ramp just unlocked.
-	MaxPerHostCeiling int
 	// NoWafPacing disables the proactive CDN/WAF-edge pacing (pre-arming the
 	// per-host limiter when an edge is fingerprinted). The reactive WAF-block back-off
 	// still applies. Wired from the --no-waf-pacing CLI flag.

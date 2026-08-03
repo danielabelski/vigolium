@@ -215,6 +215,15 @@ type ScanContext struct {
 	stabilityOnce   sync.Once
 	stabilityCache  *lru.Cache[string, bool]
 	stabilityFlight singleflight.Group
+
+	// Named per-endpoint numeric measurements a module derives from the
+	// UNMODIFIED request (page jitter, sample counts, calibration constants).
+	// Same rationale as the volatility cache above: it is a property of the
+	// record, so the round-trips are paid once and reused across every insertion
+	// point the executor dispatches concurrently. See EndpointMeasurement.
+	measurementOnce   sync.Once
+	measurementCache  *lru.Cache[string, int]
+	measurementFlight singleflight.Group
 }
 
 func (sc *ScanContext) cookiePolicies() *CookiePolicyRegistry {

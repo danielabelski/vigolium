@@ -68,16 +68,21 @@ func newDetectionBaseline(entry *modkit.BaselineEntry) *detectionBaseline {
 //
 // The measurement is a property of the ENDPOINT, not of any one insertion point:
 // it re-fetches ctx's unmodified request, which is identical for every insertion
-// point on the record. So it is memoized per endpoint via jitterCache. It used to
-// run inside every ScanPerInsertionPoint call, which on a browser-captured
-// request (~20 insertion points) meant 40 uncached round trips to learn one
-// number that 2 would have established — in the most expensive module in the
-// registry, against a target where every round trip is the scan's actual cost.
-func calibrateTagJitter(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, baseline *detectionBaseline, cache *jitterCache) {
-	baseline.tagJitter = cache.get(ctx, func() int {
+// point on the record. So it goes through the ScanContext's per-record
+// measurement memo. It used to run inside every ScanPerInsertionPoint call, which
+// on a browser-captured request (~20 insertion points) meant 40 uncached round
+// trips to learn one number that 2 would have established — in the most expensive
+// module in the registry, against a target where every round trip is the scan's
+// actual cost.
+func calibrateTagJitter(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, baseline *detectionBaseline, scanCtx *modkit.ScanContext) {
+	baseline.tagJitter = scanCtx.EndpointMeasurement(tagJitterMeasurement, ctx, func() int {
 		return measureTagJitter(ctx, httpClient, baseline)
 	})
 }
+
+// tagJitterMeasurement namespaces this module's entry in the shared per-record
+// measurement memo.
+const tagJitterMeasurement = "input-behavior-probe/tag-jitter"
 
 // measureTagJitter performs the actual control re-fetches. It is the uncached
 // body of calibrateTagJitter.

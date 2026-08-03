@@ -70,11 +70,9 @@ type Requester struct {
 	// to outgoing requests. Set per scan task via WithContext so cancellation
 	// reaches modules that call Execute (not ExecuteContext). nil → Background.
 	defaultCtx context.Context
-	// abandonCtx, when non-nil, marks the owning module call as abandoned once it
-	// is done: Execute then refuses to start any NEW request. It is deliberately
-	// NOT attached to outgoing requests — see WithAbandonSignal for why the two
-	// contexts must stay separate.
-	abandonCtx context.Context
+	// abandonFlag, when non-nil and set, marks the owning module call as abandoned:
+	// Execute then refuses to start any NEW request. See WithAbandonFlag.
+	abandonFlag *atomic.Bool
 	// carried holds browser-harvested per-host sessions (cookies + optional
 	// pinned User-Agent) carried forward from the spidering phase. It is a
 	// pointer to an atomic-published store so WithContext's shallow copy shares
@@ -339,8 +337,8 @@ func (r *Requester) WithContext(ctx context.Context) *Requester {
 // cancelled), so any result it produces will be discarded.
 var ErrRequestAbandoned = errors.New("request abandoned: module call already timed out")
 
-// WithAbandonSignal returns a shallow clone whose Execute refuses to START new
-// requests once ctx is done. Requests already in flight are untouched.
+// WithAbandonFlag returns a shallow clone whose Execute refuses to START new
+// requests once flag is set. Requests already in flight are untouched.
 //
 // This exists because a per-module timeout does not stop the module. The
 // executor's watchdog returns (nil, false) and the caller discards the result,
@@ -357,18 +355,25 @@ var ErrRequestAbandoned = errors.New("request abandoned: module call already tim
 // outgoing request would let the first caller's timeout cancel a request other
 // modules are legitimately waiting on. Gating initiation instead stops the
 // abandoned module's future load without severing anyone's shared socket.
-func (r *Requester) WithAbandonSignal(ctx context.Context) *Requester {
-	if ctx == nil {
+//
+// A flag rather than a context: this is only ever read as a boolean — never
+// selected on, never attached to a request — and it is set once per module
+// dispatch, the hottest fan-out loop in the scan. A context.WithCancel child
+// there would allocate a context plus a CancelFunc and take the shared phase
+// context's children-map lock twice per call, serializing hundreds of concurrent
+// dispatches on one mutex to carry a single bit.
+func (r *Requester) WithAbandonFlag(flag *atomic.Bool) *Requester {
+	if flag == nil {
 		return r
 	}
 	clone := *r
-	clone.abandonCtx = ctx
+	clone.abandonFlag = flag
 	return &clone
 }
 
 // abandoned reports whether the owning module call has been given up on.
 func (r *Requester) abandoned() bool {
-	return r.abandonCtx != nil && r.abandonCtx.Err() != nil
+	return r.abandonFlag != nil && r.abandonFlag.Load()
 }
 
 // getProxyURL returns proxy URL from CLI flag or environment variable.
@@ -428,14 +433,18 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 	// fresh TCP+TLS handshake (~50-150ms). The old hardcoded 10 throttled reuse
 	// badly: MaxPerHost defaults to 50, so 40 of every 50 connections churned.
 	//
-	// Sized from the adaptive CEILING, not MaxPerHost: the per-host limiter can
+	// Sized from the per-host limiter's CEILING, not MaxPerHost: the limiter can
 	// ramp a healthy host above MaxPerHost, and a pool sized to the starting value
 	// would recreate the very churn described above at exactly the concurrency the
-	// ramp unlocked. MaxPerHostCeiling is 0 when the limiter can't ramp, in which
-	// case this is MaxPerHost as before.
+	// ramp unlocked. Read from the limiter that already resolved it rather than
+	// re-deriving it here — two independent derivations drift silently. With no
+	// limiter (or one that can't ramp) this is MaxPerHost as before.
 	// Floor at the old 10 and cap at 256 so a pathological --max-per-host can't
 	// pin an unbounded idle pool of file descriptors.
-	peakPerHost := max(options.MaxPerHost, options.MaxPerHostCeiling)
+	peakPerHost := options.MaxPerHost
+	if services != nil && services.HostLimiter != nil {
+		peakPerHost = max(peakPerHost, services.HostLimiter.CeilingPerHost())
+	}
 	maxIdlePerHost := min(max(peakPerHost, 10), 256)
 	// The global idle pool scales with the per-host cap so multi-host scans keep
 	// enough warm connections across hosts. maxIdlePerHost >= 10 guarantees this is
