@@ -356,7 +356,11 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%ds", m, s)
 }
 
-// logModuleMetrics logs the top modules by total time and findings at debug level.
+// logModuleMetrics logs the top modules by total time and findings.
+//
+// Info, not Debug: five lines per round, and the only view of where a phase's time
+// went. It is emitted next to the pool and clusterer stats, which are already Info
+// — there is no reason this one alone should need --debug.
 func logModuleMetrics(metrics map[string]corestats.ModuleStatsSnapshot) {
 	// Sort by total time descending for top-5 slowest
 	type entry struct {
@@ -377,7 +381,7 @@ func logModuleMetrics(metrics map[string]corestats.ModuleStatsSnapshot) {
 	}
 	for i := 0; i < limit; i++ {
 		e := entries[i]
-		zap.L().Debug("Module metrics",
+		zap.L().Info("Module metrics",
 			zap.String("module", e.id),
 			zap.Int64("invocations", e.snap.Invocations),
 			zap.Int64("findings", e.snap.Findings),

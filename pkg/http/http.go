@@ -403,6 +403,11 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 	// making the transport reject every response instantly.
 	respHeaderTimeout := max(timeout, responseHeaderTimeoutFloor)
 
+	// Built before the transport so the dial hooks below can close over it: it is
+	// the transport's own dialers, not httptrace, that see every real connection
+	// (see poolStats.connDialed for why that distinction matters).
+	poolStats := newPoolStats()
+
 	// Transport factory
 	makeTransport := func() *http.Transport {
 		t := &http.Transport{
@@ -416,10 +421,10 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 			// DialTLSContext below must be removed and ALPN wired via the shared
 			// tlsConfig (NextProtos) / http2.ConfigureTransport.
 			ForceAttemptHTTP2: options.ForceAttemptHTTP2,
-			DialContext:       dialer.Dial,
-			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.DialTLS(ctx, network, addr)
-			},
+			// Wrapped so every real connection establishment is tallied — httptrace
+			// cannot see them reliably (see poolStats.connDialed).
+			DialContext:            poolStats.countDials(dialer.Dial),
+			DialTLSContext:         poolStats.countDials(dialer.DialTLS),
 			TLSClientConfig:        tlsConfig,
 			DisableKeepAlives:      false,
 			MaxIdleConns:           maxIdleConns,
@@ -509,7 +514,7 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 		blockNotifier:    &blockNotifier{seen: make(map[string]struct{})},
 		respObserver:     &responseObserver{},
 		edgePacer:        &edgePacer{},
-		poolStats:        newPoolStats(),
+		poolStats:        poolStats,
 	}
 
 	// Keep the edge-pacer's once-per-host dedup in sync with the limiter's entry

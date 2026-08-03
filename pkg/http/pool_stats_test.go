@@ -2,13 +2,46 @@ package http
 
 import "testing"
 
-func TestPoolStatsReuseRatio(t *testing.T) {
-	if got := (PoolStatsSnapshot{}).ReuseRatio(); got != 0 {
+// ConnDialed (real transport dials) drives the ratio, and RoundTrips — not
+// Requests — is the denominator: one logical request can span many round trips
+// via redirects/retries, so mixing the two units skews the result.
+func TestPoolStatsReuseRatioUsesDialsOverRoundTrips(t *testing.T) {
+	// The regression this guards: httptrace reported 453 new / 17784 reused
+	// (ratio 0.975) while the server actually accepted 7990 connections.
+	s := PoolStatsSnapshot{Requests: 18309, ConnNew: 453, ConnReused: 17784, ConnDialed: 7990}
+	if rt := s.RoundTrips(); rt != 18237 {
+		t.Fatalf("round trips = %d, want 18237 (new+reused)", rt)
+	}
+	if got := s.ReuseRatio(); got < 0.56 || got > 0.57 {
+		t.Errorf("reuse ratio = %v, want ~0.56 (dial-based), not 0.975 (trace-based)", got)
+	}
+	if got := s.RoundTripsPerConnection(); got < 2.27 || got > 2.29 {
+		t.Errorf("round trips per connection = %v, want ~2.28", got)
+	}
+}
+
+// Nothing dialed and nothing traced is 0, not a divide-by-zero.
+func TestPoolStatsReuseRatioEmpty(t *testing.T) {
+	s := PoolStatsSnapshot{}
+	if got := s.ReuseRatio(); got != 0 {
 		t.Errorf("empty reuse ratio = %v, want 0", got)
 	}
-	s := PoolStatsSnapshot{ConnReused: 3, ConnNew: 1}
-	if got := s.ReuseRatio(); got != 0.75 {
-		t.Errorf("reuse ratio = %v, want 0.75", got)
+	if got := s.RoundTripsPerConnection(); got != 0 {
+		t.Errorf("empty round trips per connection = %v, want 0", got)
+	}
+}
+
+// Every round trip opening its own connection is 0 reuse — and a dial that never
+// carried a round trip (parked by the transport, then idled out) must not push the
+// ratio negative.
+func TestPoolStatsReuseRatioAllChurn(t *testing.T) {
+	s := PoolStatsSnapshot{Requests: 50, ConnNew: 50, ConnDialed: 50}
+	if got := s.ReuseRatio(); got != 0 {
+		t.Errorf("reuse ratio = %v, want 0 when every round trip dials", got)
+	}
+	s2 := PoolStatsSnapshot{Requests: 10, ConnNew: 10, ConnDialed: 25}
+	if got := s2.ReuseRatio(); got != 0 {
+		t.Errorf("reuse ratio = %v, want 0 when dials exceed round trips", got)
 	}
 }
 
@@ -22,6 +55,8 @@ func TestPoolStatsTraceCounts(t *testing.T) {
 	if snap.ConnReused != 2 || snap.ConnNew != 2 {
 		t.Fatalf("snapshot = %+v", snap)
 	}
+	// 4 round trips, 2 of them dialed -> half were reused.
+	snap.ConnDialed = 2
 	if snap.ReuseRatio() != 0.5 {
 		t.Errorf("reuse ratio = %v, want 0.5", snap.ReuseRatio())
 	}

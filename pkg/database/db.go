@@ -16,8 +16,13 @@ import (
 	"github.com/uptrace/bun/driver/pgdriver"
 	"github.com/uptrace/bun/driver/sqliteshim"
 	"github.com/vigolium/vigolium/internal/config"
+	"github.com/vigolium/vigolium/pkg/utils"
 	"go.uber.org/zap"
 )
+
+// envSQLTrace opts into per-statement SQL logging on top of --debug. Named here
+// rather than inlined so it is greppable — it is the only way to reach the hook.
+const envSQLTrace = "VIGOLIUM_SQL_TRACE"
 
 // DB wraps bun.DB with additional metadata
 type DB struct {
@@ -85,8 +90,12 @@ func NewDB(cfg *config.DatabaseConfig) (*DB, error) {
 		driver: driver,
 	}
 
-	// Enable query logging in debug mode
-	if zap.L().Core().Enabled(zap.DebugLevel) {
+	// Per-statement SQL logging is opt-in on top of debug level, not implied by it.
+	// A scan issues thousands of writes, so this hook is the bulk of --debug output
+	// and formatting/emitting every statement is itself an observer effect on the
+	// write path — which made --debug unusable for diagnosing anything else.
+	// Set VIGOLIUM_SQL_TRACE=1 with --debug when you actually want query tracing.
+	if zap.L().Core().Enabled(zap.DebugLevel) && utils.EnvTruthy(envSQLTrace) {
 		db.AddQueryHook(debugQueryHook{})
 	}
 

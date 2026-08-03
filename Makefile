@@ -1,4 +1,4 @@
-.PHONY: build build-embedded build-all snapshot release public public-release github-release prepare-public-scripts clean test test-unit test-integration test-spitolas-browser test-e2e test-e2e-api test-e2e-agent test-e2e-rest-scan test-e2e-postgres test-canary sanity-check test-e2e-vampi test-e2e-dvwa test-e2e-juiceshop test-e2e-browser-fallback test-e2e-piolium test-benchmark test-benchmark-whitebox test-benchmark-blackbox test-benchmark-all test-benchmark-crapi test-benchmark-vuln-java test-benchmark-vuln-nginx test-benchmark-coverage test-agent-benchmark test-agent-parsing test-agent-quality test-agent-handoff test-agent-benchmark-e2e benchmark-agent-generate test-coverage coverage-gate coverage-combined test-coverage-check test-race test-ci test-xbow test-xbow-ssti test-xbow-xss test-xbow-sqli test-xbow-lfi test-xbow-cmdi test-xbow-ssrf test-xbow-xxe xbow-build lint verify-generated fmt tidy deps deps-chrome deps-chrome-update install install-gotestsum swagger help postgres-up postgres-down postgres-logs postgres-status crapi-up crapi-down crapi-logs crapi-status juiceshop-up juiceshop-down juiceshop-logs juiceshop-status vampi-up vampi-down vampi-logs vampi-status vulnerable-java-up vulnerable-java-down vulnerable-java-logs vulnerable-java-status vulnerable-nginx-up vulnerable-nginx-down vulnerable-nginx-logs vulnerable-nginx-status apps-up apps-down docker docker-build docker-build-prod docker-run docker-push docker-buildx-setup docker-publish update-jstangle ensure-jstangle sync-audit update-audit ensure-audit ensure-audit-dist restage-host-audit build-audit update-ui ssh-testbed-keygen ssh-testbed-up ssh-testbed-down ssh-testbed-status ssh-testbed-logs generate-metadata prepare-release-scripts cdn-sync bump-version npm-build npm-pack npm-publish
+.PHONY: build build-prof build-embedded build-all snapshot release public public-release github-release prepare-public-scripts clean test test-unit test-integration test-spitolas-browser test-e2e test-e2e-api test-e2e-agent test-e2e-rest-scan test-e2e-postgres test-canary sanity-check test-e2e-vampi test-e2e-dvwa test-e2e-juiceshop test-e2e-browser-fallback test-e2e-piolium test-benchmark test-benchmark-whitebox test-benchmark-blackbox test-benchmark-all test-benchmark-crapi test-benchmark-vuln-java test-benchmark-vuln-nginx test-benchmark-coverage test-agent-benchmark test-agent-parsing test-agent-quality test-agent-handoff test-agent-benchmark-e2e benchmark-agent-generate test-coverage coverage-gate coverage-combined test-coverage-check test-race test-ci test-xbow test-xbow-ssti test-xbow-xss test-xbow-sqli test-xbow-lfi test-xbow-cmdi test-xbow-ssrf test-xbow-xxe xbow-build lint verify-generated fmt tidy deps deps-chrome deps-chrome-update install install-gotestsum swagger help postgres-up postgres-down postgres-logs postgres-status crapi-up crapi-down crapi-logs crapi-status juiceshop-up juiceshop-down juiceshop-logs juiceshop-status vampi-up vampi-down vampi-logs vampi-status vulnerable-java-up vulnerable-java-down vulnerable-java-logs vulnerable-java-status vulnerable-nginx-up vulnerable-nginx-down vulnerable-nginx-logs vulnerable-nginx-status apps-up apps-down docker docker-build docker-build-prod docker-run docker-push docker-buildx-setup docker-publish update-jstangle ensure-jstangle sync-audit update-audit ensure-audit ensure-audit-dist restage-host-audit build-audit update-ui ssh-testbed-keygen ssh-testbed-up ssh-testbed-down ssh-testbed-status ssh-testbed-logs generate-metadata prepare-release-scripts cdn-sync bump-version npm-build npm-pack npm-publish
 # Phony targets defined in their own sections below (declared here so a stray
 # same-named file can never shadow them).
 .PHONY: all build-linux build-darwin build-windows deps-chrome-cft sync-platform \
@@ -59,7 +59,11 @@ VERSION=$(shell grep -E '^[[:space:]]*Version[[:space:]]+=' pkg/cli/version.go |
 COMMIT_HASH=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 CLI_PKG=github.com/vigolium/vigolium/pkg/cli
-LDFLAGS_INNER=-s -w -X $(CLI_PKG).Version=$(VERSION) -X $(CLI_PKG).Commit=$(COMMIT_HASH) -X $(CLI_PKG).BuildTime=$(BUILD_TIME)
+# Shared version stamps. Factored out so a new -X symbol is added once and reaches
+# every build variant — a stamp that lands in only one is invisible until someone
+# reads --version output from the other. VERSION_SUFFIX lets a variant mark itself.
+LDFLAGS_STAMP=-X $(CLI_PKG).Version=$(VERSION)$(VERSION_SUFFIX) -X $(CLI_PKG).Commit=$(COMMIT_HASH) -X $(CLI_PKG).BuildTime=$(BUILD_TIME)
+LDFLAGS_INNER=-s -w $(LDFLAGS_STAMP)
 LDFLAGS=-ldflags "$(LDFLAGS_INNER)"
 
 # R2 CDN prefix for `make release` — nightly release uploads. Served at
@@ -104,6 +108,21 @@ build-embedded: ensure-audit
 	@rm -f $(GOPATH_BIN)/$(BINARY_NAME)
 	@cp $(BINARY_DIR)/$(BINARY_NAME) $(GOPATH_BIN)/$(BINARY_NAME)
 	@echo "$(PREFIX) Build complete! Binary: $(BINARY_DIR)/$(BINARY_NAME) and $(GOPATH_BIN)/$(BINARY_NAME)"
+
+# Build a profiling binary: `build` without -s -w, so Go symbols survive and CPU
+# profilers can attribute samples (the stripped release binary reports every frame
+# as "??? (in vigolium)"). Writes bin/vigolium-prof and deliberately does NOT
+# install to $(GOPATH_BIN) — profiling means running a real scan, which must not
+# require swapping out the binary you ship.
+#
+#   make build-prof
+#   sample $$(pgrep -n -f 'vigolium-prof scan') 15 -f /tmp/scan.sample
+build-prof: VERSION_SUFFIX=-prof
+build-prof: ensure-audit
+	@echo "$(PREFIX) Building $(BINARY_NAME)-prof (symbols retained, not installed)..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) -ldflags "$(LDFLAGS_STAMP)" -o $(BINARY_DIR)/$(BINARY_NAME)-prof ./cmd/vigolium
+	@echo "$(PREFIX) Profiling binary: $(BINARY_DIR)/$(BINARY_NAME)-prof"
 
 # Build for multiple platforms
 build-all: build build-linux build-darwin build-windows
