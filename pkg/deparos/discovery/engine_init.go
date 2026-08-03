@@ -88,8 +88,9 @@ func (e *Engine) initSession() error {
 		}
 		// Pre-warm cache for common paths/extensions beyond root to reduce
 		// inline learning pauses during the main discovery phase.
+		// Fan out at the operator's concurrency; see Cache.PreWarm.
 		if e.fpCache != nil {
-			e.fpCache.PreWarm(e.ctx, probeURL)
+			e.fpCache.PreWarm(e.ctx, probeURL, e.config.Engine.DiscoveryThreads)
 		}
 	} else {
 		logger.Debug("Skipping fingerprint learning (SkipFingerprintLearning=true)")

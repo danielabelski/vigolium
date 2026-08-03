@@ -493,10 +493,26 @@ func (c *Cache) HasSignaturesForHost(host string) bool {
 	return ok
 }
 
+// defaultPreWarmConcurrency is the fallback cap when the caller passes <= 0.
+const defaultPreWarmConcurrency = 4
+
 // PreWarm probes common (path, extension) combinations to seed the fingerprint cache
 // before discovery workers start. This front-loads baseline learning and reduces
 // inline learning pauses during the main discovery phase.
-func (c *Cache) PreWarm(ctx context.Context, baseURL *url.URL) int {
+//
+// concurrency caps how many probe chains run at once and should be the engine's
+// configured discovery concurrency; <= 0 falls back to defaultPreWarmConcurrency.
+// The paths x extensions below produce a fixed preamble every host pays before any
+// fuzzing starts, so running it at the old hardcoded 4 cost 53-66s per host against
+// a ~1.8s-RTT target — two thirds of that host's entire discovery time, at ~0.01
+// CPU cores.
+//
+// The cap is deliberately on chains, not requests: Learn stays serial inside, so
+// in-flight requests never exceed concurrency and the operator's --concurrency
+// contract still holds. Parallelizing Learn's probes as well would multiply real
+// in-flight load behind the same number, which is not what the flag promises — and
+// would aim a large burst at a host that has not been fingerprinted yet.
+func (c *Cache) PreWarm(ctx context.Context, baseURL *url.URL, concurrency int) int {
 	commonPaths := []string{"/", "/api/", "/admin/", "/static/", "/assets/"}
 	commonExts := []string{"", ".html", ".php", ".js", ".json", ".xml", ".asp", ".jsp"}
 
@@ -524,7 +540,15 @@ func (c *Cache) PreWarm(ctx context.Context, baseURL *url.URL) int {
 		return 0
 	}
 
-	sem := make(chan struct{}, 4)
+	if concurrency <= 0 {
+		concurrency = defaultPreWarmConcurrency
+	}
+	// Report the cap that can actually bind, not the one requested — one goroutine
+	// per target is spawned regardless, so a concurrency above the target count is
+	// only misleading in the log line below.
+	concurrency = min(concurrency, len(targets))
+
+	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var learned atomic.Int32
 
@@ -563,7 +587,8 @@ func (c *Cache) PreWarm(ctx context.Context, baseURL *url.URL) int {
 	zap.L().Info("Fingerprint cache pre-warmed",
 		zap.String("host", host),
 		zap.Int32("learned", learned.Load()),
-		zap.Int("total_probes", len(targets)))
+		zap.Int("total_probes", len(targets)),
+		zap.Int("concurrency", concurrency))
 
 	return int(learned.Load())
 }

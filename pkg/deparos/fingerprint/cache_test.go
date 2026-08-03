@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -557,4 +558,74 @@ func TestCache_EvictionSmallMaxSize(t *testing.T) {
 	// Only one key should exist
 	allKeys := cache.GetAllKeys()
 	assert.Len(t, allKeys, 1)
+}
+
+// newPreWarmProbeServer returns a server that records peak concurrent in-flight
+// requests, so a test can assert how wide PreWarm actually fans out.
+func newPreWarmProbeServer(t *testing.T) (*httptest.Server, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	var inFlight, peak int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		mu.Unlock()
+		// Hold the request open so concurrent chains genuinely overlap; without it
+		// peak could read 1 regardless of the semaphore size.
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "<html><body>not found</body></html>")
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return peak
+	}
+}
+
+// newPreWarmCache builds a Cache whose learner talks to srv with no inter-probe
+// delay — the delay would idle each chain ~50% of the time and depress the
+// measured peak below the semaphore size, blunting the assertions.
+func newPreWarmCache(srv *httptest.Server) *Cache {
+	l := NewLearner(srv.Client(), nil)
+	l.SetDelay(0)
+	return NewCache(l)
+}
+
+// PreWarm must fan out at the caller's concurrency, not the old hardcoded 4.
+// Learn stays serial inside each chain, so in-flight requests are capped by the
+// chain semaphore — that equivalence is what makes it safe to pass --concurrency
+// straight through.
+func TestPreWarmHonorsConcurrency(t *testing.T) {
+	t.Parallel()
+	srv, peakFn := newPreWarmProbeServer(t)
+	base, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	newPreWarmCache(srv).PreWarm(context.Background(), base, 16)
+
+	peak := peakFn()
+	assert.Greater(t, peak, defaultPreWarmConcurrency, "PreWarm should exceed the old hardcoded cap")
+	assert.LessOrEqual(t, peak, 16, "PreWarm must never exceed the requested concurrency")
+}
+
+// A non-positive concurrency keeps the historical conservative default rather
+// than falling through to an unbuffered channel (which would deadlock).
+func TestPreWarmZeroConcurrencyUsesDefault(t *testing.T) {
+	t.Parallel()
+	srv, peakFn := newPreWarmProbeServer(t)
+	base, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	newPreWarmCache(srv).PreWarm(context.Background(), base, 0)
+
+	assert.LessOrEqual(t, peakFn(), defaultPreWarmConcurrency,
+		"concurrency <= 0 must fall back to the built-in default")
 }
