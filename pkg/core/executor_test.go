@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vigolium/vigolium/internal/config"
+	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
@@ -396,8 +397,8 @@ func TestRunActiveWithTimeout_FastCompletes(t *testing.T) {
 	want := []*output.ResultEvent{{}}
 
 	got, completed := e.runActiveWithTimeout(context.Background(),
-		func(context.Context) ([]*output.ResultEvent, error) { return want, nil },
-		&fakeActiveModule{id: "fast"}, item, func() {}, 0)
+		func(context.Context, *http.Requester) ([]*output.ResultEvent, error) { return want, nil },
+		&fakeActiveModule{id: "fast"}, item, nil, func() {}, 0)
 
 	if !completed {
 		t.Fatal("expected completed=true for a fast module")
@@ -413,11 +414,11 @@ func TestRunActiveWithTimeout_SlowTimesOut(t *testing.T) {
 
 	start := time.Now()
 	got, completed := e.runActiveWithTimeout(context.Background(),
-		func(context.Context) ([]*output.ResultEvent, error) {
+		func(context.Context, *http.Requester) ([]*output.ResultEvent, error) {
 			time.Sleep(2 * time.Second)
 			return []*output.ResultEvent{{}}, nil
 		},
-		&fakeActiveModule{id: "slow"}, item, func() {}, 0)
+		&fakeActiveModule{id: "slow"}, item, nil, func() {}, 0)
 
 	if completed {
 		t.Fatal("expected completed=false when the module exceeds its timeout")
@@ -438,11 +439,11 @@ func TestRunActiveWithTimeout_TimeoutHinterRaisesBound(t *testing.T) {
 	want := []*output.ResultEvent{{}}
 
 	got, completed := e.runActiveWithTimeout(context.Background(),
-		func(context.Context) ([]*output.ResultEvent, error) {
+		func(context.Context, *http.Requester) ([]*output.ResultEvent, error) {
 			time.Sleep(80 * time.Millisecond)
 			return want, nil
 		},
-		&fakeActiveHinterModule{fakeActiveModule{id: "hinted"}, time.Second}, item, func() {}, 0)
+		&fakeActiveHinterModule{fakeActiveModule{id: "hinted"}, time.Second}, item, nil, func() {}, 0)
 
 	if !completed {
 		t.Fatal("expected completed=true: TimeoutHint should raise the bound above the default")
@@ -457,8 +458,8 @@ func TestRunActiveWithTimeout_ModuleErrorMarksCompleted(t *testing.T) {
 	_, item := makeTestItem("example.com", "/", "ok")
 
 	got, completed := e.runActiveWithTimeout(context.Background(),
-		func(context.Context) ([]*output.ResultEvent, error) { return nil, fmt.Errorf("boom") },
-		&fakeActiveModule{id: "errs"}, item, func() {}, 0)
+		func(context.Context, *http.Requester) ([]*output.ResultEvent, error) { return nil, fmt.Errorf("boom") },
+		&fakeActiveModule{id: "errs"}, item, nil, func() {}, 0)
 
 	// A module that returns an error still "completed" (it ran to conclusion);
 	// the caller skips processResults because there are no results.
@@ -481,11 +482,11 @@ func TestRunActiveWithTimeout_CanceledCtxReturnsPromptly(t *testing.T) {
 
 	start := time.Now()
 	got, completed := e.runActiveWithTimeout(ctx,
-		func(context.Context) ([]*output.ResultEvent, error) {
+		func(context.Context, *http.Requester) ([]*output.ResultEvent, error) {
 			time.Sleep(2 * time.Second) // leaked goroutine drains into the buffered chan
 			return []*output.ResultEvent{{}}, nil
 		},
-		&fakeActiveModule{id: "blocked"}, item, func() {}, 0)
+		&fakeActiveModule{id: "blocked"}, item, nil, func() {}, 0)
 
 	if completed {
 		t.Fatal("expected completed=false when the phase context is canceled")
@@ -506,11 +507,11 @@ func TestRunActiveWithTimeout_TimeoutIsCounted(t *testing.T) {
 	_, item := makeTestItem("example.com", "/", "ok")
 
 	_, completed := e.runActiveWithTimeout(context.Background(),
-		func(context.Context) ([]*output.ResultEvent, error) {
+		func(context.Context, *http.Requester) ([]*output.ResultEvent, error) {
 			time.Sleep(2 * time.Second)
 			return nil, nil
 		},
-		&fakeActiveModule{id: "slowcount"}, item, func() {}, 0)
+		&fakeActiveModule{id: "slowcount"}, item, nil, func() {}, 0)
 
 	if completed {
 		t.Fatal("expected completed=false on timeout")
@@ -535,11 +536,11 @@ func TestRunActiveWithTimeout_ParentCancelNotCounted(t *testing.T) {
 
 	start := time.Now()
 	_, completed := e.runActiveWithTimeout(ctx,
-		func(context.Context) ([]*output.ResultEvent, error) {
+		func(context.Context, *http.Requester) ([]*output.ResultEvent, error) {
 			time.Sleep(2 * time.Second)
 			return []*output.ResultEvent{{}}, nil
 		},
-		&fakeActiveModule{id: "interrupted"}, item, func() {}, 0)
+		&fakeActiveModule{id: "interrupted"}, item, nil, func() {}, 0)
 
 	if completed {
 		t.Fatal("expected completed=false on parent cancellation")
@@ -558,19 +559,19 @@ func TestRunActiveWithTimeout_ParentCancelNotCounted(t *testing.T) {
 func TestRunActiveWithTimeout_PooledTimerReuse(t *testing.T) {
 	e := &Executor{cfg: ExecutorConfig{ActiveModuleTimeout: 30 * time.Millisecond}}
 	_, item := makeTestItem("example.com", "/", "ok")
-	fast := func(context.Context) ([]*output.ResultEvent, error) { return []*output.ResultEvent{{}}, nil }
-	slow := func(context.Context) ([]*output.ResultEvent, error) {
+	fast := func(context.Context, *http.Requester) ([]*output.ResultEvent, error) { return []*output.ResultEvent{{}}, nil }
+	slow := func(context.Context, *http.Requester) ([]*output.ResultEvent, error) {
 		time.Sleep(300 * time.Millisecond)
 		return []*output.ResultEvent{{}}, nil
 	}
 
-	if _, ok := e.runActiveWithTimeout(context.Background(), fast, &fakeActiveModule{id: "r1"}, item, func() {}, 0); !ok {
+	if _, ok := e.runActiveWithTimeout(context.Background(), fast, &fakeActiveModule{id: "r1"}, item, nil, func() {}, 0); !ok {
 		t.Fatal("first fast call should complete")
 	}
-	if _, ok := e.runActiveWithTimeout(context.Background(), slow, &fakeActiveModule{id: "r2"}, item, func() {}, 0); ok {
+	if _, ok := e.runActiveWithTimeout(context.Background(), slow, &fakeActiveModule{id: "r2"}, item, nil, func() {}, 0); ok {
 		t.Fatal("slow call should time out")
 	}
-	got, ok := e.runActiveWithTimeout(context.Background(), fast, &fakeActiveModule{id: "r3"}, item, func() {}, 0)
+	got, ok := e.runActiveWithTimeout(context.Background(), fast, &fakeActiveModule{id: "r3"}, item, nil, func() {}, 0)
 	if !ok {
 		t.Fatal("final fast call should complete — a pooled timer must not carry a stale fire")
 	}
@@ -592,11 +593,11 @@ func TestRunActiveWithTimeout_SlotHeldUntilWorkUnwinds(t *testing.T) {
 	workDone := make(chan struct{})
 
 	_, completed := e.runActiveWithTimeout(context.Background(),
-		func(context.Context) ([]*output.ResultEvent, error) {
+		func(context.Context, *http.Requester) ([]*output.ResultEvent, error) {
 			<-workDone // block until the test lets the "real work" finish
 			return []*output.ResultEvent{{}}, nil
 		},
-		&fakeActiveModule{id: "held"}, item,
+		&fakeActiveModule{id: "held"}, item, nil,
 		func() { released.Store(true) }, 0)
 
 	if completed {
@@ -881,8 +882,8 @@ func TestRunActiveWithTimeoutRecoversPanic(t *testing.T) {
 
 	released := make(chan struct{})
 	events, completed := e.runActiveWithTimeout(context.Background(),
-		func(context.Context) ([]*output.ResultEvent, error) { panic("boom") },
-		mod, item, func() { close(released) }, 0)
+		func(context.Context, *http.Requester) ([]*output.ResultEvent, error) { panic("boom") },
+		mod, item, nil, func() { close(released) }, 0)
 
 	if !completed {
 		t.Fatal("a recovered panic should report completed=true (it produced a result), not a timeout")

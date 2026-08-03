@@ -42,13 +42,13 @@ func (e *Executor) runActivePerHost(ctx context.Context, reqClient *http.Request
 		mod := module // capture loop variable
 		e.goActiveTask(ctx, g, func(releaseSlot func()) {
 			results, completed := e.runActiveWithTimeout(ctx,
-				func(runCtx context.Context) ([]*output.ResultEvent, error) {
+				func(runCtx context.Context, client *http.Requester) ([]*output.ResultEvent, error) {
 					if contextual, ok := mod.(modules.ContextualActiveModule); ok {
-						return contextual.ScanPerHostContext(runCtx, item, reqClient, e.scanCtx)
+						return contextual.ScanPerHostContext(runCtx, item, client, e.scanCtx)
 					}
-					return mod.ScanPerHost(item, reqClient, e.scanCtx)
+					return mod.ScanPerHost(item, client, e.scanCtx)
 				},
-				mod, item, releaseSlot, 0)
+				mod, item, reqClient, releaseSlot, 0)
 			if completed && len(results) > 0 {
 				e.processResults(ctx, results, mod, item)
 			}
@@ -81,13 +81,13 @@ func (e *Executor) runActivePerRequest(ctx context.Context, reqClient *http.Requ
 		mod := module // capture loop variable
 		e.goActiveTask(ctx, g, func(releaseSlot func()) {
 			results, completed := e.runActiveWithTimeout(ctx,
-				func(runCtx context.Context) ([]*output.ResultEvent, error) {
+				func(runCtx context.Context, client *http.Requester) ([]*output.ResultEvent, error) {
 					if contextual, ok := mod.(modules.ContextualActiveModule); ok {
-						return contextual.ScanPerRequestContext(runCtx, item, reqClient, e.scanCtx)
+						return contextual.ScanPerRequestContext(runCtx, item, client, e.scanCtx)
 					}
-					return mod.ScanPerRequest(item, reqClient, e.scanCtx)
+					return mod.ScanPerRequest(item, client, e.scanCtx)
 				},
-				mod, item, releaseSlot, workUnits)
+				mod, item, reqClient, releaseSlot, workUnits)
 			if completed && len(results) > 0 {
 				e.processResults(ctx, results, mod, item)
 			}
@@ -174,13 +174,13 @@ func (e *Executor) runActivePerInsertionPoint(ctx context.Context, reqClient *ht
 			mod, pt := module, ip // capture loop variables
 			e.goActiveTask(ctx, g, func(releaseSlot func()) {
 				results, completed := e.runActiveWithTimeout(ctx,
-					func(runCtx context.Context) ([]*output.ResultEvent, error) {
+					func(runCtx context.Context, client *http.Requester) ([]*output.ResultEvent, error) {
 						if contextual, ok := mod.(modules.ContextualActiveModule); ok {
-							return contextual.ScanPerInsertionPointContext(runCtx, item, pt, reqClient, e.scanCtx)
+							return contextual.ScanPerInsertionPointContext(runCtx, item, pt, client, e.scanCtx)
 						}
-						return mod.ScanPerInsertionPoint(item, pt, reqClient, e.scanCtx)
+						return mod.ScanPerInsertionPoint(item, pt, client, e.scanCtx)
 					},
-					mod, item, releaseSlot, 0)
+					mod, item, reqClient, releaseSlot, 0)
 				if completed && len(results) > 0 {
 					e.processResults(ctx, results, mod, item)
 				}

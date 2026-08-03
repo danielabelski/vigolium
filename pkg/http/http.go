@@ -70,6 +70,11 @@ type Requester struct {
 	// to outgoing requests. Set per scan task via WithContext so cancellation
 	// reaches modules that call Execute (not ExecuteContext). nil → Background.
 	defaultCtx context.Context
+	// abandonCtx, when non-nil, marks the owning module call as abandoned once it
+	// is done: Execute then refuses to start any NEW request. It is deliberately
+	// NOT attached to outgoing requests — see WithAbandonSignal for why the two
+	// contexts must stay separate.
+	abandonCtx context.Context
 	// carried holds browser-harvested per-host sessions (cookies + optional
 	// pinned User-Agent) carried forward from the spidering phase. It is a
 	// pointer to an atomic-published store so WithContext's shallow copy shares
@@ -327,6 +332,43 @@ func (r *Requester) WithContext(ctx context.Context) *Requester {
 	clone := *r
 	clone.defaultCtx = ctx
 	return &clone
+}
+
+// ErrRequestAbandoned is returned by Execute when the calling module has already
+// been abandoned by the executor (its per-module timeout fired, or the phase was
+// cancelled), so any result it produces will be discarded.
+var ErrRequestAbandoned = errors.New("request abandoned: module call already timed out")
+
+// WithAbandonSignal returns a shallow clone whose Execute refuses to START new
+// requests once ctx is done. Requests already in flight are untouched.
+//
+// This exists because a per-module timeout does not stop the module. The
+// executor's watchdog returns (nil, false) and the caller discards the result,
+// but the module's goroutine keeps running — and kept issuing fresh requests
+// against the phase-bound requester. On a real scan that was 725+ timed-out
+// modules still hammering the target, competing for the same per-host
+// concurrency as live work, to produce findings that are thrown away by
+// definition.
+//
+// The signal is separate from WithContext, and only gates request INITIATION,
+// for one specific reason: the request clusterer dedups concurrent identical
+// requests through a singleflight group, so one in-flight request is shared by
+// every module that asked for it. Attaching a per-module deadline to the
+// outgoing request would let the first caller's timeout cancel a request other
+// modules are legitimately waiting on. Gating initiation instead stops the
+// abandoned module's future load without severing anyone's shared socket.
+func (r *Requester) WithAbandonSignal(ctx context.Context) *Requester {
+	if ctx == nil {
+		return r
+	}
+	clone := *r
+	clone.abandonCtx = ctx
+	return &clone
+}
+
+// abandoned reports whether the owning module call has been given up on.
+func (r *Requester) abandoned() bool {
+	return r.abandonCtx != nil && r.abandonCtx.Err() != nil
 }
 
 // getProxyURL returns proxy URL from CLI flag or environment variable.
@@ -750,6 +792,12 @@ func (r *Requester) Execute(input *httpmsg.HttpRequestResponse, opts Options) (*
 // the goroutine to drain on its own. A context.Background() ctx is equivalent to
 // the legacy non-cancellable Execute.
 func (r *Requester) ExecuteContext(ctx context.Context, input *httpmsg.HttpRequestResponse, opts Options) (*httpUtils.ResponseChain, int, error) {
+	// Refuse new work for a module the executor has already given up on. Checked
+	// before the clusterer so an abandoned caller neither starts a request nor
+	// joins a singleflight group it would only abandon again.
+	if r.abandoned() {
+		return nil, 0, ErrRequestAbandoned
+	}
 	if r.clusterer != nil && !opts.NoClustering {
 		return r.clusterer.Execute(input, opts, func(in *httpmsg.HttpRequestResponse, o Options) (*httpUtils.ResponseChain, int, error) {
 			return r.executeDirectly(ctx, in, o)

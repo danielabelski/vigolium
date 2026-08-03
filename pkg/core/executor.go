@@ -1809,9 +1809,10 @@ func (e *Executor) runPassiveWithTimeout(
 // bounded and processed incrementally).
 func (e *Executor) runActiveWithTimeout(
 	ctx context.Context,
-	scanFn func(context.Context) ([]*output.ResultEvent, error),
+	scanFn func(context.Context, *http.Requester) ([]*output.ResultEvent, error),
 	module modules.Module,
 	item *httpmsg.HttpRequestResponse,
+	reqClient *http.Requester,
 	releaseSlot func(),
 	workUnits int,
 ) ([]*output.ResultEvent, bool) {
@@ -1845,6 +1846,24 @@ func (e *Executor) runActiveWithTimeout(
 	callCtx, timeoutC, stop := callGuard(ctx, timeout, needCancel)
 	defer stop()
 
+	// Abandon signal: cancelled the moment this wrapper stops waiting, on every
+	// path. A module that outlives its timeout keeps running (a goroutine cannot
+	// be killed) and used to keep issuing requests whose results are discarded by
+	// definition — stealing per-host concurrency from live work and holding its
+	// active-task slot until it finally unwound. With this bound, its next
+	// Execute returns ErrRequestAbandoned immediately, so it unwinds promptly and
+	// stops generating load. In-flight requests are untouched, so a request the
+	// clusterer shares with other modules is never severed.
+	//
+	// Deferring the cancel is correct on all three exits: on the normal path the
+	// scan goroutine has already delivered its result, and on the timeout /
+	// parent-cancel paths cancelling is precisely the intent.
+	if reqClient != nil {
+		abandonCtx, abandonCancel := context.WithCancel(ctx)
+		defer abandonCancel()
+		reqClient = reqClient.WithAbandonSignal(abandonCtx)
+	}
+
 	start := time.Now()
 	ch := moduleResultChanPool.Get().(chan moduleCallResult)
 	go func() {
@@ -1857,7 +1876,9 @@ func (e *Executor) runActiveWithTimeout(
 		// runScanFnGuarded recovers a module panic into an error: this goroutine
 		// is outside processItem's recover and the conc.WaitGroup boundary, so an
 		// unrecovered panic here would crash the process.
-		events, err := e.runScanFnGuarded(callCtx, module.ID(), scanFn)
+		events, err := e.runScanFnGuarded(callCtx, module.ID(), func(c context.Context) ([]*output.ResultEvent, error) {
+			return scanFn(c, reqClient)
+		})
 		ch <- moduleCallResult{events, err}
 	}()
 
