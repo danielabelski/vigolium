@@ -10,8 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 // passwdBody is a realistic /etc/passwd dump carrying the module's markers
@@ -137,4 +139,69 @@ func TestScanPerInsertionPoint_CloudflareBlockNoFinding(t *testing.T) {
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "a Cloudflare 403 block page must never be reported as LFI")
+}
+
+// publishedDotenv is a .env genuinely deployed into the served directory — the
+// shape a static-site build routinely ships into an S3 bucket. Its assignments
+// satisfy filesig.ConfirmDotenv, which is precisely why the body alone cannot
+// say whether it was included or simply fetched.
+const publishedDotenv = "APP_NAME=Storefront\nAPP_ENV=production\nAPP_KEY=base64:2Fh8qLd9\n" +
+	"DB_CONNECTION=mysql\nDB_HOST=db.internal\nDB_USERNAME=storefront\nDB_PASSWORD=s3cr3t-value\n" +
+	"MAIL_PASSWORD=another-secret\nREDIS_PASSWORD=cache-secret\n"
+
+// TestScanPerInsertionPoint_PathPointDocrootFileDowngradesToInfo covers the same
+// class the sibling lfi-generic module hit in production, reached here through
+// tier 2: `../../../../.env` injected into a URL *path* segment normalizes back
+// to a plain `/.env` fetch, so a published .env confirms as file content without
+// any inclusion having happened. The exposure is reported, but as informational.
+func TestScanPerInsertionPoint_PathPointDocrootFileDowngradesToInfo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, ".env"):
+			_, _ = io.WriteString(w, publishedDotenv)
+		case strings.Contains(r.URL.Path, "etc/passwd"), strings.Contains(r.URL.Path, "win.ini"):
+			// Served, but with a different status and no file content: this is what
+			// unlocks tier 2 without confirming tier 1.
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, strings.Repeat("no such document here. ", 20))
+		default:
+			_, _ = io.WriteString(w, "ok")
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/docs/report.pdf"), "text/html", cleanBaseline)
+	ip := modtest.InsertionPointByType(t, rr, httpmsg.INS_URL_PATH_FILENAME)
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Len(t, res, 1, "the exposure is still worth reporting")
+	assert.Equal(t, severity.Info, res[0].Info.Severity,
+		"a published .env fetched by its own URL is exposure, not path traversal")
+	assert.Contains(t, res[0].URL, ".env", "the finding must point at the exposed file")
+}
+
+// TestScanPerInsertionPoint_PathPointOSFileKeepsHigh is the counterpart: no web
+// root serves /etc/passwd, so reaching it from a path segment really is an
+// escape and must keep the module's High severity.
+func TestScanPerInsertionPoint_PathPointOSFileKeepsHigh(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "etc/passwd") {
+			_, _ = io.WriteString(w, passwdBody)
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/docs/report.pdf"), "text/html", cleanBaseline)
+	ip := modtest.InsertionPointByType(t, rr, httpmsg.INS_URL_PATH_FILENAME)
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	assert.Equal(t, severity.High, res[0].Info.Severity,
+		"an OS file reached from a path segment is a genuine traversal")
 }

@@ -38,6 +38,15 @@ var ChallengeBodyMarkers = [][]byte{
 	[]byte("Enable JavaScript and cookies to continue"), // Cloudflare managed/JS-challenge noscript text
 	[]byte("_Incapsula_Resource"),                       // Imperva Incapsula interstitial
 	[]byte("Request unsuccessful. Incapsula incident"),  // Imperva Incapsula block page
+	// Netlify bot-protection interstitial: the proof-of-work challenge page posts
+	// its solution to /.netlify/submit-challenge. The page's inline script emits
+	// the path JSON-escaped ("\/.netlify\/submit-challenge"), so both the escaped
+	// and plain forms are listed — the needles are raw bytes, and the escaped form
+	// is not a substring of the plain one. The reserved /.netlify/ function
+	// namespace makes either unambiguous; matching the bare "submit-challenge"
+	// action name instead would misfire on a coding-challenge or CTF application.
+	[]byte(`\/.netlify\/submit-challenge`),
+	[]byte("/.netlify/submit-challenge"),
 }
 
 // challengeBodyMatcher is the single-pass form of ChallengeBodyMarkers, built

@@ -10,8 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 // a 1px PNG, base64-encoded the way CDN/static 404 pages embed data-URI logos.
@@ -219,4 +221,97 @@ func TestScanPerInsertionPoint_NoFPOn404WithBase64(t *testing.T) {
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "a 404 error page must never be flagged as a successful file read")
+}
+
+// publishedHtaccess is the genuine .htaccess an S3/CloudFront-fronted static site
+// publishes at its web root. Its Apache directives satisfy confirmAppConfig — the
+// content really is a .htaccess — which is precisely why the body alone cannot
+// decide whether it was *included* or simply *fetched*.
+const publishedHtaccess = `RewriteEngine on
+
+RewriteCond %{HTTP:X-Forwarded-Proto} =http
+RewriteRule ^(.*)$ https://%{HTTP_HOST}%1 [L,NE,R=301]
+
+RewriteRule ^edit(/.*)?$ /index.html [PT]
+ErrorDocument 404 /index.html
+`
+
+// TestScanPerInsertionPoint_PathPointPublishedFileDowngradesToInfo mirrors the
+// production false positive: a static site (S3 behind CloudFront) that publishes
+// a real .htaccess at its web root. Fuzzing the /index-prod.html *path filename*
+// with the `.htaccess` payload just requests that published file over HTTP — the
+// server reads nothing on the caller's behalf — yet the returned body is a
+// genuine .htaccess, so the confirm step fired and reported Critical LFI.
+//
+// The exposure is still worth surfacing, so the result is kept but downgraded to
+// informational and re-anchored at the file's own URL.
+func TestScanPerInsertionPoint_PathPointPublishedFileDowngradesToInfo(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/.htaccess") {
+			_, _ = w.Write([]byte(publishedHtaccess))
+			return
+		}
+		_, _ = w.Write([]byte("<html><body>app shell</body></html>"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/index-prod.html")
+	ip := modtest.InsertionPointByType(t, rr, httpmsg.INS_URL_PATH_FILENAME)
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Len(t, res, 1, "the exposure is still worth reporting")
+	assert.Equal(t, severity.Info, res[0].Info.Severity,
+		"a published web-root file fetched by its own URL is exposure, not LFI")
+	assert.Contains(t, res[0].URL, "/.htaccess", "the finding must point at the exposed file")
+}
+
+// TestScanPerInsertionPoint_ParamPointKeepsLFISeverity is the counterpart: the
+// same .htaccess content reached through a *query parameter* really is a
+// server-side read, and must keep the module's file-inclusion severity.
+func TestScanPerInsertionPoint_ParamPointKeepsLFISeverity(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Query().Get("file"), ".htaccess") {
+			_, _ = w.Write([]byte(publishedHtaccess))
+			return
+		}
+		_, _ = w.Write([]byte("<html><body>app shell</body></html>"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/?file=index.html")
+	ip := modtest.InsertionPoint(t, rr, "file")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	assert.Equal(t, severity.Undefined, res[0].Info.Severity,
+		"a parameter-driven read must inherit the module's own severity, not the Info downgrade")
+}
+
+// TestScanPerInsertionPoint_PathPointDetectsTraversal guards the other side of
+// the same gate: path insertion points must still catch a traversal that reaches
+// a file no web root can ever hold, so the docroot-relative skip stays narrow.
+func TestScanPerInsertionPoint_PathPointDetectsTraversal(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "etc/passwd") {
+			_, _ = w.Write([]byte("root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"))
+			return
+		}
+		_, _ = w.Write([]byte("<html><body>app shell</body></html>"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/files/report.pdf")
+	ip := modtest.InsertionPointByType(t, rr, httpmsg.INS_URL_PATH_FILENAME)
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected an LFI finding when /etc/passwd content is returned")
 }

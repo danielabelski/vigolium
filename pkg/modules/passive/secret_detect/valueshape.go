@@ -22,6 +22,13 @@ import "strings"
 //     key by a loose provider proximity rule — `Engineering-Kkk2cg-…-hero-block`
 //     grabbed from an HTML `key-src="…"` attribute and graded a High IBM Cloud key
 //     (see isHyphenatedResourceSlug).
+//   - A `<random>.<camelCaseWord>` namespaced resource id mis-captured as a
+//     two-part `id.secret` credential — a GraphQL `"sectionId":
+//     "0c0adefef1…bc5.videoShopSection"` graded a High Zhipu API key (see
+//     isNamespacedResourceID).
+//   - A Discord bot token whose leading segment does not base64-decode to a
+//     snowflake id, i.e. not a Discord token at all (see
+//     isMalformedDiscordBotToken). Scoped to that rule.
 //   - A source-code / UI identifier slug captured by a generic username/password
 //     rule — a `-`/`_`-separated word-only identifier like `label-password` or
 //     `label_username` grabbed from a compiled JS bundle's component metadata (see
@@ -67,6 +74,17 @@ func IsValueShapeNoise(ruleID, ruleName, secret string) bool {
 	// on an HTML `key-src="Engineering-…-hero-block"` attribute). Rule-agnostic: this
 	// shape is never a real credential regardless of which rule attributed it.
 	if isHyphenatedResourceSlug(s) {
+		return true
+	}
+	// A `<random>.<camelCaseWord>` composite is a namespaced resource id, not a
+	// two-part `id.secret` credential (see isNamespacedResourceID). Rule-agnostic
+	// for the same reason as the slug above: the shape is never a real credential.
+	if isNamespacedResourceID(s) {
+		return true
+	}
+	// A Discord bot token whose first segment does not decode to a snowflake is not
+	// a Discord bot token at all (see isMalformedDiscordBotToken).
+	if ruleID == discordBotTokenRuleID && isMalformedDiscordBotToken(s) {
 		return true
 	}
 	// The generic username/password proximity rules capture whatever token sits

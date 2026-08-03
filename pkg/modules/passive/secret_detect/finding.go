@@ -51,10 +51,11 @@ func GradeMatch(mt secretscan.Match, ev EvidenceContext) (*output.ResultEvent, b
 	if !trusted {
 		// Value-shape noise (mis-attributed reCAPTCHA key, code/markup fragment,
 		// resource slug, generic-family code identifier) is judged from the string
-		// alone; position noise (an element-identifier attribute value, or a
-		// weak-password token used as an identifier name) needs the surrounding body.
+		// alone; position noise (an element-identifier attribute value, a
+		// weak-password token used as an identifier name, or a word slug sitting in
+		// the path of a linked URL) needs the surrounding body.
 		if IsValueShapeNoise(mt.RuleID, mt.RuleName, mt.Secret) ||
-			IsElementPositionNoise(ev.Body, mt.Secret, mt.Start, mt.End, mt.RuleID) {
+			IsBodyPositionNoise(ev.Body, mt.Secret, mt.Start, mt.End, mt.RuleID) {
 			return nil, false
 		}
 	}
@@ -73,7 +74,7 @@ func GradeMatch(mt secretscan.Match, ev EvidenceContext) (*output.ResultEvent, b
 		LowValueJWT(mt.Secret),
 		IsReCaptchaSiteKey(mt.RuleName),
 		IsGoogleAPIKey(mt.RuleName, mt.Secret),
-		IsGoogleOAuthClientID(mt.Secret),
+		IsPublicIdentifier(mt.RuleName, mt.Secret),
 	)
 
 	// Reconstruct the matched response (head + full-or-windowed body) so the

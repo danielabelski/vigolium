@@ -103,13 +103,24 @@ func (m *Module) ScanPerInsertionPoint(
 			}
 
 			if rule.MatchWithBaseline(resp.Body().String(), origBody, payload) {
-				results = append(results, &output.ResultEvent{
+				ev := &output.ResultEvent{
 					URL:              urlx.String(),
 					Request:          string(fuzzedRaw),
 					Response:         resp.FullResponseString(),
 					FuzzingParameter: ip.Name(),
 					ExtractedResults: []string{payload},
-				})
+				}
+				// A published file reached through a URL path segment was fetched at
+				// its own URL, not included: report the exposure informationally, and
+				// anchor it at the file's URL since that is the thing to act on.
+				if modkit.DocrootFetchNotInclusion(ip.Type(), payload) {
+					if fileURL := httpmsg.GetURLFromRequest(urlx.Scheme, fuzzedRaw); fileURL != "" {
+						ev.URL = fileURL
+						ev.Matched = fileURL
+					}
+					ev.Info = modkit.DocrootFetchInfo(payload)
+				}
+				results = append(results, ev)
 				resp.Close()
 				return results, nil // Found LFI, skip remaining payloads for this IP
 			}

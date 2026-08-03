@@ -38,6 +38,28 @@ func TestIsEdgeBlockedResponse(t *testing.T) {
 			want: true,
 		},
 		{
+			// The motivating case: the Netlify bot-challenge interstitial embeds a
+			// proof-of-work JWT whose IP-valued `sub` read as a leaked credential.
+			name: "netlify proof-of-work challenge 403",
+			raw:  "HTTP/1.1 403 Forbidden\r\nServer: Netlify\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><script>return fetch(\"\\/.netlify\\/submit-challenge\", {method:\"POST\"})</script></body></html>",
+			want: true,
+		},
+		{
+			name: "netlify challenge marker unescaped",
+			raw:  "HTTP/1.1 403 Forbidden\r\nServer: Netlify\r\nContent-Type: text/html\r\n\r\n<form action=\"/.netlify/submit-challenge\"></form>",
+			want: true,
+		},
+		{
+			name: "coding-challenge app route is not an edge block",
+			raw:  "HTTP/1.1 200 OK\r\nServer: Netlify\r\nContent-Type: text/html\r\n\r\n<form action=\"/api/submit-challenge\">solve the puzzle</form>",
+			want: false,
+		},
+		{
+			name: "genuine app 403 on netlify is not an edge block",
+			raw:  "HTTP/1.1 403 Forbidden\r\nServer: Netlify\r\nContent-Type: application/json\r\n\r\n{\"error\":\"forbidden\"}",
+			want: false,
+		},
+		{
 			name: "akamai 403",
 			raw:  "HTTP/1.1 403 Forbidden\r\nServer: AkamaiGHost\r\n\r\nAccess Denied",
 			want: true,

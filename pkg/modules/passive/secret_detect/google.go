@@ -53,12 +53,13 @@ func IsGoogleOAuthClientID(snippet string) bool {
 
 // secretFindingDescription returns the finding description for a secret match.
 // Most secrets get the generic "Leaked secret detected: <rule>" line; the Google
-// API key, reCAPTCHA site key, and OAuth client ID families carry richer
-// descriptions that explain the actual (context-dependent) impact, matching the
-// downgraded severities those rules now receive. Every description ends with the
-// matched value so the leaked credential is visible in the finding body itself,
-// not only in the separate ExtractedResults list, and then the detection pattern
-// (the rule's RE2 regex that fired) so a reviewer can see exactly what was matched.
+// API key, reCAPTCHA site key, and public OAuth client-ID families (Google,
+// Salesforce) carry richer descriptions that explain the actual (context-dependent)
+// impact, matching the downgraded severities those rules now receive. Every
+// description ends with the matched value so the leaked credential is visible in
+// the finding body itself, not only in the separate ExtractedResults list, and then
+// the detection pattern (the rule's RE2 regex that fired) so a reviewer can see
+// exactly what was matched.
 func secretFindingDescription(ruleName, snippet, pattern string) string {
 	var base string
 	switch {
@@ -66,8 +67,12 @@ func secretFindingDescription(ruleName, snippet, pattern string) string {
 		base = recaptchaSiteKeyDescription
 	case IsGoogleOAuthClientID(snippet):
 		base = googleOAuthClientIDDescription
+	case IsSalesforceConsumerKey(snippet):
+		base = salesforceConsumerKeyDescription
 	case IsGoogleAPIKey(ruleName, snippet):
 		base = googleAPIKeyDescription
+	case IsPublicIdentifierRule(ruleName):
+		base = publicIdentifierDescription
 	default:
 		base = "Leaked secret detected: " + ruleName
 	}

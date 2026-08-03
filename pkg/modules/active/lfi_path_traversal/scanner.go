@@ -181,24 +181,43 @@ func (m *Module) testPayload(
 	}
 
 	urlx, _ := ctx.URL()
-	conf := severity.Firm
-	if score >= 3 {
-		conf = severity.Certain
+	target, info := urlx.String(), lfiInfo(ip.Name(), p.payload, score)
+
+	// A published file reached through a URL path segment was fetched at its own
+	// URL, not included: the traversal prefix normalizes away and the request is
+	// an ordinary GET. Report the exposure informationally — nothing here shows
+	// the application reading a caller-controlled path — and anchor it at the
+	// file's URL since that is the thing to act on.
+	if modkit.DocrootFetchNotInclusion(ip.Type(), p.payload) {
+		info = modkit.DocrootFetchInfo(p.payload)
+		if fileURL := httpmsg.GetURLFromRequest(urlx.Scheme, fuzzedRaw); fileURL != "" {
+			target = fileURL
+		}
 	}
 
 	return &output.ResultEvent{
-		URL:              urlx.String(),
-		Matched:          urlx.String(),
+		URL:              target,
+		Matched:          target,
 		Request:          string(fuzzedRaw),
 		Response:         resp.FullResponseString(),
 		FuzzingParameter: ip.Name(),
 		ExtractedResults: []string{p.payload},
-		Info: output.Info{
-			Name:        "LFI Path Traversal",
-			Description: fmt.Sprintf("Local file inclusion detected via parameter %q with payload: %s (%d distinct file-content markers confirmed)", ip.Name(), p.payload, score),
-			Severity:    severity.High,
-			Confidence:  conf,
-			Reference:   []string{"https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.1-Testing_for_Local_File_Inclusion"},
-		},
+		Info:             info,
 	}, statusChanged, nil
+}
+
+// lfiInfo describes a confirmed inclusion. Confidence rises to Certain once the
+// response carries three or more distinct markers of the targeted file.
+func lfiInfo(paramName, payload string, score int) output.Info {
+	conf := severity.Firm
+	if score >= 3 {
+		conf = severity.Certain
+	}
+	return output.Info{
+		Name:        "LFI Path Traversal",
+		Description: fmt.Sprintf("Local file inclusion detected via parameter %q with payload: %s (%d distinct file-content markers confirmed)", paramName, payload, score),
+		Severity:    severity.High,
+		Confidence:  conf,
+		Reference:   []string{"https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.1-Testing_for_Local_File_Inclusion"},
+	}
 }

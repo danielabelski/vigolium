@@ -202,6 +202,32 @@ func InsertionPoint(t testing.TB, rr *httpmsg.HttpRequestResponse, name string) 
 	return nil
 }
 
+// InsertionPointByType returns the first insertion point of the given type from
+// rr, or fails the test if none exists. Use it for the positional points that
+// InsertionPoint cannot address readably: URL path folders and filenames are
+// named by ordinal ("1", "2", …), so selecting them by name is both opaque and
+// brittle whenever a test URL's path depth changes.
+func InsertionPointByType(t testing.TB, rr *httpmsg.HttpRequestResponse, typ httpmsg.InsertionPointType) httpmsg.InsertionPoint {
+	t.Helper()
+
+	points, err := httpmsg.CreateAllInsertionPoints(rr.Request().Raw(), true)
+	if err != nil {
+		t.Fatalf("modtest: CreateAllInsertionPoints: %v", err)
+	}
+	for _, ip := range points {
+		if ip.Type() == typ {
+			return ip
+		}
+	}
+
+	var got []string
+	for _, ip := range points {
+		got = append(got, ip.Type().String())
+	}
+	t.Fatalf("modtest: no insertion point of type %s (have %v)", typ, got)
+	return nil
+}
+
 // portForURL resolves the numeric port for u, defaulting to the scheme's
 // well-known port when none is present in the URL.
 func portForURL(u *url.URL) (int, error) {

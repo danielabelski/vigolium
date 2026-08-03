@@ -16,7 +16,13 @@ var (
 **Fix:** Never pass user input to filesystem APIs; resolve against a fixed allowlist and reject traversal sequences and wrappers.`
 
 	ModuleConfirmation = "Confirmed when path traversal payloads cause known system file contents (e.g., /etc/passwd) to appear in the response"
-	ModuleSeverity     = severity.Critical
-	ModuleConfidence   = severity.Certain
-	ModuleTags         = []string{"lfi", "injection", "moderate"}
+	// High, not Critical: the oracle proves a file was read, not that the read
+	// reaches code execution — that depends on the sink (a PHP include chain, a
+	// template loader) which this module does not establish. Critical also left no
+	// headroom to distinguish a confirmed /etc/passwd read from the weaker
+	// docroot-relative results, which now downgrade to Info via
+	// modkit.DocrootFetchInfo. Sibling lfi-path-traversal already reports High.
+	ModuleSeverity   = severity.High
+	ModuleConfidence = severity.Certain
+	ModuleTags       = []string{"lfi", "injection", "moderate"}
 )

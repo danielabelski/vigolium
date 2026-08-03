@@ -30,9 +30,11 @@ import (
 // ceiling — the returned severity is the LESS severe of the baseline and the
 // ceiling, so a downgrade signal never promotes a match above its evidence:
 //
-//   - A reCAPTCHA site key (recaptchaSiteKey) or Google OAuth client ID
-//     (oauthClientID) is Info/Tentative outright, ahead of everything including a
-//     (spurious) validation — a public identifier is never a leaked secret.
+//   - A reCAPTCHA site key (recaptchaSiteKey) or a public-by-design identifier
+//     (publicIdentifier; see IsPublicIdentifier — an OAuth client id, a
+//     publishable/public key, a widget app id) is Info/Tentative outright, ahead of
+//     everything including a (spurious) validation — a value the vendor's own flow
+//     requires the browser to carry is never a leaked secret.
 //   - A live-validated secret is Critical/Certain. The native detector never
 //     validates, so this is currently unreachable; kept for completeness.
 //   - A match on a redirect (3xx) response, inside a response header value,
@@ -48,9 +50,9 @@ import (
 // reflected out of the request caps at Low, etc. A generic match baselines at
 // Suspect, which already sits below every Low/Medium ceiling, so only the Info
 // floor (public identifier) can lower it further.
-func SecretFindingSeverity(trusted, generic, validated, redirect, inHeader, reflectedFromRequest, docDemoContext, lowValueJWT, recaptchaSiteKey, googleAPIKey, oauthClientID bool) (severity.Severity, severity.Confidence) {
+func SecretFindingSeverity(trusted, generic, validated, redirect, inHeader, reflectedFromRequest, docDemoContext, lowValueJWT, recaptchaSiteKey, googleAPIKey, publicIdentifier bool) (severity.Severity, severity.Confidence) {
 	// Public identifiers outrank everything — never a leaked secret.
-	if recaptchaSiteKey || oauthClientID {
+	if recaptchaSiteKey || publicIdentifier {
 		return severity.Info, severity.Tentative
 	}
 	// A live-validated credential is serious anywhere (unreachable today).

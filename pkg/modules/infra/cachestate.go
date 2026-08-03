@@ -11,6 +11,7 @@ package infra
 
 import (
 	"bytes"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -201,3 +202,28 @@ func RQPAmplification(resp *httpmsg.HttpResponse) (bool, string) {
 
 	return true, "HTTP/1.1 keep-alive behind a pooling front-end (" + strings.Join(evidence, ", ") + ")"
 }
+
+// CacheMaxAge extracts the freshness lifetime a Cache-Control header grants,
+// in seconds. ok is false when no max-age directive is present or its value does
+// not parse.
+//
+// This lives here, alongside the rest of the cache-header parsing, so the
+// cache-aware modules agree on the directive's meaning: bfla-detection reads it
+// to recognise a shipped static artifact (long TTL ⇒ one representation for
+// every caller, so no authorization conclusion can be drawn), while
+// web-cache-poisoning reads it to decide whether a response is cacheable at all.
+// cc is matched case-insensitively; the leading start-or-separator anchor keeps
+// the pattern off the tail of the shared-cache directive `s-maxage`.
+func CacheMaxAge(cc string) (int, bool) {
+	m := cacheMaxAgeRe.FindStringSubmatch(cc)
+	if m == nil {
+		return 0, false
+	}
+	age, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return age, true
+}
+
+var cacheMaxAgeRe = regexp.MustCompile(`(?i)(?:^|[\s,])max-age\s*=\s*"?(\d+)`)

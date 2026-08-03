@@ -62,13 +62,17 @@ var tier2CanaryFiles = []lfiPayload{
 	// Web config files
 	{payload: "../../../../etc/apache2/apache2.conf", confirm: filesig.ConfirmApacheConf},
 	{payload: "../../../../etc/nginx/nginx.conf", confirm: filesig.ConfirmNginxConf},
-	// Java web.xml
+	// Java web.xml, .git/, .env and .htpasswd are routinely deployed *into* the
+	// served directory (a WEB-INF/ tree in the war root, a .git/ or .env shipped
+	// into an S3 bucket), so on a URL path insertion point these degrade to a
+	// direct fetch and their results downgrade to informational exposure —
+	// modkit.DocrootPublishableTarget recognises them by target file. The
+	// OS-filesystem targets above and below are not publishable: no web root
+	// serves /etc/passwd or /proc/version, so a 200 carrying their content is a
+	// genuine escape however it was requested.
 	{payload: "../../WEB-INF/web.xml", confirm: filesig.ConfirmWebXML},
-	// Git directory
 	{payload: "../../../../.git/HEAD", confirm: filesig.ConfirmGitHead},
-	// Application config files
 	{payload: "../../../../.env", confirm: filesig.ConfirmDotenv},
-	// htpasswd
 	{payload: "../../../../.htpasswd", confirm: filesig.ConfirmHtpasswd},
 	// Log files
 	{payload: "../../../../var/log/apache2/access.log", confirm: filesig.ConfirmAccessLog},

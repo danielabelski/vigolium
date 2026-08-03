@@ -16,7 +16,7 @@ var (
 **Fix:** Require TLS 1.2+; remove RC4/3DES/NULL/anon/EXPORT suites; prefer ECDHE AEAD ciphers (AES-GCM, ChaCha20-Poly1305) and disable static-RSA key exchange.`
 
 	ModuleConfirmation = "Confirmed when the module completes a TLS handshake with the host at a deprecated protocol version or weak cipher suite — re-verified with a second independent handshake before reporting"
-	ModuleSeverity     = severity.Medium
+	ModuleSeverity     = severity.Low
 	ModuleConfidence   = severity.Certain
 	ModuleTags         = []string{"tls", "crypto", "transport", "misconfiguration", "moderate"}
 )

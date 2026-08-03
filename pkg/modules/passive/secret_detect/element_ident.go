@@ -22,14 +22,16 @@ var elementIdentifierAttrs = [][]byte{
 	[]byte("controltovalidate"), []byte("associatedcontrolid"), []byte("targetcontrolid"),
 }
 
-// IsElementPositionNoise reports whether an untrusted-tier match sits in a body
+// IsBodyPositionNoise reports whether an untrusted-tier match sits in a body
 // position that never carries a credential: an element-identifier attribute / prop /
-// DOM-lookup value (IsElementIdentifierMatch, any rule), or — for the weak-password
-// rule only — a token used as an identifier NAME (isIdentifierNameReference). It
-// mirrors IsNonSecretMatch's aggregator shape and owns the rule scoping so
-// GradeMatch's control flow stays flat.
-func IsElementPositionNoise(body []byte, snippet string, start, end int, ruleID string) bool {
+// DOM-lookup value (IsElementIdentifierMatch, any rule), a hyphenated word slug in
+// the path of a linked URL (IsURLPathSlugMatch, any rule), or — for the
+// weak-password rule only — a token used as an identifier NAME
+// (isIdentifierNameReference). It mirrors IsNonSecretMatch's aggregator shape and
+// owns the rule scoping so GradeMatch's control flow stays flat.
+func IsBodyPositionNoise(body []byte, snippet string, start, end int, ruleID string) bool {
 	return IsElementIdentifierMatch(body, snippet, start, end) ||
+		IsURLPathSlugMatch(body, snippet, start, end) ||
 		(ruleID == weakPasswordRuleID && isIdentifierNameReference(body, snippet, start, end))
 }
 
@@ -155,6 +157,8 @@ func isIdentByte(b byte) bool {
 }
 
 func isLetterByte(b byte) bool { return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' }
+
+func isUpperByte(b byte) bool { return b >= 'A' && b <= 'Z' }
 
 func isDigitByte(b byte) bool { return b >= '0' && b <= '9' }
 

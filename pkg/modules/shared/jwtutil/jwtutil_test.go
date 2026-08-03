@@ -12,6 +12,12 @@ import (
 // reflected into the page body.
 const cloudflareAccessMetaToken = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6IjMzZmZlMWNjMWZiYTUyMmMwZmNmMWQ0ODVkODMxZjU4ZWZiYTIyZGEyOTRmMTYzNWY2NWQ1YWU4ZDQ3ZWYwNjMifQ.eyJ0eXBlIjoibWV0YSIsImF1ZCI6ImZkNjI4ZGUwN2Y4OGJiOTFlNjQ3MmVhMTI3NGI3ZjE3Nzg2MjQ0ZTc2ZjI3NzYzMGQwNTRhYjY3MWQ0N2NhNTUiLCJob3N0bmFtZSI6ImEucGFnZXMtcGVyZi5yb2NoZS5jb20iLCJyZWRpcmVjdF91cmwiOiIvIiwic2VydmljZV90b2tlbl9zdGF0dXMiOmZhbHNlLCJpc193YXJwIjpmYWxzZSwiaXNfZ2F0ZXdheSI6ZmFsc2UsImV4cCI6MTc4MTM1NzI1MSwibmJmIjoxNzgxMzU2OTUxLCJpYXQiOjE3ODEzNTY5NTEsImF1dGhfc3RhdHVzIjoiTk9ORSIsIm10bHNfYXV0aCI6eyJjZXJ0X2lzc3Vlcl9kbiI6IiIsImNlcnRfc2VyaWFsIjoiIiwiY2VydF9pc3N1ZXJfc2tpIjoiIiwiY2VydF9wcmVzZW50ZWQiOmZhbHNlLCJjb21tb25fbmFtZSI6IiIsImF1dGhfc3RhdHVzIjoiTk9ORSJ9LCJyZWFsX2NvdW50cnkiOiJTRyIsImFwcF9zZXNzaW9uX2hhc2giOiI5N2JkM2RjYjJlNDk2MzY1OTM5OWQxMGViZmM3NjIyNDAwOTc2MmYyY2EyNzVhNWY3YjExMjMxMTEyOGY5Y2M1In0.azTVcieY9dZmh2mu0l9pCIDM8iyEN-lz9m8yqKcy8-Dhq40Ys6y7tMp5gVt477d4xXvuDL_kqt0UPERV-Sy5cOCiVby3rsY2fS-khHXR5ciC_DJSJFEnmU1iEEig6kC1qhlPjVU0tVzlqLiPjJb1Uxg9AZy6hXWcHwZ3DScohmsH83wy4XijOr68TpIWiCoJD7bAi06vD-_TOzwOF2JKNmBsdKpMBApaLZd1HPbxH34AlR7uUK_BgRckHDTe9Xm3eIO01CeBUP4C1xopGS6HeZ1XUg0HOEJy2sL9M-pxfLD_vdqOKVbG7wHYKhdjRDsCmSumBCU9wluLn0xzciAsIQ"
 
+// netlifyPoWChallengeToken is the verbatim JWT from the Netlify bot-challenge
+// false positive: the proof-of-work token embedded in a 403 interstitial. Its
+// `sub` is the anonymous visitor's own IP, its audience is the challenge service,
+// it carries the puzzle parameters (ch/dif/pow), and it lives for 30 seconds.
+const netlifyPoWChallengeToken = "eyJhbGciOiJIUzI1NiIsImtpZCI6IlYrN1B4SXIvNmlaT1V0aS9QVmtGazBPYm9sQXJmdEhuVWltelVGd0UvVTgiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJuZXRsaWZ5Iiwic3ViIjoiMTQuMTg3LjU0LjI0MiIsImF1ZCI6WyJzZWMtY2hhbGxlbmdlLm5ldGxpZnkuY29tIl0sImV4cCI6MTc4NTE1MjU4NywibmJmIjoxNzg1MTUyNTQ3LCJpYXQiOjE3ODUxNTI1NTcsImNoIjoiMmY5MWQzMTA4NzJhMjBlMyIsImRpZiI6MTYsInBvdyI6dHJ1ZX0.BYlcvR9YFDj1UGmopkZ1sqTfedXWmTmrtwV42Q96dxE"
+
 // makeJWT builds a well-formed compact JWT from a header and payload (the
 // signature segment is a fixed placeholder — these helpers never verify it).
 func makeJWT(t *testing.T, header, payload map[string]any) string {
@@ -35,6 +41,7 @@ func TestIsPreAuthMetaTokenString(t *testing.T) {
 		want    bool
 	}{
 		{"cloudflare access meta token", cloudflareAccessMetaToken, true},
+		{"netlify proof-of-work challenge", netlifyPoWChallengeToken, true},
 		{"type=meta", makeJWT(t, rs256, map[string]any{"type": "meta"}), true},
 		{"auth_status=NONE", makeJWT(t, rs256, map[string]any{"auth_status": "NONE"}), true},
 		{"auth_status=none lowercase", makeJWT(t, rs256, map[string]any{"auth_status": "none"}), true},
@@ -64,6 +71,16 @@ func TestClassifyAndIsLowValue(t *testing.T) {
 		wantLowValue  bool
 	}{
 		{"cloudflare meta token", cloudflareAccessMetaToken, true, false, true},
+		{"netlify proof-of-work challenge", netlifyPoWChallengeToken, true, false, true},
+		{"pow with challenge nonce", makeJWT(t, rs256, map[string]any{"sub": "1.2.3.4", "pow": true, "ch": "abc"}), true, false, true},
+		{"pow with difficulty", makeJWT(t, rs256, map[string]any{"pow": true, "dif": 16}), true, false, true},
+		{"pow alone is not a challenge shape", makeJWT(t, rs256, map[string]any{"sub": "user-42", "pow": true}), true, true, false},
+		{"ch alone is not a challenge shape", makeJWT(t, rs256, map[string]any{"sub": "user-42", "ch": "abc"}), true, true, false},
+		{"ip-valued sub is not an identity", makeJWT(t, rs256, map[string]any{"iss": "edge", "sub": "14.187.54.242"}), true, false, true},
+		{"ipv6 sub is not an identity", makeJWT(t, rs256, map[string]any{"iss": "edge", "sub": "2406:da18:b3d:e201::258"}), true, false, true},
+		{"numeric user id sub stays an identity", makeJWT(t, rs256, map[string]any{"sub": "1234567"}), true, true, false},
+		{"ip sub with a real scope still grants", makeJWT(t, rs256, map[string]any{"sub": "1.2.3.4", "scope": "read write"}), true, true, false},
+		{"ip sub with an email identity still grants", makeJWT(t, rs256, map[string]any{"sub": "1.2.3.4", "email": "a@b.com"}), true, true, false},
 		{"type=meta", makeJWT(t, rs256, map[string]any{"type": "meta"}), true, false, true},
 		{"auth_status=NONE", makeJWT(t, rs256, map[string]any{"auth_status": "NONE", "aud": "app"}), true, false, true},
 		{"no-identity registered claims", makeJWT(t, rs256, map[string]any{"iss": "cf", "exp": 1781357251}), true, false, true},

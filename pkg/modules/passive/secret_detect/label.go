@@ -13,9 +13,9 @@ import "strings"
 // normalised to a shorter, consistent label because the rule name is generic or
 // misleading and the module already classifies them for severity purposes: the
 // AIza… key family (routinely mislabelled "Google Gemini API Key"), reCAPTCHA
-// site keys, Google OAuth client IDs, and JWTs (which several rules match under
-// assorted names). When the rule name is blank, a bare hex token is recognised
-// structurally and "secret" is the last resort.
+// site keys, public OAuth client IDs (Google, Salesforce), and JWTs (which several
+// rules match under assorted names). When the rule name is blank, a bare hex token
+// is recognised structurally and "secret" is the last resort.
 //
 // The overrides are ordered most-specific first and mirror the severity ladder in
 // SecretFindingSeverity, so the label always names the same family the severity
@@ -26,6 +26,8 @@ func PatternLabel(ruleName, snippet string) string {
 		return "reCAPTCHA site key"
 	case IsGoogleOAuthClientID(snippet):
 		return "Google OAuth client ID"
+	case IsSalesforceConsumerKey(snippet):
+		return "Salesforce consumer key (client ID)"
 	case IsGoogleAPIKey(ruleName, snippet):
 		return "Google API key"
 	}

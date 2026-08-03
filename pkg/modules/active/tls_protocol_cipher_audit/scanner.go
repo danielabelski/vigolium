@@ -25,6 +25,10 @@ const dialTimeout = 7 * time.Second
 // weakProbe is one weak-TLS configuration to test. A successful handshake with
 // exactly this protocol range / cipher set is deterministic proof the server
 // supports it — there is no false positive, only a negotiated fact.
+//
+// Every probe is Low: a legacy protocol or cipher still being *offered* is a
+// hardening/compliance gap, not a directly exploitable flaw — attacking it needs
+// a privileged network position plus a client willing to negotiate down.
 type weakProbe struct {
 	tag      string
 	label    string
@@ -43,21 +47,21 @@ var weakProbes = []weakProbe{
 	{
 		tag:      "tls10",
 		label:    "TLS 1.0 enabled (deprecated — RFC 8996)",
-		severity: severity.Medium,
+		severity: severity.Low,
 		minVer:   tls.VersionTLS10,
 		maxVer:   tls.VersionTLS10,
 	},
 	{
 		tag:      "tls11",
 		label:    "TLS 1.1 enabled (deprecated — RFC 8996)",
-		severity: severity.Medium,
+		severity: severity.Low,
 		minVer:   tls.VersionTLS11,
 		maxVer:   tls.VersionTLS11,
 	},
 	{
 		tag:      "rc4",
 		label:    "RC4 cipher suite accepted (cryptographically broken)",
-		severity: severity.Medium,
+		severity: severity.Low,
 		minVer:   tls.VersionTLS10,
 		maxVer:   tls.VersionTLS12,
 		ciphers: []uint16{

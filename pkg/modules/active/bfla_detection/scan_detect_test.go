@@ -509,3 +509,184 @@ func TestScanPerRequest_BinaryBodyMislabeledNoFalsePositive(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, res, "a binary body mislabeled as text must be skipped via the body sniff")
 }
+
+// TestScanPerRequest_MethodSwitchDetectsWithCredentials is the positive control
+// for the same-representation guard added below: when the original GET *did*
+// carry credentials, an unauthenticated POST returning that same privileged
+// content is the bypass, not a false positive, and must still be reported.
+func TestScanPerRequest_MethodSwitchDetectsWithCredentials(t *testing.T) {
+	t.Parallel()
+	const adminPath = "/admin/config"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != adminPath {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
+		}
+		// GET requires the session cookie; POST is served to anyone.
+		if r.Method == http.MethodGet && r.Header.Get("Cookie") == "" {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("forbidden"))
+			return
+		}
+		_, _ = w.Write([]byte(adminBody))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := withHeader(t, modtest.Response(
+		modtest.Request(t, srv.URL+adminPath), "text/html", adminBody,
+	), "Cookie", "session=valid-session-token")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "an unauthenticated POST returning the credentialed page is a real bypass")
+}
+
+// TestScanPerRequest_MethodSwitchSameRepresentationNoFalsePositive covers the
+// shape shared by two production false positives: an endpoint that needed no
+// credentials in the first place and answers POST with byte-identical content to
+// the GET. The server simply ignores the method for that route, so nothing about
+// function-level authorization has been demonstrated. The response is explicitly
+// no-store and the wildcard/method baselines differ, so only the
+// same-representation guard can reject it.
+func TestScanPerRequest_MethodSwitchSameRepresentationNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	const adminPath = "/admin/portal"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if r.URL.Path != adminPath {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
+		}
+		// Same representation for every method — the route is method-agnostic.
+		_, _ = w.Write([]byte(adminBody))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+adminPath), "text/html", adminBody)
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a method-agnostic public route must not be flagged as a BFLA bypass")
+}
+
+// TestScanPerRequest_HealthProbeNoFalsePositive mirrors the production false
+// positive on //actuator/healthcheck: a health probe returning `<health>ok</health>`
+// to every method was reported as a High authorization bypass. Health/liveness
+// endpoints are public by design and expose no privileged function.
+func TestScanPerRequest_HealthProbeNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	const health = "<health>ok</health>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/actuator/healthcheck") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(health))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/actuator/healthcheck"), "application/xml", health)
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a health probe is public by design and is not a privileged function")
+}
+
+// tableauErrorPage is the static "something went wrong" page Tableau ships as a
+// file at /vizportalclient/internalServerError.var — served with a one-year TTL
+// and validators, and identical for every method.
+var tableauErrorPage = "<!DOCTYPE html><html><head><title>An unexpected error occurred</title></head>" +
+	"<body><h1>Uh oh! Something went wrong.</h1>" + strings.Repeat("<p>An unexpected error occurred.</p>", 20) + "</body></html>"
+
+// TestScanPerRequest_StaticErrorPageNoFalsePositive mirrors the production false
+// positive on /vizportalclient/internalServerError.var: a cacheable static error
+// page whose filename merely *starts* with the "/internal" admin pattern, and
+// which — being a file — answers POST with the same bytes as GET.
+func TestScanPerRequest_StaticErrorPageNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	const p = "/vizportalclient/internalServerError.var"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != p {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
+		}
+		w.Header().Set("Cache-Control", "max-age=31536000")
+		w.Header().Set("Etag", `"132-6538062df8900"`)
+		w.Header().Set("Accept-Ranges", "bytes")
+		_, _ = w.Write([]byte(tableauErrorPage))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+p+"?requestId=am1Aa72GGHjQLkJwCbx5Mg"), "text/html", tableauErrorPage)
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a cacheable static error page is not a privileged endpoint")
+}
+
+// TestIsAdminPath_SegmentBoundary pins the anchoring rules: an admin pattern must
+// end at a word boundary, so it still matches its own segment and ordinary
+// suffixes, but never the leading word of a longer camelCase or space-separated
+// identifier.
+func TestIsAdminPath_SegmentBoundary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/admin", true},
+		{"/admin/users", true},
+		{"/admin-panel/users", true},
+		{"/administration/users", true},
+		{"/api/v1/admin/reports", true},
+		{"/actuator/env", true},
+		{"/internal/status", true},
+		{"/internal-api/keys", true},
+		{"/debug/pprof", true},
+		// Pattern is only the first camelCase word of a filename.
+		{"/vizportalclient/internalServerError.var", false},
+		{"/js/configLoader.js", false},
+		{"/app/systemStatus", false},
+		// Pattern followed by a space belongs to a multi-word filename.
+		{"/is/image/globex/System Image", false},
+		// No pattern at all.
+		{"/index.html", false},
+		{"/products/42", false},
+	} {
+		assert.Equalf(t, tc.want, isAdminPath(tc.path), "isAdminPath(%q)", tc.path)
+	}
+}
+
+// TestLooksCacheableStatic pins the cache-header heuristic that separates a
+// shipped artifact from a rendered privileged response.
+func TestLooksCacheableStatic(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		headers string
+		want    bool
+	}{
+		{"long ttl with validator", "Cache-Control: max-age=31536000\r\nEtag: \"abc\"\r\n", true},
+		{"long ttl with last-modified", "Cache-Control: public, max-age=86400\r\nLast-Modified: Fri, 05 Jun 2026 11:59:00 GMT\r\n", true},
+		{"long ttl but no validator", "Cache-Control: max-age=31536000\r\n", false},
+		{"short ttl", "Cache-Control: max-age=60\r\nEtag: \"abc\"\r\n", false},
+		{"private", "Cache-Control: private, max-age=31536000\r\nEtag: \"abc\"\r\n", false},
+		{"no-store", "Cache-Control: no-store\r\nEtag: \"abc\"\r\n", false},
+		{"no cache-control", "Etag: \"abc\"\r\n", false},
+		{"sets a session cookie", "Cache-Control: max-age=31536000\r\nEtag: \"abc\"\r\nSet-Cookie: s=1\r\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "HTTP/1.1 200 OK\r\n" + tc.headers + "Content-Type: text/html\r\n\r\nbody"
+			assert.Equal(t, tc.want, looksCacheableStatic(httpmsg.NewHttpResponse([]byte(raw))))
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"path"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -12,6 +13,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/utils"
@@ -94,6 +96,12 @@ func (m *Module) ScanPerRequest(
 		return nil, nil
 	}
 
+	// Health/liveness probes sit under privileged-looking prefixes but are public
+	// by design and expose no privileged function — see isBenignProbePath.
+	if isBenignProbePath(urlx.Path) {
+		return nil, nil
+	}
+
 	// Original response must be 2xx (we can only test what currently succeeds)
 	if ctx.Response() == nil {
 		return nil, nil
@@ -141,6 +149,14 @@ func (m *Module) ScanPerRequest(
 		return nil, nil
 	}
 
+	// The same reasoning by cache semantics rather than content type: a body the
+	// origin publishes as a long-lived, publicly cacheable artifact is served
+	// identically to every caller, so it cannot be a privileged function's output
+	// however admin-like its path reads. See looksCacheableStatic.
+	if looksCacheableStatic(ctx.Response()) {
+		return nil, nil
+	}
+
 	// Probe the host with a random nonexistent path. If the original "admin"
 	// response is just the host's wildcard / SPA shell, every BFLA test will
 	// fire because removing auth still returns the same shell. Bail out.
@@ -149,10 +165,17 @@ func (m *Module) ScanPerRequest(
 		return nil, nil
 	}
 
+	// Whether the captured request proves anything about authorization at all is
+	// one property of one immutable request, so decide it once here rather than
+	// letting each sub-test re-derive it: without credentials there is no
+	// authenticated baseline, and a successful "unauthenticated" probe only
+	// restates that the endpoint is public.
+	hasCreds := requestHasCredentials(ctx.Request())
+
 	var results []*output.ResultEvent
 
 	// Test a) Remove Authorization and Cookie headers
-	result, err := m.testNoAuth(ctx, httpClient, urlx, origStatus, origBody, origBodyLen, wildcard)
+	result, err := m.testNoAuth(ctx, httpClient, urlx, origStatus, origBody, origBodyLen, hasCreds, wildcard)
 	if err != nil {
 		if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 			return nil, nil
@@ -175,7 +198,7 @@ func (m *Module) ScanPerRequest(
 	}
 
 	// Test c) Method switching on admin paths without auth
-	methodResults, err := m.testMethodSwitching(ctx, httpClient, urlx, origStatus, wildcard)
+	methodResults, err := m.testMethodSwitching(ctx, httpClient, urlx, origStatus, origBody, hasCreds, wildcard)
 	if err != nil {
 		if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 			return nil, nil
@@ -196,6 +219,7 @@ func (m *Module) testNoAuth(
 	origStatus int,
 	origBody []byte,
 	origBodyLen int,
+	hasCreds bool,
 	wildcard *modkit.WildcardEntry,
 ) (*output.ResultEvent, error) {
 	// A "missing authorization" bypass is only meaningful when the original
@@ -206,9 +230,7 @@ func (m *Module) testNoAuth(
 	// "/debug/", "/internal/" or "/config/" landing page on a CDN that was never
 	// authorization-gated. Without an authenticated baseline we cannot distinguish
 	// a public page from a real bypass, so require credentials before testing.
-	authVal, _ := httpmsg.GetHeaderValue(ctx.Request().Raw(), "Authorization")
-	cookieVal, _ := httpmsg.GetHeaderValue(ctx.Request().Raw(), "Cookie")
-	if strings.TrimSpace(authVal) == "" && strings.TrimSpace(cookieVal) == "" {
+	if !hasCreds {
 		return nil, nil
 	}
 
@@ -393,6 +415,8 @@ func (m *Module) testMethodSwitching(
 	httpClient *http.Requester,
 	urlx *urlutil.URL,
 	origStatus int,
+	origBody []byte,
+	hasCreds bool,
 	wildcard *modkit.WildcardEntry,
 ) ([]*output.ResultEvent, error) {
 	// Only test method switching if original request is GET
@@ -400,6 +424,10 @@ func (m *Module) testMethodSwitching(
 	if err != nil || strings.ToUpper(method) != "GET" {
 		return nil, nil
 	}
+
+	// The baseline is invariant across the three method attempts below, so
+	// tokenize it once instead of rebuilding its signature per attempt.
+	origSig := modkit.BodySignature(string(origBody))
 
 	var results []*output.ResultEvent
 	methodsToTry := []string{"POST", "PUT", "DELETE"}
@@ -445,6 +473,20 @@ func (m *Module) testMethodSwitching(
 			// empty 200 for POST identical to the GET. Require actual content before
 			// flagging a method-switch bypass.
 			if len(bytes.TrimSpace(candBody)) == 0 {
+				continue
+			}
+
+			// When the original GET carried no credentials and the switched method
+			// returns the SAME representation that GET already served to everyone, the
+			// route simply ignores the method — a static file, a health probe, a CDN
+			// object — and nothing about function-level authorization has been shown.
+			// Two live false positives had exactly this shape: a cacheable Tableau
+			// error page and `<health>ok</health>`, both answering POST with
+			// byte-identical content on an endpoint that needed no credentials to
+			// begin with. Where the original request DID carry credentials, identical
+			// content is the opposite signal — the privileged representation came back
+			// unauthenticated — so only the no-credential case is dropped.
+			if !hasCreds && sigMatchesBody(origSig, candBody) {
 				continue
 			}
 
@@ -600,15 +642,132 @@ func confirmPrivilegedReproduces(
 	return true
 }
 
-// isAdminPath checks if the path matches known admin/privileged patterns (case-insensitive).
+// isAdminPath checks if the path matches known admin/privileged patterns
+// (case-insensitive), anchored so a pattern cannot match the leading word of a
+// longer identifier — see pathPatternMatches.
 func isAdminPath(path string) bool {
-	pathLower := strings.ToLower(path)
+	lower := strings.ToLower(path)
 	for _, pattern := range adminPathPatterns {
-		if strings.Contains(pathLower, pattern) {
+		if pathPatternMatches(path, lower, pattern) {
 			return true
 		}
 	}
 	return false
+}
+
+// pathPatternMatches reports whether pattern (always "/word…", lowercase) occurs
+// in path with a clean right-hand boundary. lower must be strings.ToLower(path);
+// the caller supplies it so the lowercase copy is made once per request rather
+// than once per pattern, while boundaryTerminates still sees the original case.
+// Every pattern starts with "/", so the left edge is already a segment boundary
+// and only the trailing edge needs checking.
+func pathPatternMatches(path, lower, pattern string) bool {
+	for from := 0; from <= len(lower)-len(pattern); {
+		idx := strings.Index(lower[from:], pattern)
+		if idx < 0 {
+			return false
+		}
+		start := from + idx
+		if boundaryTerminates(path, start+len(pattern)) {
+			return true
+		}
+		from = start + 1
+	}
+	return false
+}
+
+// boundaryTerminates reports whether the byte at end closes the matched pattern
+// as its own word: end-of-path, a separator, or a lowercase continuation (so
+// "/admin" still matches "/administration"). Anything else — an uppercase
+// letter, a digit, a space — means the pattern was only the first
+// camelCase/compound word of a longer identifier:
+// "internalServerError.var" is a static error page's filename, not the
+// "/internal" admin tree, and "System Image" is an image filename, not
+// "/system".
+//
+// The unbounded substring match was a live false positive: Tableau's cacheable
+// /vizportalclient/internalServerError.var was classified as a privileged
+// endpoint, and because a static file answers every method with the same bytes,
+// the method-switch test then reported a High authorization bypass on it.
+func boundaryTerminates(path string, end int) bool {
+	if end >= len(path) {
+		return true
+	}
+	c := path[end]
+	return strings.IndexByte("/-_.?&=", c) >= 0 || (c >= 'a' && c <= 'z')
+}
+
+// benignProbeNames are final path-segment names for endpoints whose entire
+// purpose is to answer unauthenticated requests: health, liveness and readiness
+// probes. They frequently sit under a privileged-looking prefix
+// ("/actuator/health", "/internal/ping") yet expose no privileged function, and
+// they return one fixed body for every method — so every BFLA sub-test passes
+// trivially. Live false positive: POST //actuator/healthcheck answering
+// `<health>ok</health>` was reported as a High authorization bypass.
+var benignProbeNames = map[string]struct{}{
+	"alive": {}, "health": {}, "health-check": {}, "healthcheck": {},
+	"healthchecks": {}, "healthz": {}, "heartbeat": {}, "liveness": {},
+	"livez": {}, "ping": {}, "readiness": {}, "ready": {}, "readyz": {},
+}
+
+// isBenignProbePath reports whether the path's last segment names a
+// health/liveness probe (see benignProbeNames). A trailing file extension is
+// stripped so "/health.json" and "/healthz.txt" match too — but only when the
+// dot is not the leading character, so a dotfile keeps its whole name.
+func isBenignProbePath(p string) bool {
+	last := path.Base(strings.Trim(p, "/"))
+	if ext := path.Ext(last); len(ext) < len(last) {
+		last = strings.TrimSuffix(last, ext)
+	}
+	_, ok := benignProbeNames[strings.ToLower(last)]
+	return ok
+}
+
+// requestHasCredentials reports whether a request carried an Authorization
+// header or a Cookie. Without one there is no authenticated baseline, so a
+// successful "unauthenticated" probe only restates that the endpoint is public.
+// It reads through HttpRequest's memoized header parse rather than re-scanning
+// the raw bytes on every call.
+func requestHasCredentials(req *httpmsg.HttpRequest) bool {
+	return strings.TrimSpace(req.Header("Authorization")) != "" ||
+		strings.TrimSpace(req.Header("Cookie")) != ""
+}
+
+// staticCacheMinAge is the Cache-Control max-age (one hour) at or above which a
+// 2xx response is treated as a shipped static resource rather than a live
+// privileged function. Privileged endpoints are served no-store/private or with
+// a short TTL; files shipped by the origin carry hours to years.
+const staticCacheMinAge = 3600
+
+// looksCacheableStatic reports whether a response is a stored static artifact:
+// publicly cacheable for a long TTL, carrying a validator, and setting no
+// session cookie. Such a body is identical for every caller and every method, so
+// it can never evidence a function-level authorization bypass. The
+// Content-Type-based static-asset check cannot see these — Tableau's
+// internalServerError.var is served as text/html with
+// `Cache-Control: max-age=31536000`, `Expires`, `Accept-Ranges: bytes` and
+// validators — but the cache headers can.
+func looksCacheableStatic(resp *httpmsg.HttpResponse) bool {
+	if resp == nil {
+		return false
+	}
+	cc := strings.ToLower(resp.Header("Cache-Control"))
+	if cc == "" ||
+		strings.Contains(cc, "no-store") ||
+		strings.Contains(cc, "no-cache") ||
+		strings.Contains(cc, "private") {
+		return false
+	}
+	if strings.TrimSpace(resp.Header("Set-Cookie")) != "" {
+		return false
+	}
+	if age, ok := infra.CacheMaxAge(cc); !ok || age < staticCacheMinAge {
+		return false
+	}
+	// A validator confirms the body is an artifact the origin can revalidate,
+	// not a response rendered per request.
+	return strings.TrimSpace(resp.Header("ETag")) != "" ||
+		strings.TrimSpace(resp.Header("Last-Modified")) != ""
 }
 
 // bflaContentSimilarityMin is the minimum normalized token similarity between the
@@ -621,10 +780,17 @@ const bflaContentSimilarityMin = 0.8
 
 // bodiesContentSimilar reports whether two response bodies are substantially the
 // same content by normalized token similarity (dynamic hex/digit runs collapsed).
-func bodiesContentSimilar(statusA int, bodyA []byte, statusB int, bodyB []byte) bool {
-	a := modkit.NewResponseSignature(statusA, string(bodyA), "")
-	b := modkit.NewResponseSignature(statusB, string(bodyB), "")
-	return modkit.QuickRatio(a, b) >= bflaContentSimilarityMin
+func bodiesContentSimilar(_ int, bodyA []byte, _ int, bodyB []byte) bool {
+	return sigMatchesBody(modkit.BodySignature(string(bodyA)), bodyB)
+}
+
+// sigMatchesBody is the signature-reuse form of bodiesContentSimilar, for
+// callers comparing one stable baseline against several candidates: it
+// tokenizes only the candidate. BodySignature is used rather than
+// NewResponseSignature because QuickRatio reads only the token counts — the
+// status code and the SHA-256 of the body would be computed and never looked at.
+func sigMatchesBody(sig modkit.ResponseSignature, body []byte) bool {
+	return modkit.QuickRatio(sig, modkit.BodySignature(string(body))) >= bflaContentSimilarityMin
 }
 
 // isBodyLengthSimilar returns true if the two body lengths are within 50% of each other.

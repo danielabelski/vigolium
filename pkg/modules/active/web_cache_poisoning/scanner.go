@@ -280,13 +280,6 @@ func headerListedInVary(vary, header string) bool {
 }
 
 func hasPositiveMaxAge(cc string) bool {
-	for _, directive := range strings.Split(cc, ",") {
-		directive = strings.TrimSpace(directive)
-		if !strings.HasPrefix(directive, "max-age=") {
-			continue
-		}
-		n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(directive, "max-age=")))
-		return err == nil && n > 0
-	}
-	return false
+	age, ok := infra.CacheMaxAge(cc)
+	return ok && age > 0
 }
