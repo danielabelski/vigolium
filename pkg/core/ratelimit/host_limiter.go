@@ -248,9 +248,11 @@ type HostRateLimiterConfig struct {
 	// MinPerHost is the back-off floor in adaptive mode (default: max(1,
 	// MaxPerHost/10)). Ignored when Adaptive is false.
 	MinPerHost int
-	// CeilingPerHost is the ramp ceiling in adaptive mode (default: MaxPerHost, so
-	// adaptive never exceeds the configured concurrency). Set above MaxPerHost to
-	// let healthy hosts ramp past it. Ignored when Adaptive is false.
+	// CeilingPerHost is the ramp ceiling in adaptive mode. Unset (<= 0) it
+	// defaults by mode: Adaptive gets MaxPerHost * defaultAdaptiveCeilingFactor so
+	// a healthy host can actually ramp, WAF-auto-arm gets exactly MaxPerHost so a
+	// throttled host recovers to the configured concurrency and never past it.
+	// Always clamped to at least MaxPerHost. Ignored in static mode.
 	CeilingPerHost int
 
 	// WafAutoArm enables WAF-triggered adaptive throttling: hosts run at the static
@@ -277,6 +279,57 @@ func DefaultHostRateLimiterConfig() HostRateLimiterConfig {
 	}
 }
 
+// defaultAdaptiveCeilingFactor is how far above MaxPerHost a healthy host may
+// ramp in Adaptive mode when no explicit ceiling is configured.
+//
+// A ceiling equal to MaxPerHost (the previous default) made Adaptive a one-way
+// ratchet: the AIMD controller could only ever back a host OFF, and nothing in
+// the system could discover that a host tolerates more than the configured
+// concurrency. On a high-RTT target that is the binding constraint on the whole
+// scan — the dynamic-assessment phase is ~99.7% idle wait, so throughput is
+// (in-flight / RTT) and a static in-flight cap sets the phase's wall clock
+// outright.
+//
+// 2x is deliberately modest: it is enough to close the ~1.6x deadline shortfall
+// measured on a real 1.8s-RTT target, while keeping the opening burst at the
+// operator's configured MaxPerHost — a host only reaches the ceiling by serving
+// a sustained run of clean responses, and any distress signal halves it back.
+const defaultAdaptiveCeilingFactor = 2
+
+// EffectiveCeilingPerHost returns the AIMD ramp ceiling implied by a per-host
+// concurrency setting, an optionally-configured ceiling, and whether adaptive
+// mode is on.
+//
+// The default is mode-dependent on purpose. Adaptive is an explicit opt-in to
+// concurrency discovery, so it gets headroom to ramp into. WAF-auto-arm is a
+// throttle: it exists to back a host off once an edge starts blocking, and a
+// host recovering from that should return to the configured concurrency and
+// stop there — never use a WAF block as licence to exceed MaxPerHost.
+//
+// An explicit configuredCeiling always wins, and the result is floored at
+// maxPerHost so a ceiling below the start can't strand the pool below its
+// initial fill.
+//
+// Exported because the HTTP transport must size its idle-connection pool to the
+// same number (see types.Options.MaxPerHostCeiling). Callers that derive the two
+// independently WILL drift, and the failure mode is silent connection churn at
+// the ramped concurrency rather than an error.
+func EffectiveCeilingPerHost(maxPerHost, configuredCeiling int, adaptive bool) int {
+	ceiling := configuredCeiling
+	if ceiling <= 0 {
+		ceiling = maxPerHost
+		if adaptive {
+			ceiling = maxPerHost * defaultAdaptiveCeilingFactor
+		}
+	}
+	return max(ceiling, maxPerHost)
+}
+
+// resolveCeilingPerHost applies EffectiveCeilingPerHost to a limiter config.
+func resolveCeilingPerHost(cfg HostRateLimiterConfig) int {
+	return EffectiveCeilingPerHost(cfg.MaxPerHost, cfg.CeilingPerHost, cfg.Adaptive)
+}
+
 // NewHostRateLimiter creates a new HostRateLimiter with the given configuration.
 func NewHostRateLimiter(cfg HostRateLimiterConfig) *HostRateLimiter {
 	if cfg.MaxPerHost <= 0 {
@@ -296,14 +349,13 @@ func NewHostRateLimiter(cfg HostRateLimiterConfig) *HostRateLimiter {
 		cfg.AcquireTimeout = 30 * time.Second
 	}
 
-	// Adaptive bounds: floor defaults to a tenth of the start (min 1); ceiling
-	// defaults to MaxPerHost so adaptive never exceeds the configured concurrency.
+	// Adaptive bounds: floor defaults to a tenth of the start (min 1).
 	minPerHost := cfg.MinPerHost
 	if minPerHost <= 0 {
 		minPerHost = max(cfg.MaxPerHost/10, 1)
 	}
 	minPerHost = min(minPerHost, cfg.MaxPerHost)
-	ceilingPerHost := max(cfg.CeilingPerHost, cfg.MaxPerHost)
+	ceilingPerHost := resolveCeilingPerHost(cfg)
 
 	h := &HostRateLimiter{
 		maxPerHost:     cfg.MaxPerHost,

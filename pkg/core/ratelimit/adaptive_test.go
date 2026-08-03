@@ -34,9 +34,11 @@ func TestAdaptive_StartsAtMaxPerHost(t *testing.T) {
 	if got := h.currentLimit(host); got != 8 {
 		t.Fatalf("adaptive host should start at MaxPerHost=8, got %d", got)
 	}
-	// Default ceiling = MaxPerHost; floor = max(1, 8/10) = 1.
-	if h.ceilingPerHost != 8 || h.minPerHost != 1 {
-		t.Fatalf("defaults: ceiling=%d min=%d, want 8/1", h.ceilingPerHost, h.minPerHost)
+	// Adaptive default ceiling = MaxPerHost * defaultAdaptiveCeilingFactor, so a
+	// healthy host has room to ramp; floor = max(1, 8/10) = 1.
+	if h.ceilingPerHost != 8*defaultAdaptiveCeilingFactor || h.minPerHost != 1 {
+		t.Fatalf("defaults: ceiling=%d min=%d, want %d/1",
+			h.ceilingPerHost, h.minPerHost, 8*defaultAdaptiveCeilingFactor)
 	}
 }
 
@@ -140,8 +142,10 @@ func TestAdaptive_RecoversWhenHealthy(t *testing.T) {
 	if got := h.currentLimit(host); got <= 4 {
 		t.Fatalf("expected ramp-up above 4 after healthy traffic, got %d", got)
 	}
-	if got := h.currentLimit(host); got > 8 {
-		t.Fatalf("ramp-up must not exceed the ceiling 8, got %d", got)
+	// Recovery may now climb past MaxPerHost toward the adaptive ceiling — that is
+	// the point of the ramp — but never beyond it.
+	if got := h.currentLimit(host); got > h.ceilingPerHost {
+		t.Fatalf("ramp-up must not exceed the ceiling %d, got %d", h.ceilingPerHost, got)
 	}
 }
 
@@ -445,5 +449,92 @@ func TestPreArm_NoOpInStaticMode(t *testing.T) {
 	}
 	for i := 0; i < 16; i++ {
 		h.Release(host)
+	}
+}
+
+// The adaptive ramp ceiling defaults by mode. Adaptive is an opt-in to
+// concurrency discovery so it gets headroom; WAF-auto-arm is a throttle, so a
+// host recovering from a block returns to MaxPerHost and stops there.
+func TestEffectiveCeilingPerHost(t *testing.T) {
+	tests := []struct {
+		name       string
+		maxPerHost int
+		configured int
+		adaptive   bool
+		want       int
+	}{
+		{"adaptive default gets headroom", 40, 0, true, 40 * defaultAdaptiveCeilingFactor},
+		{"non-adaptive default pins to max", 40, 0, false, 40},
+		{"explicit ceiling wins when adaptive", 40, 100, true, 100},
+		{"explicit ceiling wins when not adaptive", 40, 100, false, 100},
+		// A ceiling below the start would strand the token pool below its initial
+		// fill, so it is floored at MaxPerHost rather than honored.
+		{"ceiling below max is floored", 40, 10, true, 40},
+		{"negative ceiling treated as unset", 40, -5, true, 40 * defaultAdaptiveCeilingFactor},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveCeilingPerHost(tc.maxPerHost, tc.configured, tc.adaptive); got != tc.want {
+				t.Fatalf("EffectiveCeilingPerHost(%d, %d, %v) = %d, want %d",
+					tc.maxPerHost, tc.configured, tc.adaptive, got, tc.want)
+			}
+		})
+	}
+}
+
+// The regression this guards: with ceiling == MaxPerHost the AIMD controller was
+// a one-way ratchet — it could only ever back a host OFF, so nothing could
+// discover that a host tolerates more than the configured concurrency.
+func TestAdaptive_RampsAboveMaxPerHost(t *testing.T) {
+	h := NewHostRateLimiter(HostRateLimiterConfig{
+		MaxPerHost: 8, Adaptive: true, EvictInterval: time.Hour,
+	})
+	defer func() { _ = h.Close() }()
+
+	const host = "h.example"
+	_ = h.Acquire(context.Background(), host)
+	h.Release(host)
+
+	if got := h.currentLimit(host); got != 8 {
+		t.Fatalf("setup: expected to start at MaxPerHost=8, got %d", got)
+	}
+	for i := 0; i < 2000; i++ {
+		h.Feedback(host, 200, nil, false)
+	}
+	if got := h.currentLimit(host); got <= 8 {
+		t.Fatalf("healthy host must ramp above MaxPerHost=8, got %d", got)
+	}
+	if got := h.currentLimit(host); got > h.ceilingPerHost {
+		t.Fatalf("ramp must stop at the ceiling %d, got %d", h.ceilingPerHost, got)
+	}
+}
+
+// WAF auto-arm is a throttle, not a ramp: a host that trips a block, backs off,
+// then recovers must return to MaxPerHost and never exceed it. A WAF block is
+// not licence to raise concurrency.
+func TestWafAutoArm_RecoveryStopsAtMaxPerHost(t *testing.T) {
+	h := NewHostRateLimiter(HostRateLimiterConfig{
+		MaxPerHost: 8, WafAutoArm: true, EvictInterval: time.Hour,
+	})
+	defer func() { _ = h.Close() }()
+
+	if h.ceilingPerHost != 8 {
+		t.Fatalf("waf-auto-arm ceiling = %d, want MaxPerHost=8", h.ceilingPerHost)
+	}
+
+	const host = "waf.example"
+	_ = h.Acquire(context.Background(), host)
+	h.Release(host)
+
+	// A confirmed block arms AIMD and backs the host off.
+	h.Feedback(host, 403, nil, true)
+	if got := h.currentLimit(host); got >= 8 {
+		t.Fatalf("expected back-off below 8 after a WAF block, got %d", got)
+	}
+	for i := 0; i < 2000; i++ {
+		h.Feedback(host, 200, nil, false)
+	}
+	if got := h.currentLimit(host); got > 8 {
+		t.Fatalf("waf-armed recovery must stop at MaxPerHost=8, got %d", got)
 	}
 }

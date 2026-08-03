@@ -23,9 +23,11 @@ type ScanningPaceConfig struct {
 	AdaptivePerHost bool `yaml:"adaptive_per_host"`
 	// MinPerHost is the adaptive back-off floor (0 = auto: max(1, MaxPerHost/10)).
 	MinPerHost int `yaml:"min_per_host"`
-	// MaxPerHostCeiling is the adaptive ramp ceiling (0 = MaxPerHost, so adaptive
-	// never exceeds the configured concurrency). Set above MaxPerHost to let
-	// healthy hosts ramp past it.
+	// MaxPerHostCeiling is the adaptive ramp ceiling. 0 means "pick by mode": with
+	// adaptive_per_host on it defaults to 2x MaxPerHost so a healthy host can
+	// actually ramp, and with only the WAF auto-arm throttle active it stays at
+	// MaxPerHost (a host recovering from a block returns to the configured
+	// concurrency, never past it). Set explicitly to pin either mode.
 	MaxPerHostCeiling int `yaml:"max_per_host_ceiling"`
 
 	Discovery         PhasePace `yaml:"discovery"`

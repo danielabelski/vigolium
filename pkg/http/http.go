@@ -385,9 +385,16 @@ func NewRequester(options *types.Options, services *services.Services) (*Request
 	// MaxIdleConnsPerHost closes its connection on return and the next one pays a
 	// fresh TCP+TLS handshake (~50-150ms). The old hardcoded 10 throttled reuse
 	// badly: MaxPerHost defaults to 50, so 40 of every 50 connections churned.
+	//
+	// Sized from the adaptive CEILING, not MaxPerHost: the per-host limiter can
+	// ramp a healthy host above MaxPerHost, and a pool sized to the starting value
+	// would recreate the very churn described above at exactly the concurrency the
+	// ramp unlocked. MaxPerHostCeiling is 0 when the limiter can't ramp, in which
+	// case this is MaxPerHost as before.
 	// Floor at the old 10 and cap at 256 so a pathological --max-per-host can't
 	// pin an unbounded idle pool of file descriptors.
-	maxIdlePerHost := min(max(options.MaxPerHost, 10), 256)
+	peakPerHost := max(options.MaxPerHost, options.MaxPerHostCeiling)
+	maxIdlePerHost := min(max(peakPerHost, 10), 256)
 	// The global idle pool scales with the per-host cap so multi-host scans keep
 	// enough warm connections across hosts. maxIdlePerHost >= 10 guarantees this is
 	// always >= the old 100 floor.
