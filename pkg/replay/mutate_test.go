@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -100,4 +101,61 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// Replacing an existing header must rewrite it in place, not append a second
+// copy. The utils.AddOrReplaceHeader this once used never matched a header
+// name, so `-H 'Cookie: ...'` left the original Cookie first on the wire and
+// the override silently did nothing.
+func TestOverlayHeaders_ReplacesExistingHeader(t *testing.T) {
+	raw := []byte("GET /hello HTTP/1.1\r\nHost: h\r\nCookie: sid=original\r\nAccept: */*\r\n\r\n")
+
+	got := string(overlayHeaders(raw, map[string]string{"Cookie": "sid=NEW; csrf=xyz"}))
+
+	if strings.Count(got, "Cookie:") != 1 {
+		t.Fatalf("expected exactly one Cookie header, got %d:\n%s", strings.Count(got, "Cookie:"), got)
+	}
+	if !strings.Contains(got, "Cookie: sid=NEW; csrf=xyz") {
+		t.Errorf("override not applied:\n%s", got)
+	}
+	if strings.Contains(got, "sid=original") {
+		t.Errorf("original cookie value survived the override:\n%s", got)
+	}
+}
+
+func TestOverlayHeaders_AppendsMissingHeader(t *testing.T) {
+	raw := []byte("GET /hello HTTP/1.1\r\nHost: h\r\n\r\n")
+
+	got := string(overlayHeaders(raw, map[string]string{"X-Test": "yes"}))
+
+	if !strings.Contains(got, "X-Test: yes") {
+		t.Errorf("missing header was not appended:\n%s", got)
+	}
+}
+
+// Header names are case-insensitive on the wire, so an HTTP/2-lowercased
+// stored request must still be overridden rather than duplicated.
+func TestOverlayHeaders_CaseInsensitiveReplace(t *testing.T) {
+	raw := []byte("GET /hello HTTP/1.1\r\nhost: h\r\ncookie: sid=original\r\n\r\n")
+
+	got := strings.ToLower(string(overlayHeaders(raw, map[string]string{"Cookie": "sid=NEW"})))
+
+	if strings.Count(got, "cookie:") != 1 {
+		t.Fatalf("expected exactly one cookie header, got %d:\n%s", strings.Count(got, "cookie:"), got)
+	}
+	if strings.Contains(got, "sid=original") {
+		t.Errorf("original cookie survived a case-differing override:\n%s", got)
+	}
+}
+
+func TestOverlayHeaders_Deterministic(t *testing.T) {
+	raw := []byte("GET /hello HTTP/1.1\r\nHost: h\r\n\r\n")
+	overlay := map[string]string{"X-A": "1", "X-B": "2", "X-C": "3", "X-D": "4"}
+
+	first := string(overlayHeaders(raw, overlay))
+	for i := 0; i < 20; i++ {
+		if got := string(overlayHeaders(raw, overlay)); got != first {
+			t.Fatalf("overlay is not deterministic:\n%s\nvs\n%s", first, got)
+		}
+	}
 }

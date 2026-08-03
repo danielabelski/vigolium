@@ -73,7 +73,7 @@ Vigolium's own source code, not to these independently obtained tools.
 | [vigolium/piolium](https://github.com/vigolium/piolium) | Pi-native source-code security audit agent driving `vigolium agent audit --driver=piolium`. An extension of [Pi](https://github.com/earendil-works/pi). |
 | [earendil-works/pi](https://github.com/earendil-works/pi) | Upstream Pi agent runtime that piolium extends. |
 | [vigolium/vigolium-audit](https://github.com/vigolium/vigolium-audit) | Audit harness driving `vigolium agent audit` for source-code security audits. |
-| [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser) | Planning/reference material for browser-agent integration docs. |
+| [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser) | Optional external CLI the agent shells out to for browser-driven auth and recon (`agent.browser.enable`). Not bundled — the agent loads its usage guide at runtime via `agent-browser skills get core`. |
 
 ## Benchmarks, Test Targets, And External Services
 

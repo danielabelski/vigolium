@@ -56,9 +56,11 @@ func ResolvePositions(raw []byte, sel Selectors) ([]Position, error) {
 	}
 
 	// (1) Marker mode — a literal keyword anywhere (request line, path, header,
-	// body) takes precedence and needs no insertion-point analysis.
-	if bytes.Contains(raw, []byte(keyword)) {
-		return []Position{{Name: keyword, Label: "MARKER", kind: kindMarker}}, nil
+	// body) takes precedence and needs no insertion-point analysis. Numbered
+	// siblings (FUZZ2, FUZZ3, ...) become additional positions, which is what
+	// the multi-position attack modes bind their payload lists to.
+	if markers := findMarkers(raw, keyword); len(markers) > 0 {
+		return markers, nil
 	}
 
 	// method is a special position (no INS_* type backs the request-line verb).
@@ -110,6 +112,38 @@ func ResolvePositions(raw []byte, sel Selectors) ([]Position, error) {
 	return positions, nil
 }
 
+// MaxMarkers bounds how many numbered markers are looked for. Past a handful
+// the combination count under clusterbomb stops being something anyone means
+// to run.
+const MaxMarkers = 8
+
+// findMarkers returns a position for the bare keyword and for each numbered
+// sibling present, ordered FUZZ, FUZZ2, FUZZ3, ... so payload lists bind to
+// them predictably.
+//
+// The bare keyword is checked with the numbered ones excluded, since "FUZZ" is
+// a prefix of "FUZZ2" and a naive Contains would report the bare marker as
+// present in a request that only uses numbered ones.
+func findMarkers(raw []byte, keyword string) []Position {
+	var out []Position
+
+	stripped := raw
+	for i := 2; i <= MaxMarkers; i++ {
+		stripped = bytes.ReplaceAll(stripped, []byte(keyword+strconv.Itoa(i)), nil)
+	}
+	if bytes.Contains(stripped, []byte(keyword)) {
+		out = append(out, Position{Name: keyword, Label: "MARKER", kind: kindMarker})
+	}
+
+	for i := 2; i <= MaxMarkers; i++ {
+		name := keyword + strconv.Itoa(i)
+		if bytes.Contains(raw, []byte(name)) {
+			out = append(out, Position{Name: name, Label: "MARKER", kind: kindMarker})
+		}
+	}
+	return out
+}
+
 func resolveNamed(ips []httpmsg.InsertionPoint, sel Selectors) ([]Position, error) {
 	var positions []Position
 	for _, np := range sel.NamedPoints {
@@ -139,7 +173,8 @@ func resolveNamed(ips []httpmsg.InsertionPoint, sel Selectors) ([]Position, erro
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("--header %q not an injectable header point; available: %s", h, availablePoints(ips))
+			// Not present on the request — inject it rather than refusing.
+			positions = append(positions, Position{Name: h, Label: "HEADER", kind: kindAddHeader})
 		}
 	}
 	return positions, nil
@@ -200,6 +235,12 @@ func (p Position) build(raw []byte, payload string) []byte {
 		return rewriteMethod(raw, payload)
 	case kindMarker:
 		return fixContentLength(replaceMarker(raw, p.Name, payload))
+	case kindAddHeader:
+		out, err := httpmsg.AddOrReplaceHeader(raw, p.Name, payload)
+		if err != nil {
+			return raw
+		}
+		return out
 	default:
 		return raw
 	}
@@ -215,14 +256,47 @@ func replaceMarker(raw []byte, keyword, payload string) []byte {
 	kw := []byte(keyword)
 	nl := bytes.IndexByte(raw, '\n')
 	if nl < 0 {
-		return bytes.ReplaceAll(raw, kw, []byte(encodeRequestTarget(payload)))
+		return replaceKeyword(raw, kw, []byte(encodeRequestTarget(payload)))
 	}
-	line := bytes.ReplaceAll(raw[:nl+1], kw, []byte(encodeRequestTarget(payload)))
-	rest := bytes.ReplaceAll(raw[nl+1:], kw, []byte(payload))
+	line := replaceKeyword(raw[:nl+1], kw, []byte(encodeRequestTarget(payload)))
+	rest := replaceKeyword(raw[nl+1:], kw, []byte(payload))
 	out := make([]byte, 0, len(line)+len(rest))
 	out = append(out, line...)
 	out = append(out, rest...)
 	return out
+}
+
+// replaceKeyword substitutes kw with repl, skipping any occurrence immediately
+// followed by a digit. Those belong to a numbered sibling — "FUZZ" is a prefix
+// of "FUZZ2" — which is a separate position carrying its own payload, so
+// letting the bare marker consume it would rewrite four characters of the
+// sibling and leave a stray digit behind. Handling it here means no caller has
+// to substitute markers in a particular order.
+func replaceKeyword(src, kw, repl []byte) []byte {
+	if len(kw) == 0 {
+		return src
+	}
+	var out []byte
+	for {
+		i := bytes.Index(src, kw)
+		if i < 0 {
+			break
+		}
+		end := i + len(kw)
+		if end < len(src) && src[end] >= '0' && src[end] <= '9' {
+			// A numbered sibling: keep it verbatim and carry on past it.
+			out = append(out, src[:end]...)
+			src = src[end:]
+			continue
+		}
+		out = append(out, src[:i]...)
+		out = append(out, repl...)
+		src = src[end:]
+	}
+	if out == nil {
+		return src
+	}
+	return append(out, src...)
 }
 
 // encodeRequestTarget percent-encodes only the bytes that are illegal in an

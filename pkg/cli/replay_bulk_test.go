@@ -18,8 +18,10 @@ func resetReplayBulkFlags(t *testing.T) {
 		replayBulkPath = ""
 		replayBulkSource = ""
 		replayBulkSearch = nil
+		replayBulkHeaderSearch = ""
 		replayBulkBody = ""
 		replayBulkExclude = nil
+		replayBulkExcludeHeader = ""
 		replayBulkExcludeBody = ""
 		replayBulkFrom = ""
 		replayBulkTo = ""
@@ -27,7 +29,15 @@ func resetReplayBulkFlags(t *testing.T) {
 		replayBulkAsc = false
 		replayBulkOffset = 0
 		replayBulkLimit = 100
+		replayConcurrency = 10
+		replayWithBrowser = false
+		replayNoRedirects = false
+		replayPretty = false
+		replayInReplace = false
+		replayBurpBridgeURL = ""
 		globalStateless = false
+		globalGlobDB = ""
+		globalJSON = false
 	}
 	reset()
 	globalProjectUUID = ""
@@ -51,8 +61,10 @@ func TestReplayBulkRequested(t *testing.T) {
 		{"--path", "", func() { replayBulkPath = "/api" }, true},
 		{"--source", "", func() { replayBulkSource = "ingest-proxy" }, true},
 		{"--search", "", func() { replayBulkSearch = []string{"admin"} }, true},
+		{"--header-search", "", func() { replayBulkHeaderSearch = "X-Api-Key" }, true},
 		{"--body", "", func() { replayBulkBody = "token" }, true},
 		{"--exclude-search", "", func() { replayBulkExclude = []string{"logout"} }, true},
+		{"--exclude-header-search", "", func() { replayBulkExcludeHeader = "X-Internal" }, true},
 		{"--exclude-body", "", func() { replayBulkExcludeBody = "healthcheck" }, true},
 		{"--from", "", func() { replayBulkFrom = "2026-01-01" }, true},
 		{"--to", "", func() { replayBulkTo = "2026-12-31" }, true},
@@ -76,8 +88,10 @@ func TestBuildReplayBulkFilters_MapsFlags(t *testing.T) {
 	replayBulkPath = "/api/*"
 	replayBulkSource = "ingest-proxy"
 	replayBulkSearch = []string{"admin", "api"}
+	replayBulkHeaderSearch = "X-Api-Key"
 	replayBulkBody = "token"
 	replayBulkExclude = []string{"logout"}
+	replayBulkExcludeHeader = "X-Internal"
 	replayBulkExcludeBody = "healthcheck"
 	replayBulkSort = "status"
 	replayBulkAsc = true
@@ -110,6 +124,14 @@ func TestBuildReplayBulkFilters_MapsFlags(t *testing.T) {
 	}
 	if f.BodySearch != "token" {
 		t.Errorf("BodySearch = %q", f.BodySearch)
+	}
+	// --header-search carries traffic's --header filter; -H/--header is the
+	// unrelated override flag and must not reach the query.
+	if f.HeaderSearch != "X-Api-Key" {
+		t.Errorf("HeaderSearch = %q, want X-Api-Key", f.HeaderSearch)
+	}
+	if f.ExcludeHeaderSearch != "X-Internal" {
+		t.Errorf("ExcludeHeaderSearch = %q, want X-Internal", f.ExcludeHeaderSearch)
 	}
 	if len(f.ExcludeTerms) != 1 || f.ExcludeTerms[0] != "logout" || f.ExcludeBodySearch != "healthcheck" {
 		t.Errorf("ExcludeTerms=%v ExcludeBodySearch=%q", f.ExcludeTerms, f.ExcludeBodySearch)

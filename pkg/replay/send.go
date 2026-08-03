@@ -94,11 +94,22 @@ func sendRawHTTP(ctx context.Context, client *gohttp.Client, raw []byte, scheme,
 	if port > 0 && !isDefaultPort(scheme, port) {
 		host = fmt.Sprintf("%s:%d", hostname, port)
 	}
+	// RawPath must be carried over, not just Path. Path is the *decoded*
+	// target, so rebuilding the URL without RawPath re-encodes it from
+	// scratch and silently normalizes percent-escapes on the wire —
+	// "/a/..%2fadmin" would leave as "/a/../admin" and "/%2e%2e/x" as
+	// "/../x". For a scanner those escapes are the payload: they're exactly
+	// what distinguishes a proxy-normalization bypass probe from a plain
+	// traversal. net/http emits RawPath verbatim whenever it's a valid
+	// encoding of Path, so preserving it keeps the operator's bytes intact.
+	// ForceQuery keeps a bare trailing "?" from being dropped.
 	req.URL = &url.URL{
-		Scheme:   scheme,
-		Host:     host,
-		Path:     req.URL.Path,
-		RawQuery: req.URL.RawQuery,
+		Scheme:     scheme,
+		Host:       host,
+		Path:       req.URL.Path,
+		RawPath:    req.URL.RawPath,
+		RawQuery:   req.URL.RawQuery,
+		ForceQuery: req.URL.ForceQuery,
 	}
 	req.Host = hostname
 	req.RequestURI = ""

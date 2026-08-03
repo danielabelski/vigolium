@@ -128,24 +128,37 @@ func TestResolvePositionsSelectors(t *testing.T) {
 	}
 }
 
+// eqPreds builds exact-equality predicates, the shape the old []int matchers had.
+func eqPreds(values ...int) NumPredicates {
+	tokens := make([]string, len(values))
+	for i, v := range values {
+		tokens[i] = strconv.Itoa(v)
+	}
+	ps, err := ParseNumPredicates(tokens, "test")
+	if err != nil {
+		panic(err)
+	}
+	return ps
+}
+
 func TestKeepGate(t *testing.T) {
 	body := []byte("hello world error")
 	r := Result{Status: 500, Length: 100, Words: 3, Lines: 0}
 
 	// Matcher: status 500 keeps.
-	if !keep(r, body, Matchers{Status: []int{500}}, Filters{}) {
+	if !keep(r, body, nil, Matchers{Status: eqPreds(500)}, Filters{}) {
 		t.Fatal("status matcher should keep 500")
 	}
 	// Matcher: status 200 only → drop.
-	if keep(r, body, Matchers{Status: []int{200}}, Filters{}) {
+	if keep(r, body, nil, Matchers{Status: eqPreds(200)}, Filters{}) {
 		t.Fatal("status matcher 200 should drop 500")
 	}
 	// Filter: status 500 drops even with matching matcher.
-	if keep(r, body, Matchers{AllStatus: true}, Filters{Status: []int{500}}) {
+	if keep(r, body, nil, Matchers{AllStatus: true}, Filters{Status: eqPreds(500)}) {
 		t.Fatal("status filter should drop 500")
 	}
 	// Empty matcher = keep all (no filter).
-	if !keep(r, body, Matchers{}, Filters{}) {
+	if !keep(r, body, nil, Matchers{}, Filters{}) {
 		t.Fatal("empty gate should keep")
 	}
 }
@@ -192,7 +205,7 @@ func TestRunEndToEnd(t *testing.T) {
 		Hostname:      host,
 		Port:          port,
 		Payloads:      []string{"boom", "harmless-1", "harmless-2"},
-		Matchers:      Matchers{Status: []int{500}},
+		Matchers:      Matchers{Status: eqPreds(500)},
 		AutoCalibrate: true,
 		Client:        replay.NewDefaultClient(nil, 5*time.Second),
 		Concurrency:   4,

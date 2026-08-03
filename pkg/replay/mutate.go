@@ -2,10 +2,10 @@ package replay
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
-	"github.com/vigolium/vigolium/pkg/utils"
 )
 
 // applyMutations resolves mutations against the insertion points of
@@ -53,9 +53,32 @@ func findInsertionPoint(points []httpmsg.InsertionPoint, name, typeStr string) h
 	return nil
 }
 
+// overlayHeaders rewrites raw's header block, replacing each named header
+// outright (case-insensitively) and appending the ones that aren't present.
+//
+// Uses httpmsg.AddOrReplaceHeader, not utils.AddOrReplaceHeader: the utils
+// variant's GetHeaderOffsets never matches a header name, so replacing an
+// existing header silently *appended a duplicate* instead — a `-H 'Cookie: ...'`
+// override left the original Cookie first on the wire, where servers read it.
+//
+// A header that fails to apply is skipped rather than aborting the overlay: the
+// caller's other overrides are still worth sending, and the assembled request is
+// reported back in the result for inspection.
 func overlayHeaders(raw []byte, overlay map[string]string) []byte {
-	for k, v := range overlay {
-		raw = utils.AddOrReplaceHeader(raw, k, v)
+	// Sorted so a multi-header overlay assembles deterministically; map order
+	// would otherwise shuffle appended headers between runs.
+	names := make([]string, 0, len(overlay))
+	for k := range overlay {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		updated, err := httpmsg.AddOrReplaceHeader(raw, name, overlay[name])
+		if err != nil {
+			continue
+		}
+		raw = updated
 	}
 	return raw
 }

@@ -65,6 +65,10 @@ func init() {
 	projectCmd.Example = projectExamples
 	exportCmd.Example = exportExamples
 	doctorCmd.Example = doctorExamples
+	skillsCmd.Example = skillsExamples
+	skillsListCmd.Example = skillsListExamples
+	skillsGetCmd.Example = skillsGetExamples
+	skillsInstallCmd.Example = skillsInstallExamples
 	extensionsCmd.Example = extensionsParentExamples
 	extensionsLsCmd.Example = extensionsLsExamples
 	extensionsDocsCmd.Example = extensionsDocsExamples
@@ -331,12 +335,26 @@ var listQueryFlagGroups = []flagGroup{
 // trailing "Other:" section only ever holds cobra's auto-added --help.
 var fuzzFlagGroups = []flagGroup{
 	{"Source", []string{"input", "input-file", "record-uuid", "target"}},
-	{"Request Builder", []string{"request", "header", "data"}},
-	{"Positions", []string{"fuzz", "point", "fuzz-header", "keyword"}},
+	{"Request Builder", []string{
+		"request", "header", "data", "data-raw", "data-binary", "data-urlencode",
+		"form", "form-string", "get", "head", "cookie", "user", "user-agent", "referer"}},
+	{"Positions", []string{"fuzz", "point", "fuzz-header", "keyword", "mode"}},
 	{"Payloads", []string{"class", "wordlist", "payload"}},
-	{"Matchers", []string{"match-status-code", "match-size", "match-words", "match-lines", "match-regex", "match-time"}},
-	{"Exclude", []string{"exclude-status-code", "exclude-size", "exclude-words", "exclude-lines", "exclude-regex", "exclude-time"}},
-	{"Speed & Behaviour", []string{"no-calibrate", "concurrency", "delay", "timeout", "no-redirects"}},
+	{"Anomaly Detection", []string{"anomaly", "anomaly-threshold", "anomaly-min-population", "baseline-samples"}},
+	{"Matchers", []string{
+		"match-status-code", "match-size", "match-words", "match-lines",
+		"match-regex", "match-time", "match-time-z", "match-header", "match-mode"}},
+	{"Exclude", []string{
+		"exclude-status-code", "exclude-size", "exclude-words", "exclude-lines",
+		"exclude-regex", "exclude-time", "exclude-time-z", "exclude-header", "exclude-mode"}},
+	{"Network", []string{
+		"insecure", "verify-tls", "cacert", "cert", "key", "location", "max-redirs",
+		"connect-timeout", "max-time", "compressed", "http-version", "http1.1", "http2",
+		"resolve", "path-as-is"}},
+	{"Session & Auth", []string{"auth-session", "session-id", "no-cookies"}},
+	{"Speed & Behaviour", []string{
+		"no-calibrate", "concurrency", "delay", "timeout", "no-redirects",
+		"dry-run", "ignore-scope"}},
 	{"Output", []string{"output", "all-results", "pretty", "fail-on-match"}},
 	{"Burp Bridge", []string{"send-via-burp", "burp-bridge-url", "http-mode", "send-timeout", "matches-to-organizer"}},
 }
@@ -344,8 +362,8 @@ var fuzzFlagGroups = []flagGroup{
 // replayFlagGroups categorizes `vigolium replay`.
 var replayFlagGroups = []flagGroup{
 	{"Input & Selection", []string{"input", "input-file", "raw-request", "raw-request-file", "record-uuid", "finding-id", "target"}},
-	{"Bulk Filter", []string{"host", "method", "status", "path", "source", "search", "body", "exclude-search", "exclude-body", "from", "to", "sort", "asc", "offset", "limit", "all"}},
-	{"Request Options", []string{"header", "auth-session", "session-id", "no-cookies", "no-redirects", "timeout", "concurrency"}},
+	{"Bulk Filter", []string{"host", "method", "status", "path", "source", "search", "header-search", "body", "exclude-search", "exclude-header-search", "exclude-body", "from", "to", "sort", "asc", "offset", "limit", "all"}},
+	{"Request Options", []string{"header", "auth-session", "session-id", "no-cookies", "no-redirects", "timeout", "concurrency", "with-browser"}},
 	{"Output", []string{"output", "pretty", "in-replace", "stateless"}},
 	{"Burp Bridge", []string{"burp-bridge-url", "save-to-burp", "send-via-burp", "http-mode", "send-timeout", "to-repeater", "repeater-tab", "to-organizer", "notes", "highlight"}},
 }

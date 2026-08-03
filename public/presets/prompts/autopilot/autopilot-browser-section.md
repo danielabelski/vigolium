@@ -2,6 +2,13 @@
 
 The `agent-browser` CLI tool is available via the Bash tool for browser-based interaction. Use it when the target requires JavaScript execution, complex login flows, or inspection of SPAs behind authentication walls.
 
+The sections below cover the common auth-capture path. When you need more than that — element refs, waiting strategies, tabs, downloads, parallel sessions, troubleshooting — load the tool's own guide instead of guessing from flags:
+
+```bash
+agent-browser skills get core --full    # version-matched usage guide
+agent-browser skills list               # specialized skills (electron, slack, ...)
+```
+
 ### Core Loop
 
 1. **Open** a URL in the headless browser

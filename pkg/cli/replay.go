@@ -40,7 +40,6 @@ var (
 	replayNoRedirects    bool
 	replayTargetURL      string
 	replayTimeout        time.Duration
-	replayInReplaceTop   bool
 	replayOutputPath     string
 	replayPretty         bool
 	replayBurpBridgeURL  string
@@ -59,23 +58,36 @@ var (
 	// source (mirrors `traffic --replay`, re-sending each record verbatim through
 	// the diff engine). The filter surface tracks `vigolium traffic`. The
 	// positional term is a local threaded through, not a flag global.
-	replayAll             bool
-	replayBulkHost        string
-	replayBulkMethods     []string
-	replayBulkStatus      []int
-	replayBulkPath        string
-	replayBulkSource      string
-	replayBulkSearch      []string
-	replayBulkBody        string
-	replayBulkExclude     []string
-	replayBulkExcludeBody string
-	replayBulkFrom        string
-	replayBulkTo          string
-	replayBulkSort        string
-	replayBulkAsc         bool
-	replayBulkOffset      int
-	replayBulkLimit       int
-	replayConcurrency     int
+	replayAll               bool
+	replayBulkHost          string
+	replayBulkMethods       []string
+	replayBulkStatus        []int
+	replayBulkPath          string
+	replayBulkSource        string
+	replayBulkSearch        []string
+	replayBulkHeaderSearch  string
+	replayBulkBody          string
+	replayBulkExclude       []string
+	replayBulkExcludeHeader string
+	replayBulkExcludeBody   string
+	replayBulkFrom          string
+	replayBulkTo            string
+	replayBulkSort          string
+	replayBulkAsc           bool
+	replayBulkOffset        int
+	replayBulkLimit         int
+	replayConcurrency       int
+
+	// replayInReplace overwrites each replayed record's stored response with the
+	// replay response. Bound by both `replay --in-replace` and the
+	// `traffic --replay --in-replace` shortcut — only one command runs per
+	// process, so a single global backs both registrations.
+	replayInReplace bool
+
+	// replayWithBrowser loads each record's URL in a real browser routed through
+	// --proxy instead of re-sending the stored bytes. Not a diff mode: a browser
+	// navigation yields no status/body to compare (see replay_browser.go).
+	replayWithBrowser bool
 )
 
 var replayCmd = &cobra.Command{
@@ -109,10 +121,22 @@ Bulk mode: pass a positional [search-term] (a broad fuzzy match, like
 'vigolium traffic <term>'), --all, or any record filter to replay every matching
 stored record instead of a single source. The selection surface mirrors
 'vigolium traffic': --host/--method/--status/--path/--source, repeatable
---search (AND-combined), --body, --from/--to date range, --exclude-search/
---exclude-body, and --sort/--asc/--offset. Each matched record is re-sent
-verbatim through the diff engine and results stream as JSONL (one object per
-record). Throttle with -c/--concurrency and read a standalone export with -S --db.`,
+--search (AND-combined), --header-search, --body, --from/--to date range,
+--exclude-search/--exclude-header-search/--exclude-body, and
+--sort/--asc/--offset. Each matched record is re-sent verbatim through the diff
+engine and results stream as JSONL (one object per record). Throttle with
+-c/--concurrency and read a standalone export with -S --db. 'vigolium traffic
+--replay' is a shortcut for this mode.
+
+Note --header-search filters which records are selected; -H/--header rewrites
+headers on the request that gets sent. Combine them to re-send everything that
+carried one header under a different session:
+  vigolium replay --header-search 'X-Api-Key' -H 'Cookie: session=other'
+
+--with-browser loads each matched URL in a real browser through --proxy instead
+of re-sending the stored bytes. It is navigation-only — a browser gives no
+status code or body to compare — so those runs report final URL, title, and any
+JS dialogs, and carry no diff.`,
 	// Example is set in usage.go (replayExamples) so it renders colored like the
 	// other commands via FormatExamples.
 	RunE: runReplay,
@@ -148,7 +172,7 @@ func init() {
 	f.DurationVar(&replayTimeout, "timeout", replay.DefaultTimeout, "Per-request timeout (e.g. 30s, 1m)")
 
 	// Result handling.
-	f.BoolVar(&replayInReplaceTop, "in-replace", false,
+	f.BoolVar(&replayInReplace, "in-replace", false,
 		"When the source is a stored record, update its stored response with the replay")
 	f.StringVarP(&replayOutputPath, "output", "o", "", "Write JSON result to this file (default: stdout)")
 	f.BoolVar(&replayPretty, "pretty", false, "Human-readable summary instead of JSON")
@@ -188,8 +212,12 @@ func init() {
 	f.StringVar(&replayBulkPath, "path", "", "Bulk: filter records by URL path pattern")
 	f.StringVar(&replayBulkSource, "source", "", "Bulk: filter records by source (scanner, ingest-cli, ingest-proxy, seed, ...)")
 	f.StringArrayVar(&replayBulkSearch, "search", nil, "Bulk: search across URL, path, and the raw request/response (headers + body); repeatable, AND-combined")
+	// Named --header-search, not --header: -H/--header is the override flag on
+	// this command, so the traffic filter of the same name can't keep its spelling.
+	f.StringVar(&replayBulkHeaderSearch, "header-search", "", "Bulk: filter records by text in HTTP header names/values (the search filter `traffic --header` applies; -H/--header overrides headers instead)")
 	f.StringVar(&replayBulkBody, "body", "", "Bulk: filter records whose request/response body contains this text")
 	f.StringArrayVar(&replayBulkExclude, "exclude-search", nil, "Bulk: drop records where the term appears in the URL, path, or raw request/response (repeatable; dropped if ANY term matches — inverse of --search)")
+	f.StringVar(&replayBulkExcludeHeader, "exclude-header-search", "", "Bulk: drop records whose HTTP header names/values contain the term (inverse of --header-search)")
 	f.StringVar(&replayBulkExcludeBody, "exclude-body", "", "Bulk: drop records whose request/response body contains the term (inverse of --body)")
 	f.StringVar(&replayBulkFrom, "from", "", "Bulk: only records after this date (YYYY-MM-DD or RFC3339)")
 	f.StringVar(&replayBulkTo, "to", "", "Bulk: only records before this date (YYYY-MM-DD or RFC3339)")
@@ -198,6 +226,8 @@ func init() {
 	f.IntVar(&replayBulkOffset, "offset", 0, "Bulk: skip this many matched records before replaying (pagination)")
 	f.IntVarP(&replayBulkLimit, "limit", "n", 100, "Bulk: max records to replay (use --all to lift the cap)")
 	f.IntVarP(&replayConcurrency, "concurrency", "c", 10, "Bulk: concurrent replays; keep low to avoid overwhelming an intercepting proxy like Burp")
+	f.BoolVar(&replayWithBrowser, "with-browser", false,
+		"Load each record's URL in a real browser routed via --proxy so an intercepting proxy captures browser-driven traffic; navigation-only, so no baseline-vs-replay diff is produced")
 	f.BoolVarP(&globalStateless, "stateless", "S", false, "Read records from --db (a .jsonl export or standalone .sqlite) with project scoping off; never writes to your project DB")
 }
 
@@ -214,10 +244,8 @@ func runReplay(cmd *cobra.Command, args []string) error {
 	if len(args) == 1 {
 		bulkFuzzy = strings.TrimSpace(args[0])
 	}
-	// Any Burp write target needs the loopback bridge URL.
-	needsBridge := replaySaveToBurp || replaySendViaBurp || replayToRepeater || replayToOrganizer
-	if needsBridge && strings.TrimSpace(replayBurpBridgeURL) == "" {
-		return fmt.Errorf("--save-to-burp/--send-via-burp/--to-repeater/--to-organizer require --burp-bridge-url")
+	if err := validateReplayFlags(); err != nil {
+		return err
 	}
 	httpMode, err := burpbridge.ParseHTTPMode(replayHTTPMode)
 	if err != nil {
@@ -250,34 +278,20 @@ func runReplay(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	rawOverride, err := loadReplayRawOverride()
+	rr, err := newReplayRun()
 	if err != nil {
 		return err
 	}
-
-	pj, jarLoaded, jarErr := openReplayJar()
-	if jarErr != nil {
-		fmt.Fprintf(os.Stderr, "%s replay: cookie jar disabled (%v)\n", terminal.WarningSymbol(), jarErr)
-	}
-	rr := &replayRun{
-		rawOverride: rawOverride,
-		client:      newReplayClient(pj, replayTimeout),
-		pj:          pj,
-		jarLoaded:   jarLoaded,
-		burpClient:  bridgeClient,
-		saveToBurp:  replaySaveToBurp,
-		sendViaBurp: replaySendViaBurp,
-		toRepeater:  replayToRepeater,
-		toOrganizer: replayToOrganizer,
-		sendOpts: burpbridge.SendOptions{
-			Mode:    httpMode,
-			Timeout: replaySendTimeout,
-		},
-	}
+	rr.burpClient = bridgeClient
+	rr.sendOpts = burpbridge.SendOptions{Mode: httpMode, Timeout: replaySendTimeout}
 
 	// Bulk mode: iterate every matching stored record through the same engine.
 	if replayBulkRequested(bulkFuzzy) {
-		return runReplayBulk(ctx, rr, bulkFuzzy)
+		filters, ferr := buildReplayBulkFilters(bulkFuzzy)
+		if ferr != nil {
+			return ferr
+		}
+		return runReplayBulk(ctx, rr, filters)
 	}
 
 	src, err := resolveReplaySource(ctx)
@@ -301,12 +315,58 @@ func runReplay(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("replay: %w", err)
 	}
 
-	saveReplayJar(pj)
+	saveReplayJar(rr.pj)
 
 	if replayPretty {
-		return emitReplayPretty(out)
+		return emitReplayPretty(os.Stdout, out)
 	}
 	return emitReplayJSON(out)
+}
+
+// validateReplayFlags rejects flag combinations that can't be honored, so the
+// operator gets one clear error up front instead of a per-record failure or a
+// silently-ignored flag mid-run.
+func validateReplayFlags() error {
+	// Any Burp write target needs the loopback bridge URL.
+	if replaySaveToBurp || replaySendViaBurp || replayToRepeater || replayToOrganizer {
+		if strings.TrimSpace(replayBurpBridgeURL) == "" {
+			return fmt.Errorf("--save-to-burp/--send-via-burp/--to-repeater/--to-organizer require --burp-bridge-url")
+		}
+	}
+
+	// --in-replace updates whichever store the records were read from, so under
+	// --glob-db it would write into the throwaway merge DB and vanish. -S is
+	// fine: the update lands in the standalone export being read.
+	if replayInReplace && globalGlobDB != "" {
+		return fmt.Errorf("--in-replace cannot be combined with --glob-db: the merged database is temporary, so the updated responses would be discarded")
+	}
+
+	// The browser path navigates a URL; it produces no response bytes and does
+	// not send the stored request, so everything downstream of the send is
+	// meaningless rather than merely unused.
+	if replayWithBrowser {
+		for _, conflict := range []struct {
+			set  bool
+			flag string
+			why  string
+		}{
+			{replayInReplace, "--in-replace", "a navigation yields no response to store"},
+			{replaySendViaBurp, "--send-via-burp", "the browser sends the request, not vigolium"},
+			{replaySaveToBurp, "--save-to-burp", "there are no request/response bytes to save"},
+			{replayToRepeater, "--to-repeater", "there are no request bytes to stage"},
+			{replayToOrganizer, "--to-organizer", "there are no request/response bytes to store"},
+			{replayRawRequest != "" || replayRawRequestFile != "", "--raw-request/--raw-request-file", "a navigation cannot send arbitrary request bytes"},
+		} {
+			if conflict.set {
+				return fmt.Errorf("--with-browser cannot be combined with %s: %s", conflict.flag, conflict.why)
+			}
+		}
+		if globalProxy == "" {
+			fmt.Fprintf(os.Stderr, "%s --with-browser without --proxy: browser traffic isn't being routed to an intercepting proxy\n",
+				terminal.WarningSymbol())
+		}
+	}
+	return nil
 }
 
 // replayRun bundles the per-invocation replay settings that don't vary across
@@ -322,7 +382,37 @@ type replayRun struct {
 	sendViaBurp bool
 	toRepeater  bool
 	toOrganizer bool
+	withBrowser bool
 	sendOpts    burpbridge.SendOptions
+}
+
+// newReplayRun assembles the settings shared by every record in one run: the
+// cookie jar, the HTTP client built over it, and the mode flags. Both entry
+// points (runReplay and the traffic --replay shim) use it so they can't drift
+// on how the jar is opened or which flags reach the send.
+//
+// The Burp bridge client and send options are set by the caller: only runReplay
+// resolves and health-checks a bridge.
+func newReplayRun() (*replayRun, error) {
+	rawOverride, err := loadReplayRawOverride()
+	if err != nil {
+		return nil, err
+	}
+	pj, jarLoaded, jarErr := openReplayJar()
+	if jarErr != nil {
+		fmt.Fprintf(os.Stderr, "%s replay: cookie jar disabled (%v)\n", terminal.WarningSymbol(), jarErr)
+	}
+	return &replayRun{
+		rawOverride: rawOverride,
+		client:      newReplayClient(pj, replayTimeout),
+		pj:          pj,
+		jarLoaded:   jarLoaded,
+		saveToBurp:  replaySaveToBurp,
+		sendViaBurp: replaySendViaBurp,
+		toRepeater:  replayToRepeater,
+		toOrganizer: replayToOrganizer,
+		withBrowser: replayWithBrowser,
+	}, nil
 }
 
 // newReplayClient builds the shared HTTP client for replay: the persistent
@@ -359,6 +449,21 @@ func saveReplayJar(pj *jar.PersistentJar) {
 // output. Shared by single-source and bulk (per-record) replay. It honors
 // --in-replace for stored records; the caller owns the cookie jar's lifecycle.
 func (rr *replayRun) one(ctx context.Context, src *replaySource, overlay map[string]string) (*replayOutput, error) {
+	// The browser path shares record selection and the header overlay, but not
+	// the send/diff engine — a navigation produces no status or body to compare.
+	// Everything downstream of the send (--in-replace, the Burp targets,
+	// --raw-request) is therefore skipped here; validateReplayFlags owns that
+	// invariant by rejecting those combinations up front.
+	if rr.withBrowser {
+		summary, err := browserReplaySource(ctx, src, overlay)
+		if err != nil {
+			return nil, err
+		}
+		out := buildReplayOutput(src, nil, rr.jarLoaded, rr.pj)
+		out.Browser = summary
+		return out, nil
+	}
+
 	opts := replay.Options{
 		BaselineRequest:      src.BaselineRequest,
 		BaselineResponse:     src.BaselineResponse,
@@ -384,7 +489,7 @@ func (rr *replayRun) one(ctx context.Context, src *replaySource, overlay map[str
 		return nil, err
 	}
 
-	if replayInReplaceTop {
+	if replayInReplace {
 		if err := persistReplayResponse(ctx, src, result); err != nil {
 			fmt.Fprintf(os.Stderr, "%s replay: --in-replace failed: %v\n", terminal.WarningSymbol(), err)
 		}
@@ -421,6 +526,12 @@ type replaySource struct {
 	Scheme   string
 	Hostname string
 	Port     int
+
+	// URL is the absolute request URL. The send path reconstructs its
+	// destination from Scheme/Hostname/Port and the raw request line, so this
+	// is carried only for the paths that need a whole URL — --with-browser
+	// navigation and record attribution.
+	URL string
 
 	RecordUUID  string
 	FindingID   int64
@@ -579,6 +690,7 @@ func sourceFromInputString(ctx context.Context, repo *database.Repository, data,
 		Scheme:          u.Scheme,
 		Hostname:        u.Hostname(),
 		Port:            portFromURL(u.URL),
+		URL:             u.URL.String(),
 		InputType:       string(it),
 		OriginLabel:     fmt.Sprintf("input (%s)", it),
 	}
@@ -610,6 +722,7 @@ func sourceFromRawRequest(rawReq, rawResp []byte, urlStr string) (*replaySource,
 		Scheme:           u.Scheme,
 		Hostname:         u.Hostname(),
 		Port:             portFromURL(u),
+		URL:              urlStr,
 	}, nil
 }
 
@@ -667,28 +780,12 @@ func buildReplayOverlay(ctx context.Context, src *replaySource) (map[string]stri
 	overlay := map[string]string{}
 
 	if replayAuthSession != "" {
-		db, err := openReadDB(globDBSkipSet{})
+		headers, err := resolveAuthSessionHeaders(ctx, replayAuthSession, src.Hostname)
 		if err != nil {
-			return nil, fmt.Errorf("--auth-session requires database access: %w", err)
+			return nil, err
 		}
-		repo := database.NewRepository(db)
-		pid, _ := effectiveProjectUUID()
-		rows, err := repo.GetAuthenticationHostnamesByHostname(ctx, pid, src.Hostname)
-		if err != nil {
-			return nil, fmt.Errorf("lookup auth sessions: %w", err)
-		}
-		found := false
-		for _, row := range rows {
-			if row.SessionName == replayAuthSession {
-				for k, v := range row.Headers {
-					overlay[k] = v
-				}
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("auth session %q not found for hostname %s", replayAuthSession, src.Hostname)
+		for k, v := range headers {
+			overlay[k] = v
 		}
 	}
 
@@ -700,6 +797,29 @@ func buildReplayOverlay(ctx context.Context, src *replaySource) (map[string]stri
 		overlay[k] = v
 	}
 	return overlay, nil
+}
+
+// resolveAuthSessionHeaders looks up a named auth session's stored headers for
+// a hostname. Shared by `replay --auth-session` and `fuzz --auth-session` so
+// the lookup, the project scoping, and the not-found message stay identical
+// between them.
+func resolveAuthSessionHeaders(ctx context.Context, sessionName, hostname string) (map[string]string, error) {
+	db, err := openReadDB(globDBSkipSet{})
+	if err != nil {
+		return nil, fmt.Errorf("--auth-session requires database access: %w", err)
+	}
+	repo := database.NewRepository(db)
+	pid, _ := effectiveProjectUUID()
+	rows, err := repo.GetAuthenticationHostnamesByHostname(ctx, pid, hostname)
+	if err != nil {
+		return nil, fmt.Errorf("lookup auth sessions: %w", err)
+	}
+	for _, row := range rows {
+		if row.SessionName == sessionName {
+			return row.Headers, nil
+		}
+	}
+	return nil, fmt.Errorf("auth session %q not found for hostname %s", sessionName, hostname)
 }
 
 // parseReplayHeaderFlags parses the repeatable --header flags into an overlay
@@ -721,7 +841,14 @@ func openReplayJar() (*jar.PersistentJar, int, error) {
 	if replayNoCookies || replaySessionID == "" {
 		return nil, 0, nil
 	}
-	path := jar.PathFor(replaySessionID)
+	return openSessionJar(replaySessionID)
+}
+
+// openSessionJar resolves a named session's cookie jar on disk. Shared by
+// `replay --session-id` and `fuzz --session-id` so the VIGOLIUM_HOME fallback
+// and the "couldn't resolve a path" message live in one place.
+func openSessionJar(sessionID string) (*jar.PersistentJar, int, error) {
+	path := jar.PathFor(sessionID)
 	if path == "" {
 		return nil, 0, fmt.Errorf("could not resolve jar path (set VIGOLIUM_HOME or HOME)")
 	}
@@ -731,6 +858,11 @@ func openReplayJar() (*jar.PersistentJar, int, error) {
 func persistReplayResponse(ctx context.Context, src *replaySource, result *replay.Result) error {
 	if src.RecordUUID == "" {
 		return fmt.Errorf("--in-replace requires a stored record (got %s)", src.OriginLabel)
+	}
+	// Records merged in from a live Burp bridge have no row to update: they
+	// exist only in Burp's proxy history for the duration of the query.
+	if burpbridge.IsBridgeUUID(src.RecordUUID) {
+		return fmt.Errorf("--in-replace skipped: live Burp records are read-only")
 	}
 	if result.Replay == nil || result.Replay.Error != "" {
 		return fmt.Errorf("--in-replace skipped: replay had no usable response")
@@ -742,7 +874,11 @@ func persistReplayResponse(ctx context.Context, src *replaySource, result *repla
 		// the clipped excerpt back as the canonical body.
 		return fmt.Errorf("--in-replace skipped: engine did not return body bytes")
 	}
-	db, err := getDB()
+	// Write back to the same store the record was read from — openReadDB, not
+	// getDB. Under -S/--stateless that is the standalone export being replayed,
+	// which is where the refreshed response belongs; routing to the project DB
+	// instead would update rows whose UUIDs came from a different database.
+	db, err := openReadDB(globDBSkipSet{})
 	if err != nil {
 		return err
 	}
@@ -863,10 +999,13 @@ type replayOutput struct {
 	CookiesPreloaded int            `json:"cookies_preloaded,omitempty"`
 	JarPath          string         `json:"jar_path,omitempty"`
 	Result           *replay.Result `json:"result"`
-	SavedToBurp      bool           `json:"saved_to_burp,omitempty"`
-	SentViaBurp      bool           `json:"sent_via_burp,omitempty"`
-	StagedToRepeater bool           `json:"staged_to_repeater,omitempty"`
-	SavedToOrganizer bool           `json:"saved_to_organizer,omitempty"`
+	// Browser is set instead of Result for --with-browser runs, which navigate
+	// rather than re-send and so produce no baseline-vs-replay diff.
+	Browser          *browserReplaySummary `json:"browser,omitempty"`
+	SavedToBurp      bool                  `json:"saved_to_burp,omitempty"`
+	SentViaBurp      bool                  `json:"sent_via_burp,omitempty"`
+	StagedToRepeater bool                  `json:"staged_to_repeater,omitempty"`
+	SavedToOrganizer bool                  `json:"saved_to_organizer,omitempty"`
 	// Error is set (with Result nil) only in bulk mode when a single record
 	// fails to replay, so one bad record doesn't abort the JSONL stream.
 	Error string `json:"error,omitempty"`
@@ -922,24 +1061,18 @@ func emitReplayJSON(out *replayOutput) error {
 	return enc.Encode(out)
 }
 
-func emitReplayPretty(out *replayOutput) error {
-	fmt.Printf("%s %s\n", terminal.Cyan("→"), out.Source)
-	fmt.Printf("  target: %s\n", out.Target)
-	if out.SessionID != "" {
-		fmt.Printf("  session: %s (preloaded %d cookies, jar: %s)\n",
-			out.SessionID, out.CookiesPreloaded, out.JarPath)
-	}
-	if out.SentViaBurp {
-		fmt.Printf("  sent via Burp's HTTP engine\n")
-	}
-	if out.SavedToBurp {
-		fmt.Printf("  saved to Burp Target Site map\n")
-	}
-	if out.StagedToRepeater {
-		fmt.Printf("  staged in Burp Repeater\n")
-	}
-	if out.SavedToOrganizer {
-		fmt.Printf("  saved to Burp Organizer\n")
+// emitReplayPretty renders one result to w, dispatching to the browser renderer
+// for navigation runs (which have no diff table to print).
+//
+// It takes an io.Writer rather than printing directly so a bulk run can render
+// into a buffer off-lock and emit each record's block in one write — building
+// the table under the shared output mutex would serialize every worker's
+// formatting behind one tty write.
+func emitReplayPretty(w io.Writer, out *replayOutput) error {
+	emitReplayOutputHeader(w, out)
+
+	if out.Browser != nil {
+		return emitBrowserReplayPretty(w, out)
 	}
 	if out.Result == nil || out.Result.Replay == nil || out.Result.Baseline == nil {
 		return fmt.Errorf("no result")
@@ -956,23 +1089,47 @@ func emitReplayPretty(out *replayOutput) error {
 	tbl.AddRow("Time (ms)",
 		fmt.Sprintf("%d", b.ResponseTimeMs),
 		fmt.Sprintf("%d", r.ResponseTimeMs))
-	tbl.Print()
+	_, _ = fmt.Fprint(w, tbl.Render())
 	if r.Error != "" {
-		fmt.Printf("  %s replay error: %s\n", terminal.ErrorPrefix(), r.Error)
+		_, _ = fmt.Fprintf(w, "  %s replay error: %s\n", terminal.ErrorPrefix(), r.Error)
 	}
 	if d.Interpretation != "" {
-		fmt.Printf("  %s %s\n", terminal.InfoSymbol(), d.Interpretation)
+		_, _ = fmt.Fprintf(w, "  %s %s\n", terminal.InfoSymbol(), d.Interpretation)
 	}
 	if len(d.ReflectsPayload) > 0 {
-		fmt.Printf("  %s reflected payloads: %s\n", terminal.WarnPrefix(), strings.Join(d.ReflectsPayload, ", "))
+		_, _ = fmt.Fprintf(w, "  %s reflected payloads: %s\n", terminal.WarnPrefix(), strings.Join(d.ReflectsPayload, ", "))
 	}
 	if len(out.Result.Unmatched) > 0 {
-		fmt.Printf("  %s unmatched insertion points: %s\n",
+		_, _ = fmt.Fprintf(w, "  %s unmatched insertion points: %s\n",
 			terminal.WarnPrefix(), strings.Join(out.Result.Unmatched, ", "))
 	}
 	if out.Result.AdditionalGroups > 0 {
-		fmt.Printf("  %s %d additional payload group(s) not sent — re-run to fire them\n",
+		_, _ = fmt.Fprintf(w, "  %s %d additional payload group(s) not sent — re-run to fire them\n",
 			terminal.InfoSymbol(), out.Result.AdditionalGroups)
 	}
 	return nil
+}
+
+// emitReplayOutputHeader writes the source/target/session preamble shared by
+// the diff and browser renderers — it describes the replayOutput envelope, not
+// the send, so both modes report it identically.
+func emitReplayOutputHeader(w io.Writer, out *replayOutput) {
+	_, _ = fmt.Fprintf(w, "%s %s\n", terminal.Cyan("→"), out.Source)
+	_, _ = fmt.Fprintf(w, "  target: %s\n", out.Target)
+	if out.SessionID != "" {
+		_, _ = fmt.Fprintf(w, "  session: %s (preloaded %d cookies, jar: %s)\n",
+			out.SessionID, out.CookiesPreloaded, out.JarPath)
+	}
+	if out.SentViaBurp {
+		_, _ = fmt.Fprintf(w, "  sent via Burp's HTTP engine\n")
+	}
+	if out.SavedToBurp {
+		_, _ = fmt.Fprintf(w, "  saved to Burp Target Site map\n")
+	}
+	if out.StagedToRepeater {
+		_, _ = fmt.Fprintf(w, "  staged in Burp Repeater\n")
+	}
+	if out.SavedToOrganizer {
+		_, _ = fmt.Fprintf(w, "  saved to Burp Organizer\n")
+	}
 }

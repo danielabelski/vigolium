@@ -4,6 +4,13 @@ A compact, copy-paste reference for running Vigolium **non-interactively** from 
 LLM/coding agent and parsing the results. Everything here is additive — the
 default human output is unchanged; you opt into machine output with `-j/--json`.
 
+> **Using an agent skill instead?** The same material — plus the replay/fuzz
+> confirm chain and the Burp handoff — ships inside the binary as
+> `references/agent-loop.md` in the `vigolium-scanner` skill. Install it with
+> `vigolium skills install --agent claude` and your agent gets a version-matched
+> copy without reading this page. See
+> [`public/skills/README.md`](../public/skills/README.md).
+
 ## Mental model
 
 - All data is stored in a project-scoped SQLite/Postgres DB. A scan **writes**

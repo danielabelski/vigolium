@@ -9,30 +9,25 @@ import (
 	"go.uber.org/zap"
 )
 
+// vigoliumScannerSkill is the embedded bundle seeded into every session dir.
+const vigoliumScannerSkill = "skills/vigolium-scanner"
+
 // CopySkillsToSessionDir copies embedded skill files to the session directory
 // so the agent can discover them from its working directory.
-// Always copies vigolium-scanner. Conditionally copies agent-browser when browserEnabled is true.
-func CopySkillsToSessionDir(sessionDir string, browserEnabled bool) {
+func CopySkillsToSessionDir(sessionDir string) {
 	if sessionDir == "" {
 		return
 	}
 
-	skills := []string{"skills/vigolium-scanner"}
-	if browserEnabled {
-		skills = append(skills, "skills/agent-browser")
+	destDir := filepath.Join(sessionDir, vigoliumScannerSkill)
+	// Skip the embed.FS walk when SKILL.md is already on disk. Resume
+	// paths and the pipeline/CLI both call this helper for the same
+	// run, so the second call would otherwise re-walk and re-write
+	// the same bytes.
+	if _, err := os.Stat(filepath.Join(destDir, "SKILL.md")); err == nil {
+		return
 	}
-
-	for _, skillPath := range skills {
-		destDir := filepath.Join(sessionDir, skillPath)
-		// Skip the embed.FS walk when SKILL.md is already on disk. Resume
-		// paths and the pipeline/CLI both call this helper for the same
-		// run, so the second call would otherwise re-walk and re-write
-		// the same bytes.
-		if _, err := os.Stat(filepath.Join(destDir, "SKILL.md")); err == nil {
-			continue
-		}
-		copyEmbeddedDir(skillPath, destDir)
-	}
+	copyEmbeddedDir(vigoliumScannerSkill, destDir)
 }
 
 // copyEmbeddedDir recursively copies an embedded FS directory to the local filesystem.

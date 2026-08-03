@@ -1,5 +1,7 @@
 # Scanning Commands Reference
 
+> **Related:** [agent-loop.md](agent-loop.md) for triage · [flags.generated.md](flags.generated.md) for any flag · `vigolium scan -h`
+
 Complete flag reference for `scan`, `scan-url`, `scan-request`, and `run` commands.
 
 ## Table of Contents
@@ -117,7 +119,7 @@ Stateless mode is great for ephemeral CI/CD runs — it creates a temp SQLite fi
 
 > **Source-aware / SAST scanning is an agent feature**, not a native `scan`/`run` phase.
 > Use `vigolium agent audit --source <path-or-git-url>` (security code audit) or
-> `vigolium agent query --source <path> -t code-review`. See `references/agent-commands.md`.
+> `vigolium agent query --source <path> -t code-review`. See `references/agent-modes.md`.
 
 ### Examples
 
@@ -166,7 +168,7 @@ vigolium scan -t https://example.com --proxy http://127.0.0.1:8080
 # Speed tuning
 vigolium scan -t https://example.com -c 100 --rate-limit 200
 
-# Source-aware / whitebox scanning is an agent feature (see agent-commands.md)
+# Source-aware / whitebox scanning is an agent feature (see agent-modes.md)
 vigolium agent autopilot -t https://example.com --source ./src
 
 # Source-aware via git clone (--source accepts a git URL)

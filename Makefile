@@ -14,6 +14,7 @@ GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOFMT=$(GOCMD) fmt
 GOMOD=$(GOCMD) mod
+GORUN=$(GOCMD) run
 BINARY_NAME=vigolium
 BINARY_DIR=bin
 
@@ -1323,6 +1324,14 @@ verify-generated:
 tidy:
 	@echo "$(PREFIX) Tidying dependencies..."
 	$(GOMOD) tidy
+
+# Regenerate the coding-agent skill's flag reference from the cobra command
+# tree. The file is committed so the embedded skill bundle stays self-contained;
+# re-run this whenever a flag is added, renamed, or given a shorthand.
+skill-flags:
+	@echo "$(PREFIX) Regenerating skill flag reference..."
+	$(GORUN) ./cmd/vigolium skills gen-flags
+	@echo "$(PREFIX) Done. Review the diff before committing."
 
 # Helper scripts
 SCRIPTS_DIR := internal/resources/scripts

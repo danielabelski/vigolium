@@ -5,7 +5,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -14,55 +13,24 @@ import (
 	"github.com/vigolium/vigolium/pkg/olium/skill"
 	"github.com/vigolium/vigolium/pkg/terminal"
 	"github.com/vigolium/vigolium/public"
-	"gopkg.in/yaml.v3"
 )
 
-// skillFrontmatterRe captures the leading YAML frontmatter block of a SKILL.md.
-var skillFrontmatterRe = regexp.MustCompile(`(?s)\A---\s*\n(.*?)\n---\s*(?:\n|$)`)
-
-// lenientFrontmatter scrapes name/description from a SKILL.md's frontmatter
-// without the strict typing skill.Parse enforces, so bundles that use a
-// looser schema (e.g. a comma-string allowed-tools) still surface metadata.
-func lenientFrontmatter(raw []byte) (name, description string) {
-	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	m := skillFrontmatterRe.FindStringSubmatch(content)
-	if m == nil {
-		return "", ""
-	}
-	var fm struct {
-		Name        string `yaml:"name"`
-		Description string `yaml:"description"`
-	}
-	if err := yaml.Unmarshal([]byte(m[1]), &fm); err != nil {
-		return "", ""
-	}
-	return strings.TrimSpace(fm.Name), strings.TrimSpace(fm.Description)
-}
-
 // embedSkillsRoot is the directory inside public.StaticFS that holds the
-// coding-agent-facing skill bundles (vigolium-scanner, agent-browser).
+// coding-agent-facing skill bundles.
 const embedSkillsRoot = "skills"
 
 // defaultInstallSkill is installed when `skills install` is run without an
 // explicit skill name.
 const defaultInstallSkill = "vigolium-scanner"
 
-// thirdPartySkills names bundles authored outside vigolium (vendored companion
-// tools). They're hidden from listings and bulk (--all) selection, and only
-// surface when named explicitly or with --third-party-skills.
-var thirdPartySkills = map[string]bool{
-	"agent-browser": true,
-}
-
 var skillsOpts = &skillsOptions{}
 
 type skillsOptions struct {
-	Full       bool
-	All        bool
-	ThirdParty bool
-	Agent      string
-	Scope      string
-	Dir        string
+	Full  bool
+	All   bool
+	Agent string
+	Scope string
+	Dir   string
 }
 
 // bundledSkill is a parsed skill bundle shipped inside the binary.
@@ -71,7 +39,6 @@ type bundledSkill struct {
 	Description string   // frontmatter description
 	EmbedDir    string   // path inside public.StaticFS (e.g. "skills/vigolium-scanner")
 	References  []string // reference file paths relative to EmbedDir (e.g. "references/commands.md")
-	ThirdParty  bool     // vendored companion skill, hidden unless opted in
 }
 
 // Parent command: vigolium skills [list]
@@ -125,9 +92,7 @@ var skillsInstallCmd = &cobra.Command{
 the agent can auto-trigger on them.
 
 With no name, installs the '` + defaultInstallSkill + `' skill. Pass --all to install
-every bundle, or name specific skills. Vendored third-party skills (e.g.
-agent-browser) are excluded from --all unless --third-party-skills is set, but
-can always be installed by naming them explicitly.
+every bundle, or name specific skills.
 
 Destination is chosen from --agent and --scope:
 
@@ -145,11 +110,6 @@ overrides the computed destination entirely.`,
 func init() {
 	rootCmd.AddCommand(skillsCmd)
 	skillsCmd.AddCommand(skillsListCmd, skillsGetCmd, skillsInstallCmd)
-
-	// Persistent so it applies to the parent's default list run and every
-	// subcommand (list/get/install).
-	skillsCmd.PersistentFlags().BoolVar(&skillsOpts.ThirdParty, "third-party-skills", false,
-		"Include vendored third-party skills (e.g. agent-browser) in listings and --all")
 
 	skillsGetCmd.Flags().BoolVar(&skillsOpts.Full, "full", false, "Include reference files, not just SKILL.md")
 	skillsGetCmd.Flags().BoolVar(&skillsOpts.All, "all", false, "Output every bundled skill")
@@ -183,14 +143,12 @@ func loadBundledSkills() ([]bundledSkill, error) {
 		// The directory name is the bundle's canonical identity: it's what
 		// `install` names the destination dir and what CLI args reference.
 		// Only the description is pulled from frontmatter, for display.
+		// Bundles are first-party and authored in-tree, so a bundle that
+		// skill.Parse rejects is a bug to fix, not to route around — it
+		// simply lists without a description.
 		desc := ""
 		if parsed, perr := skill.Parse(raw, skillMd, embedDir, skill.SourceEmbedded); perr == nil {
 			desc = parsed.Description
-		} else if _, ld := lenientFrontmatter(raw); ld != "" {
-			// skill.Parse is strict (e.g. it rejects the comma-string
-			// `allowed-tools` form Claude Code skills use). Fall back to a
-			// permissive description scrape so those bundles still list.
-			desc = ld
 		}
 
 		out = append(out, bundledSkill{
@@ -198,7 +156,6 @@ func loadBundledSkills() ([]bundledSkill, error) {
 			Description: desc,
 			EmbedDir:    embedDir,
 			References:  listBundleReferences(embedDir),
-			ThirdParty:  thirdPartySkills[e.Name()],
 		})
 	}
 
@@ -244,24 +201,8 @@ func bundleNames(skills []bundledSkill) string {
 	return strings.Join(names, ", ")
 }
 
-// visibleBundles returns the bundles used for browsing (list) and bulk
-// selection (--all): first-party always, third-party only when
-// --third-party-skills is set. hidden reports how many third-party bundles were
-// filtered out (0 when the flag is on).
-func visibleBundles(skills []bundledSkill) (visible []bundledSkill, hidden int) {
-	for _, s := range skills {
-		if s.ThirdParty && !skillsOpts.ThirdParty {
-			hidden++
-			continue
-		}
-		visible = append(visible, s)
-	}
-	return visible, hidden
-}
-
 // resolveNamedTargets maps explicit skill names to bundles, erroring on the
-// first unknown name. Shared by get/install; named args resolve against the
-// full set so a third-party skill can always be reached by name.
+// first unknown name. Shared by get/install.
 func resolveNamedTargets(skills []bundledSkill, names []string) ([]bundledSkill, error) {
 	targets := make([]bundledSkill, 0, len(names))
 	for _, n := range names {
@@ -288,7 +229,6 @@ func runSkillsList() error {
 	if err != nil {
 		return err
 	}
-	visible, hidden := visibleBundles(skills)
 
 	if globalJSON {
 		type jsonEntry struct {
@@ -296,39 +236,30 @@ func runSkillsList() error {
 			Description string   `json:"description"`
 			EmbedPath   string   `json:"embed_path"`
 			References  []string `json:"references"`
-			ThirdParty  bool     `json:"third_party"`
 		}
-		entries := make([]jsonEntry, len(visible))
-		for i, s := range visible {
-			entries[i] = jsonEntry{s.Name, s.Description, s.EmbedDir, s.References, s.ThirdParty}
+		entries := make([]jsonEntry, len(skills))
+		for i, s := range skills {
+			entries[i] = jsonEntry{s.Name, s.Description, s.EmbedDir, s.References}
 		}
-		return writeAgentJSON(map[string]any{"skills": entries, "total": len(entries), "hidden_third_party": hidden})
+		return writeAgentJSON(map[string]any{"skills": entries, "total": len(entries)})
 	}
 
-	if len(visible) == 0 {
-		fmt.Printf("%s No skills to show.", terminal.InfoSymbol())
-		if hidden > 0 {
-			fmt.Printf(" %d third-party skill(s) hidden — pass --third-party-skills to show.", hidden)
-		}
-		fmt.Println()
+	if len(skills) == 0 {
+		fmt.Printf("%s No skills to show.\n", terminal.InfoSymbol())
 		return nil
 	}
 
 	fmt.Printf("\n  %s %s bundled skill(s)\n\n",
-		terminal.InfoSymbol(), terminal.BoldCyan(fmt.Sprintf("%d", len(visible))))
+		terminal.InfoSymbol(), terminal.BoldCyan(fmt.Sprintf("%d", len(skills))))
 
 	tbl := terminal.NewTableWithMaxWidth(globalWidth, "NAME", "DESCRIPTION", "REFS")
-	for _, s := range visible {
+	for _, s := range skills {
 		tbl.AddRow(terminal.Cyan(s.Name), s.Description, terminal.Gray(fmt.Sprintf("%d", len(s.References))))
 	}
 	tbl.Print()
 
-	fmt.Printf("\n%s Read a skill:    %s\n", terminal.InfoSymbol(), terminal.Gray("vigolium skills get "+visible[0].Name+" --full"))
+	fmt.Printf("\n%s Read a skill:    %s\n", terminal.InfoSymbol(), terminal.Gray("vigolium skills get "+skills[0].Name+" --full"))
 	fmt.Printf("%s Install a skill: %s\n", terminal.InfoSymbol(), terminal.Gray("vigolium skills install --agent claude --scope project"))
-	if hidden > 0 {
-		fmt.Printf("%s %s third-party skill(s) hidden — pass %s to show.\n",
-			terminal.InfoSymbol(), terminal.BoldCyan(fmt.Sprintf("%d", hidden)), terminal.Gray("--third-party-skills"))
-	}
 	return nil
 }
 
@@ -341,7 +272,7 @@ func runSkillsGet(names []string) error {
 	var targets []bundledSkill
 	switch {
 	case skillsOpts.All:
-		targets, _ = visibleBundles(skills)
+		targets = skills
 	case len(names) == 0:
 		return fmt.Errorf("skills get: provide a skill name or --all (available: %s)", bundleNames(skills))
 	default:
@@ -418,7 +349,7 @@ func runSkillsInstall(names []string) error {
 	var targets []bundledSkill
 	switch {
 	case skillsOpts.All:
-		targets, _ = visibleBundles(skills)
+		targets = skills
 	case len(names) == 0:
 		b, ok := findBundle(skills, defaultInstallSkill)
 		if !ok {

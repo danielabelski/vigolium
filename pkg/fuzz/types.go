@@ -39,6 +39,11 @@ const (
 	// kindMethod rewrites the request-line verb (there is no INS_* type for
 	// the method token).
 	kindMethod
+	// kindAddHeader injects a header the request doesn't currently carry.
+	// Headers like X-Forwarded-For or X-Original-URL are interesting to fuzz
+	// precisely because the client never sends them, so requiring one to
+	// already exist would rule out the whole class.
+	kindAddHeader
 )
 
 // Position is one place a payload gets injected. Exactly one injection
@@ -57,39 +62,73 @@ type Position struct {
 	ip   httpmsg.InsertionPoint // set when kind == kindInsertionPoint
 }
 
-// Matchers keep a response when it satisfies at least one configured category
-// (OR across categories). An empty Matchers matches everything — the primitive
-// default, leaning on Filters + auto-calibration to remove noise rather than an
-// opinionated status allowlist.
-type Matchers struct {
-	AllStatus bool // -mc all
-	Status    []int
-	Sizes     []int
-	Words     []int
-	Lines     []int
-	Regex     *regexp.Regexp // -mr, matched against the response body
-	TimeMs    int64          // -mt, response time >= this many ms
+// MatchMode selects how configured categories combine.
+type MatchMode int
+
+const (
+	// MatchAny keeps/drops when at least one category matches (the default,
+	// and what ffuf-style tools do).
+	MatchAny MatchMode = iota
+	// MatchAll requires every configured category to match, which is how you
+	// express "a 200 *and* bigger than the baseline" without post-filtering.
+	MatchAll
+)
+
+// HeaderMatcher tests one response header against a regex. An empty Value
+// matches the header's mere presence.
+type HeaderMatcher struct {
+	Name  string
+	Value *regexp.Regexp
 }
 
-// configured reports whether any matcher category is set.
-func (m Matchers) configured() bool {
-	return m.AllStatus || len(m.Status) > 0 || len(m.Sizes) > 0 || len(m.Words) > 0 ||
-		len(m.Lines) > 0 || m.Regex != nil || m.TimeMs > 0
+// Criteria is a set of response tests. It backs both the keep set (Matchers)
+// and the drop set (Filters), so the two can never drift in what they can
+// express — a signal you can match on is always a signal you can exclude on.
+type Criteria struct {
+	AllStatus bool // --match-status-code all
+	Status    NumPredicates
+	Sizes     NumPredicates
+	Words     NumPredicates
+	Lines     NumPredicates
+	TimeMs    NumPredicates
+	Regex     *regexp.Regexp // matched against the response body
+	Headers   []HeaderMatcher
+	// TimeZ matches on standard deviations above the baseline mean rather
+	// than absolute milliseconds.
+	TimeZ NumPredicates
+	Mode  MatchMode
 }
 
-// Filters drop a response when it matches any configured category (OR).
-type Filters struct {
-	Status []int
-	Sizes  []int
-	Words  []int
-	Lines  []int
-	Regex  *regexp.Regexp
-	TimeMs int64
+// configured reports whether any category is set.
+func (c Criteria) configured() bool {
+	return c.AllStatus || !c.Status.Empty() || !c.Sizes.Empty() || !c.Words.Empty() ||
+		!c.Lines.Empty() || !c.TimeMs.Empty() || !c.TimeZ.Empty() ||
+		c.Regex != nil || len(c.Headers) > 0
 }
 
-func (f Filters) configured() bool {
-	return len(f.Status) > 0 || len(f.Sizes) > 0 || len(f.Words) > 0 ||
-		len(f.Lines) > 0 || f.Regex != nil || f.TimeMs > 0
+// Matchers keep a response when it satisfies the configured categories. An
+// empty Matchers matches everything — the primitive default, leaning on
+// Filters + auto-calibration to remove noise rather than an opinionated status
+// allowlist.
+type Matchers = Criteria
+
+// Filters drop a response when it satisfies the configured categories.
+type Filters = Criteria
+
+// calibrationPosition picks the position the catch-all probes are sent at.
+// It reads through Cases rather than Positions so a caller that supplied only
+// an explicit plan (the two are alternatives) still calibrates instead of
+// indexing an empty slice.
+func (j Job) calibrationPosition() (Position, bool) {
+	for _, c := range j.Cases {
+		if len(c.Assignments) > 0 {
+			return c.Assignments[0].Position, true
+		}
+	}
+	if len(j.Positions) > 0 {
+		return j.Positions[0], true
+	}
+	return Position{}, false
 }
 
 // Baseline is the un-fuzzed request's response, used for delta reporting and
@@ -101,6 +140,15 @@ type Baseline struct {
 	Lines  int    `json:"lines"`
 	Hash   string `json:"content_hash,omitempty"`
 	Error  string `json:"error,omitempty"`
+
+	// Timing statistics over Samples sends of the un-fuzzed request. A single
+	// sample can't distinguish "this payload made the server work harder" from
+	// "the network hiccuped", which is the whole difficulty of time-based
+	// blind detection; a mean and a standard deviation can.
+	TimeMs      int64   `json:"time_ms"`
+	TimeStdDev  float64 `json:"time_stddev_ms,omitempty"`
+	Samples     int     `json:"samples,omitempty"`
+	TimeSamples []int64 `json:"time_samples,omitempty"`
 }
 
 // Result is the outcome of sending one payload at one position. It is the unit
@@ -118,13 +166,35 @@ type Result struct {
 	TimeMs      int64  `json:"time_ms"`
 	ContentHash string `json:"content_hash,omitempty"`
 
-	// Reflected is true when the payload bytes appear verbatim in the
-	// response body (a cheap, honest signal — not a vulnerability verdict).
+	// Reflected is true when the payload appears in the response at all —
+	// verbatim or in an escaped/encoded form (a cheap, honest signal, not a
+	// vulnerability verdict).
 	Reflected bool `json:"reflected"`
+	// ReflectedRaw narrows that to a verbatim appearance. The distinction is
+	// the whole game for injection classes: a payload echoed back HTML-escaped
+	// is the application defending itself, and reporting it identically to an
+	// unescaped echo is what buries the real signal.
+	ReflectedRaw bool `json:"reflected_raw,omitempty"`
+	// ReflectedIn names where it appeared: "body", or "header:Location".
+	// Header reflection is invisible to body-only checks yet is exactly the
+	// signal behind open redirect and response-splitting.
+	ReflectedIn []string `json:"reflected_in,omitempty"`
 
 	// Signals vs the baseline response.
 	StatusChanged bool `json:"status_changed"`
 	LengthDelta   int  `json:"length_delta"`
+	// TimeZ is how many baseline standard deviations this response's time sits
+	// above the baseline mean. It is what makes a time-based signal
+	// expressible without hand-tuning a millisecond threshold per target:
+	// --match-time-z 4 means "slower than this endpoint's own jitter
+	// explains". Zero when the baseline wasn't sampled enough to have a
+	// deviation.
+	TimeZ float64 `json:"time_z,omitempty"`
+
+	// AnomalyScore is the --anomaly detector's score for this response; 0
+	// when detection is off. AnomalyReasons explains it.
+	AnomalyScore   int             `json:"anomaly_score,omitempty"`
+	AnomalyReasons []AnomalyReason `json:"anomaly_reasons,omitempty"`
 
 	// Matched is true when the result passed the matcher/filter gate and was
 	// not suppressed by auto-calibration — i.e. the caller asked to see it.
@@ -144,6 +214,13 @@ type Report struct {
 	Matched    int      `json:"matched"`
 	Calibrated int      `json:"calibrated"`
 	Errors     int      `json:"errors"`
+
+	// Anomalies are the results the --anomaly detector flagged, scored
+	// against the completed population and sorted most-interesting first.
+	// Empty when detection is off.
+	Anomalies []Result `json:"anomalies,omitempty"`
+	// AnomaliesElided counts anomalies dropped by the report cap.
+	AnomaliesElided int `json:"anomalies_elided,omitempty"`
 }
 
 // Job fully describes one fuzz run. Network policy (client, proxy, timeout,
@@ -155,11 +232,27 @@ type Job struct {
 	Hostname string
 	Port     int
 
+	// Positions and Payloads are the simple form: every position gets every
+	// payload (sniper). Cases, when set, replaces them with an explicit plan —
+	// which is how the multi-position modes express a send that varies several
+	// markers at once.
 	Positions []Position
 	Payloads  []string
+	Cases     []Case
 
 	Matchers Matchers
 	Filters  Filters
+	// BaselineSamples is how many times the un-fuzzed request is sent to build
+	// the timing statistics. 1 (the default) skips deviation entirely.
+	BaselineSamples int
+
+	// Anomaly, when non-nil, turns on anomaly detection: each response is
+	// scored against the baseline and against the run's own population, and
+	// (when no explicit Matchers are set) the score replaces "keep everything"
+	// as the gate. Detection retains response bodies until the run ends so it
+	// can rescore against the finished population.
+	Anomaly *AnomalyConfig
+
 	// AutoCalibrate learns the target's wildcard/catch-all response signature
 	// from a few improbable probe values and suppresses matching results. This
 	// is the primitive's one concession to the catch-all FP problem; it never

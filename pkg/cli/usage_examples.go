@@ -495,9 +495,11 @@ var trafficExamples = FormatExamples(
 	"# Same, but only 200 responses",
 	"vigolium traffic --stateless --glob-db 'prefix-*.sqlite' --tree --status 200",
 	"",
-	"# --- Replay ---",
+	"# --- Replay (a shortcut for `vigolium replay` in bulk mode) ---",
 	"# Replay matched requests (re-send & compare original vs new)",
 	"vigolium traffic --replay --host example.com",
+	"# For header/cookie overrides, a different target, or a cookie jar, use replay directly:",
+	"#   vigolium replay --host example.com -H 'Cookie: session=other'",
 	"# Replay ALL stored traffic through Burp (ignore the default 100 cap), 5 at a time",
 	"vigolium traffic --replay --all --proxy http://127.0.0.1:8080 -c 5",
 	"# Replay everything from a standalone .sqlite / .jsonl export (project scoping off)",
@@ -714,6 +716,54 @@ var doctorExamples = FormatExamples(
 	"vigolium doctor --fix --only nuclei,chrome",
 	"# Other fixable components: bun, claude, agent-browser, pi, piolium",
 	"vigolium doctor --fix --only claude",
+)
+
+var skillsExamples = FormatExamples(
+	"# List the skill bundles shipped with this binary",
+	"vigolium skills",
+	"# Read a skill's full content, references included",
+	"vigolium skills get vigolium-scanner --full",
+	"# Install the default skill into ./.claude/skills/",
+	"vigolium skills install",
+	"# Install every skill globally for Codex",
+	"vigolium skills install --all --agent codex --scope global",
+)
+
+var skillsListExamples = FormatExamples(
+	"# List every bundled skill (name, description, reference count)",
+	"vigolium skills list",
+	"# Same, via the parent command or the 'skill' alias",
+	"vigolium skills",
+	"vigolium skill ls",
+	"# Machine-readable listing for a coding agent",
+	"vigolium skills list -j",
+)
+
+var skillsGetExamples = FormatExamples(
+	"# Print a skill's SKILL.md to stdout",
+	"vigolium skills get vigolium-scanner",
+	"# Include its reference files too",
+	"vigolium skills get vigolium-scanner --full",
+	"# Dump every bundled skill at once",
+	"vigolium skills get --all --full",
+	"# Pipe a skill into a file or another tool",
+	"vigolium skills get vigolium-scanner --full > vigolium-scanner.md",
+)
+
+var skillsInstallExamples = FormatExamples(
+	"# Install the default 'vigolium-scanner' skill into ./.claude/skills/",
+	"vigolium skills install",
+	"# Install into ~/.claude/skills/ so every project sees it",
+	"vigolium skills install --scope global",
+	"# Install for Codex / agentskills.io agents (.agents/skills/)",
+	"vigolium skills install --agent codex",
+	"vigolium skills install --agent agents --scope global",
+	"# Install specific skills by name",
+	"vigolium skills install vigolium-scanner",
+	"# Install every bundled skill, overwriting existing copies",
+	"vigolium skills install --all --force",
+	"# Write to an explicit directory, ignoring --agent/--scope",
+	"vigolium skills install --dir ~/.config/agent/skills",
 )
 
 var extensionsParentExamples = FormatExamples(
@@ -1351,6 +1401,20 @@ var replayExamples = FormatExamples(
 	"vigolium replay --all --save-to-burp --burp-bridge-url http://127.0.0.1:9009 -c 5",
 	"# BULK: replay every record from a standalone export (project scoping off)",
 	"vigolium replay -S --db scan.sqlite --all --proxy http://127.0.0.1:8080 -c 5",
+	"",
+	"# --- Different headers / cookies ---",
+	"# -H replaces the whole header value, so pass the complete cookie string",
+	"vigolium replay -u abc12345 -H 'Cookie: session=other; csrf=xyz' --pretty",
+	"# Same request, another user's session — the diff IS the IDOR/BFLA check",
+	"vigolium replay -u abc12345 -H 'Cookie: session=victim' --pretty",
+	"# Merge a stored auth session, then override one header on top (-H wins)",
+	"vigolium replay -u abc12345 --auth-session staging -H 'X-Forwarded-For: 127.0.0.1'",
+	"# BULK: re-send everything that carried a header, under a different session",
+	"#       (--header-search filters; -H rewrites)",
+	"vigolium replay --header-search 'X-Api-Key' -H 'Cookie: session=other' -c 5",
+	"# BULK: replay each matched URL in a real browser routed through Burp",
+	"#       (navigation-only: no baseline-vs-replay diff)",
+	"vigolium replay --all --with-browser --proxy http://127.0.0.1:8080",
 )
 
 var agentTriageExamples = FormatExamples(

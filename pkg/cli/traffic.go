@@ -282,7 +282,7 @@ func runTraffic(cmd *cobra.Command, args []string) error {
 	// --replay re-sends matched records instead of listing them. Run it
 	// directly (not under --watch, which would re-fire the traffic each tick).
 	if trafficReplay {
-		return runTrafficReplayFlow(context.Background(), db, fuzzyTerm)
+		return runTrafficReplayShim(context.Background(), fuzzyTerm)
 	}
 
 	return runWithWatch(func() error {
@@ -322,7 +322,7 @@ func runTraffic(cmd *cobra.Command, args []string) error {
 		if tuiErr != nil {
 			return tuiErr
 		}
-		records, total, err := queryTrafficRecords(ctx, db, filters, rendersRaw)
+		records, total, err := queryTrafficRecords(ctx, db, filters, rendersRaw, trafficBurpBridgeURL)
 		if err != nil {
 			return fmt.Errorf("failed to query database: %w", err)
 		}
@@ -853,6 +853,22 @@ func printBurpResponse(raw []byte, statusCode int) {
 				fmt.Println(line)
 			}
 		}
+	}
+}
+
+// colorStatus applies color based on HTTP status code range.
+func colorStatus(text string, code int) string {
+	switch {
+	case code >= 500:
+		return terminal.Red(text)
+	case code >= 400:
+		return terminal.Yellow(text)
+	case code >= 300:
+		return terminal.Cyan(text)
+	case code >= 200:
+		return terminal.Green(text)
+	default:
+		return text
 	}
 }
 

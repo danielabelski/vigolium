@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,8 +27,10 @@ func replayBulkRequested(fuzzy string) bool {
 		replayBulkPath != "" ||
 		replayBulkSource != "" ||
 		len(replayBulkSearch) > 0 ||
+		replayBulkHeaderSearch != "" ||
 		replayBulkBody != "" ||
 		len(replayBulkExclude) > 0 ||
+		replayBulkExcludeHeader != "" ||
 		replayBulkExcludeBody != "" ||
 		replayBulkFrom != "" ||
 		replayBulkTo != ""
@@ -37,7 +40,7 @@ func replayBulkRequested(fuzzy string) bool {
 // the replay diff engine, concurrently. Each record is re-sent verbatim.
 // Results stream as JSONL (one replayOutput per record) to stdout / --output,
 // or as per-record diff tables under --pretty.
-func runReplayBulk(ctx context.Context, rr *replayRun, fuzzy string) error {
+func runReplayBulk(ctx context.Context, rr *replayRun, filters database.QueryFilters) error {
 	if replayRecordUUID != "" || replayFindingID > 0 || replayInput != "" || replayInputFile != "" {
 		return fmt.Errorf("bulk selection (a positional search term or --all/--host/--method/--status/--path/--source/--search/--body/--exclude-search/--exclude-body/--from/--to) can't be combined with --record-uuid/--finding-id/--input")
 	}
@@ -49,12 +52,11 @@ func runReplayBulk(ctx context.Context, rr *replayRun, fuzzy string) error {
 		return fmt.Errorf("bulk replay requires database access: %w", err)
 	}
 
-	filters, err := buildReplayBulkFilters(fuzzy)
-	if err != nil {
-		return err
-	}
-
-	records, err := database.NewQueryBuilder(db, filters).Execute(ctx)
+	// Selection goes through the shared traffic path so bulk replay sees the
+	// same records `vigolium traffic` lists — including live Burp Proxy history
+	// merged in when -B/--burp-bridge-url is set. Replay re-sends the stored
+	// request bytes, so the raw columns are always fetched.
+	records, err := selectTrafficRecords(ctx, db, filters, true, replayBurpBridgeURL)
 	if err != nil {
 		return fmt.Errorf("query records: %w", err)
 	}
@@ -75,17 +77,26 @@ func runReplayBulk(ctx context.Context, rr *replayRun, fuzzy string) error {
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	fmt.Fprintf(os.Stderr, "%s Replaying %d record(s) through the diff engine (concurrency %d)...\n",
-		terminal.InfoSymbol(), len(records), concurrency)
+	via := "the diff engine"
+	if rr.withBrowser {
+		via = "a browser"
+	}
+	fmt.Fprintf(os.Stderr, "%s Replaying %d record(s) through %s (concurrency %d)...\n",
+		terminal.InfoSymbol(), len(records), via, concurrency)
 
 	// JSONL sink. One object per line keeps each entry the existing stable
-	// replayOutput shape while streaming as records complete.
-	w, closeOut, err := openReplayOutputWriter()
-	if err != nil {
-		return err
+	// replayOutput shape while streaming as records complete. Only opened for
+	// the JSON path — under --pretty it would create (and truncate) an -o file
+	// that nothing then writes to.
+	var enc *json.Encoder
+	if !replayPretty {
+		w, closeOut, oerr := openReplayOutputWriter()
+		if oerr != nil {
+			return oerr
+		}
+		defer closeOut()
+		enc = json.NewEncoder(w)
 	}
-	defer closeOut()
-	enc := json.NewEncoder(w)
 
 	var (
 		wg    sync.WaitGroup
@@ -105,18 +116,29 @@ func runReplayBulk(ctx context.Context, rr *replayRun, fuzzy string) error {
 
 			entry := rr.recordEntry(ctx, rec, staticOverlay)
 
-			// Serialize only the output write; the replay itself ran concurrently.
+			// Render off-lock: building the table (width computation, coloring)
+			// under the shared mutex would serialize every worker's formatting
+			// behind one tty write. The lock then covers a single Write, which
+			// is also what keeps concurrent blocks from interleaving.
+			var buf bytes.Buffer
+			if replayPretty && entry.Error == "" {
+				_ = emitReplayPretty(&buf, entry)
+				// Blank line between per-record blocks so a bulk pretty run
+				// reads as separate entries rather than one wall of tables.
+				buf.WriteByte('\n')
+			}
+
 			outMu.Lock()
 			defer outMu.Unlock()
 			if replayPretty {
 				if entry.Error != "" {
 					fmt.Fprintf(os.Stderr, "%s replay %s: %s\n", terminal.ErrorPrefix(), entry.Source, entry.Error)
-				} else {
-					_ = emitReplayPretty(entry)
+					return
 				}
-			} else {
-				emitBulkEntry(enc, entry)
+				_, _ = os.Stdout.Write(buf.Bytes())
+				return
 			}
+			emitBulkEntry(enc, entry)
 		}(rec)
 	}
 	wg.Wait()
@@ -201,23 +223,25 @@ func buildReplayBulkFilters(fuzzy string) (database.QueryFilters, error) {
 		limit = 0
 	}
 	return database.QueryFilters{
-		ProjectUUID:       projectUUID,
-		HostPattern:       replayBulkHost,
-		Methods:           replayBulkMethods,
-		StatusCodes:       replayBulkStatus,
-		PathPattern:       replayBulkPath,
-		Source:            replayBulkSource,
-		FuzzyTerm:         fuzzy,
-		SearchTerms:       replayBulkSearch,
-		BodySearch:        replayBulkBody,
-		ExcludeTerms:      replayBulkExclude,
-		ExcludeBodySearch: replayBulkExcludeBody,
-		DateFrom:          dateFrom,
-		DateTo:            dateTo,
-		Limit:             limit,
-		Offset:            replayBulkOffset,
-		SortBy:            replayBulkSort,
-		SortAsc:           replayBulkAsc,
+		ProjectUUID:         projectUUID,
+		HostPattern:         replayBulkHost,
+		Methods:             replayBulkMethods,
+		StatusCodes:         replayBulkStatus,
+		PathPattern:         replayBulkPath,
+		Source:              replayBulkSource,
+		FuzzyTerm:           fuzzy,
+		SearchTerms:         replayBulkSearch,
+		HeaderSearch:        replayBulkHeaderSearch,
+		BodySearch:          replayBulkBody,
+		ExcludeTerms:        replayBulkExclude,
+		ExcludeHeaderSearch: replayBulkExcludeHeader,
+		ExcludeBodySearch:   replayBulkExcludeBody,
+		DateFrom:            dateFrom,
+		DateTo:              dateTo,
+		Limit:               limit,
+		Offset:              replayBulkOffset,
+		SortBy:              replayBulkSort,
+		SortAsc:             replayBulkAsc,
 	}, nil
 }
 
@@ -232,6 +256,7 @@ func sourceFromDBRecord(rec *database.HTTPRecord) *replaySource {
 		Scheme:               rec.Scheme,
 		Hostname:             rec.Hostname,
 		Port:                 rec.Port,
+		URL:                  rec.URL,
 		RecordUUID:           rec.UUID,
 		OriginLabel:          fmt.Sprintf("record %s", rec.UUID),
 	}

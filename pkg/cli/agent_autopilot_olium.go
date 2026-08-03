@@ -89,10 +89,8 @@ func runAutopilotOlium(parentCtx context.Context, settings *config.Settings, rep
 		}
 		defer agent.RemoveRunPID(sessionDir)
 		// Seed the session dir with on-disk SKILL.md files so the agent can
-		// discover them via filesystem tools. vigolium-scanner is always
-		// copied; agent-browser is copied only when the browser is enabled,
-		// which matches the tool-availability surface the agent sees.
-		agent.CopySkillsToSessionDir(sessionDir, settings.Agent.Browser.IsEnabled())
+		// discover them via filesystem tools.
+		agent.CopySkillsToSessionDir(sessionDir)
 	}
 
 	projectUUID, _ := resolveProjectUUID()

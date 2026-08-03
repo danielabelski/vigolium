@@ -1,5 +1,7 @@
 # Writing JavaScript Extensions
 
+> **Related:** [data.md](data.md) for the `extensions` / `js` commands
+
 Guide for writing custom vigolium scanner modules as JavaScript extensions.
 
 ## Table of Contents

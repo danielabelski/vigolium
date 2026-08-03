@@ -1,5 +1,7 @@
 # Server & Ingestion Reference
 
+> **Related:** [agent-loop.md](agent-loop.md) for `--mirror-fs` consumption and bulk replay
+
 Complete flag reference for `server`, `ingest`, and `traffic` commands.
 
 ## Table of Contents
@@ -7,7 +9,7 @@ Complete flag reference for `server`, `ingest`, and `traffic` commands.
 - [server](#server)
 - [ingest](#ingest)
 - [traffic](#traffic)
-- [traffic --replay](#traffic---replay)
+- [traffic --replay](#traffic---replay) — see `references/agent-loop.md`
 
 ---
 
@@ -259,39 +261,13 @@ vigolium traffic --columns HOST,METHOD,PATH,STATUS,AUTH
 
 ## traffic --replay
 
-**Usage:** `vigolium traffic [search-term] --replay [flags]`
+Re-sending stored traffic — both `traffic --replay` (human comparison table,
+`--with-browser`) and the top-level `vigolium replay` (structured JSONL diffs) —
+is documented with the rest of the confirm/hand-off workflow in
+**`references/agent-loop.md`** → *Bulk replay*.
 
-Re-send the matched stored requests and compare original vs new responses. This
-is a mode of the `traffic` command (a flag, not a subcommand — there is no
-`traffic replay` subcommand; a bare `replay` argument is treated as a fuzzy
-search term), so it inherits all the `traffic` filter flags.
-
-> **Bulk replay, two ways.** `traffic --replay` re-sends records **verbatim** and
-> prints a human comparison table — a firehose for pushing captured traffic at a
-> proxy. The top-level `vigolium replay` (with a positional `<search-term>`,
-> `--all`, or any `traffic`-style filter) selects the same record set but runs
-> each record through the diff engine and streams **stable JSONL**
-> (baseline/replay/diff per record). Use `traffic --replay` to eyeball/intercept
-> traffic; use `replay` when you want structured per-record diffs or to pattern-
-> search a slice of stored traffic and re-send it. Neither mutates payloads —
-> for payload / insertion-point fuzzing use `vigolium fuzz`. `--with-browser` is
-> only on `traffic --replay`. See the `replay` guide in SKILL.md §14 (step 7)
-> for the bulk flag set.
-
-### replay-specific flags
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--replay` | bool | `false` | Re-send matched requests and compare responses instead of listing them |
-| `-a, --all` | bool | `false` | Replay every matched record, ignoring the `-n/--limit` cap (which defaults to the most recent 100). Pair with `--replay` to re-send all stored traffic. |
-| `-c, --concurrency` | int | `10` | Concurrent replays; keep low to avoid overwhelming an intercepting proxy like Burp |
-| `--with-browser` | bool | `false` | Replay each URL through a real browser routed via `--proxy`, so Burp captures browser-driven traffic (real TLS fingerprint, JS execution, subresource loads). A navigation is a GET, so non-GET method/body are not reproduced. |
-| `--in-replace` | bool | `false` | Overwrite each stored response with the new replay response |
-| `--timeout` | duration | `15s` | Per-request timeout for the replay |
-
-### Burp-bridge sync flags (traffic listing — not `--replay`)
-
-These operate on the **listing** side (pull from / push to Burp); the two `--save-to-*` flags are **mutually exclusive with `--replay`**. `--burp-bridge-url` is shared by both the listing sync and `--replay`.
+Burp-bridge **listing** sync flags stay here because they operate on the
+`traffic` listing, not on replay:
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
@@ -299,24 +275,4 @@ These operate on the **listing** side (pull from / push to Burp); the two `--sav
 | `--save-to-vigolium-db` | bool | `false` | Persist the live Burp records selected by the active filters into the database (requires `--burp-bridge-url`; not with `--replay`) |
 | `--save-to-burp` | bool | `false` | Copy the DB records selected by the active filters into Burp's Target site map (requires `--burp-bridge-url`; not with `--replay`) |
 
-Routes through `--proxy` (or `HTTP_PROXY`/`HTTPS_PROXY`). Inherits all filter
-flags from the `traffic` command.
-
-### Examples
-
-```bash
-# Replay all matching requests
-vigolium traffic login --replay
-
-# Replay ALL stored traffic through Burp (ignore the default 100 cap)
-vigolium traffic --replay --all --proxy http://127.0.0.1:8080 -c 5
-
-# Replay through Burp at low concurrency
-vigolium traffic --host example.com --replay --proxy http://127.0.0.1:8080 -c 5
-
-# Replay each URL in a real browser routed through Burp
-vigolium traffic --host example.com --replay --with-browser --proxy http://127.0.0.1:8080
-
-# Replay and replace stored responses
-vigolium traffic --host api.example.com --replay --in-replace
-```
+The two `--save-to-*` flags are mutually exclusive with `--replay`.

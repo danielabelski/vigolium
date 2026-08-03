@@ -14,138 +14,360 @@ type header struct {
 	value string
 }
 
-// ParseSingleCommand parses a single curl command string into an HttpRequestResponse.
+// dataPart is one accumulated body-data flag, kept unresolved until assembly
+// so -G can route it to the query string instead.
+type dataPart struct {
+	value string
+	kind  DataKind
+}
+
+// curlSpec accumulates everything a curl command says about the request while
+// the flags are scanned; assembly happens once, in build.
+type curlSpec struct {
+	method         string
+	methodExplicit bool
+
+	rawURL string
+
+	headers     []header
+	data        []dataPart
+	forms       []string
+	formStrings []string
+	cookies     []string
+
+	basicAuth string
+	bearer    string
+	userAgent string
+	referer   string
+
+	asGet         bool // -G: send data as query params
+	asHead        bool // -I: HEAD
+	uploadFile    string
+	jsonShorthand bool // --json: implies JSON content-type and Accept
+
+	hints TransportHints
+}
+
+func (s *curlSpec) setMethod(v string) {
+	s.method = strings.ToUpper(strings.TrimSpace(v))
+	s.methodExplicit = true
+}
+
+func (s *curlSpec) addHeader(v string) error {
+	// curl's "Name;" form sends an empty header; "Name:" removes a default.
+	if k, val, ok := parseHeader(v); ok {
+		s.headers = append(s.headers, header{key: k, value: val})
+		return nil
+	}
+	if name, ok := strings.CutSuffix(strings.TrimSpace(v), ";"); ok {
+		s.headers = append(s.headers, header{key: strings.TrimSpace(name), value: ""})
+		return nil
+	}
+	return fmt.Errorf("bad -H value %q: want 'Name: value'", v)
+}
+
+func (s *curlSpec) addData(v string, kind DataKind) {
+	s.data = append(s.data, dataPart{value: v, kind: kind})
+}
+
+func (s *curlSpec) addCookie(v string) {
+	// curl treats a -b value containing '=' as inline cookies and anything
+	// else as a cookie-jar file path to load from.
+	if strings.Contains(v, "=") {
+		s.cookies = append(s.cookies, v)
+	}
+}
+
+func (s *curlSpec) setURL(v, source string) error {
+	if s.rawURL != "" {
+		return fmt.Errorf("multiple URLs in one curl command (%q and %q via %s); split them into separate commands", s.rawURL, v, source)
+	}
+	s.rawURL = v
+	return nil
+}
+
+// ParseSingleCommand parses a single curl command string into an
+// HttpRequestResponse, discarding any transport-only options.
 func ParseSingleCommand(cmd string) (*httpmsg.HttpRequestResponse, error) {
+	rr, _, err := ParseSingleCommandWithHints(cmd)
+	return rr, err
+}
+
+// ParseSingleCommandWithHints parses a curl command and additionally returns
+// the transport options it carried (proxy, timeouts, TLS material, HTTP
+// version, ...), which don't fit in the request bytes but change how a caller
+// should send them.
+//
+// Unknown flags are rejected rather than skipped — see curlFlag for why.
+func ParseSingleCommandWithHints(cmd string) (*httpmsg.HttpRequestResponse, TransportHints, error) {
+	var spec curlSpec
+
 	tokens := tokenizeCurlCommand(cmd)
 	if len(tokens) == 0 {
-		return nil, fmt.Errorf("empty curl command")
+		return nil, spec.hints, fmt.Errorf("empty curl command")
 	}
 
-	// Skip leading "curl" token if present
+	// Skip a leading "curl" (possibly path-qualified, possibly a shell prompt).
 	start := 0
-	if tokens[0] == "curl" {
-		start = 1
+	for start < len(tokens) && isCurlToken(tokens[start]) {
+		start++
 	}
 
-	var (
-		method      string
-		rawURL      string
-		headers     []header
-		dataParts   []string
-		formFields  []string
-		cookies     string
-		basicAuth   string
-		hasExplicit bool
-	)
-
+	endOfFlags := false
 	for i := start; i < len(tokens); i++ {
 		tok := tokens[i]
 
-		switch tok {
-		case "-X", "--request":
-			i++
-			if i < len(tokens) {
-				method = strings.ToUpper(tokens[i])
-				hasExplicit = true
+		switch {
+		case endOfFlags || tok == "-" || !strings.HasPrefix(tok, "-"):
+			if err := spec.setURL(tok, "positional argument"); err != nil {
+				return nil, spec.hints, err
 			}
 
-		case "-H", "--header":
-			i++
-			if i < len(tokens) {
-				if k, v, ok := parseHeader(tokens[i]); ok {
-					headers = append(headers, header{key: k, value: v})
-				}
-			}
+		case tok == "--":
+			endOfFlags = true
 
-		case "-d", "--data", "--data-raw", "--data-binary":
-			i++
-			if i < len(tokens) {
-				dataParts = append(dataParts, tokens[i])
+		case strings.HasPrefix(tok, "--"):
+			consumed, err := applyLongFlag(&spec, tok, tokens, i)
+			if err != nil {
+				return nil, spec.hints, err
 			}
-
-		case "-F", "--form":
-			i++
-			if i < len(tokens) {
-				formFields = append(formFields, tokens[i])
-			}
-
-		case "-b", "--cookie":
-			i++
-			if i < len(tokens) {
-				cookies = tokens[i]
-			}
-
-		case "-u", "--user":
-			i++
-			if i < len(tokens) {
-				basicAuth = tokens[i]
-			}
-
-		// Flags that consume an argument (ignore)
-		case "-o", "--output", "--url":
-			i++
-			if tok == "--url" && i < len(tokens) {
-				rawURL = tokens[i]
-			}
-
-		// Flags that are standalone (ignore)
-		case "-s", "--silent",
-			"-k", "--insecure",
-			"--compressed",
-			"-v", "--verbose",
-			"-L", "--location",
-			"-i", "--include",
-			"-S", "--show-error",
-			"-f", "--fail",
-			"-g", "--globoff":
-			// no-op
+			i += consumed
 
 		default:
-			// Positional argument: URL (skip flags we don't recognize that start with -)
-			if !strings.HasPrefix(tok, "-") && rawURL == "" {
-				rawURL = tok
+			consumed, err := applyShortCluster(&spec, tok, tokens, i)
+			if err != nil {
+				return nil, spec.hints, err
+			}
+			i += consumed
+		}
+	}
+
+	return spec.build()
+}
+
+// isCurlToken reports whether tok is the command word itself rather than an
+// argument — "curl", "/usr/bin/curl", "curl.exe", or a copied "$"/"#" prompt.
+func isCurlToken(tok string) bool {
+	if tok == "$" || tok == "#" {
+		return true
+	}
+	base := tok
+	if i := strings.LastIndexAny(tok, `/\`); i >= 0 {
+		base = tok[i+1:]
+	}
+	return base == "curl" || base == "curl.exe"
+}
+
+// applyLongFlag handles one "--name" (or "--name=value") token, returning how
+// many extra tokens it consumed.
+func applyLongFlag(spec *curlSpec, tok string, tokens []string, i int) (int, error) {
+	name := strings.TrimPrefix(tok, "--")
+	value, attached := "", false
+	if n, v, ok := strings.Cut(name, "="); ok {
+		name, value, attached = n, v, true
+	}
+
+	flag, ok := longFlags[name]
+	if !ok {
+		// curl accepts --no-<flag> for any boolean option. Negating something
+		// we track is a no-op for request reconstruction — only the
+		// affirmative form carries meaning.
+		if base, negated := strings.CutPrefix(name, "no-"); negated {
+			if bf, known := longFlags[base]; known && !bf.arg {
+				return 0, nil
 			}
 		}
+		return 0, unknownFlagError(tok)
 	}
 
-	if rawURL == "" {
-		return nil, fmt.Errorf("no URL found in curl command")
+	consumed := 0
+	if flag.arg && !attached {
+		if i+1 >= len(tokens) {
+			return 0, fmt.Errorf("curl flag %s expects a value", tok)
+		}
+		value = tokens[i+1]
+		consumed = 1
 	}
-
-	// Build body
-	var body string
-	if len(formFields) > 0 {
-		body = buildFormBody(formFields)
-		if method == "" && !hasExplicit {
-			method = "POST"
-		}
-		// Add Content-Type for form data if not explicitly set
-		if !hasHeader(headers, "Content-Type") {
-			headers = append(headers, header{key: "Content-Type", value: "multipart/form-data"})
-		}
-	} else if len(dataParts) > 0 {
-		body = strings.Join(dataParts, "&")
-		if method == "" && !hasExplicit {
-			method = "POST"
+	if !flag.arg && attached {
+		return 0, fmt.Errorf("curl flag %s does not take a value", tok)
+	}
+	if flag.apply != nil {
+		if err := flag.apply(spec, value); err != nil {
+			return 0, err
 		}
 	}
+	return consumed, nil
+}
 
-	if method == "" {
-		method = "GET"
+// applyShortCluster handles a short-option token, which may cluster several
+// flags ("-sSL") and may carry an arg-taking flag's value attached ("-XPOST",
+// "-H'A: b'" once the tokenizer has stripped the quotes).
+func applyShortCluster(spec *curlSpec, tok string, tokens []string, i int) (int, error) {
+	body := tok[1:]
+
+	for pos := 0; pos < len(body); pos++ {
+		ch := body[pos]
+		flag, ok := shortFlags[ch]
+		if !ok {
+			return 0, unknownFlagError("-" + string(ch))
+		}
+
+		if !flag.arg {
+			if flag.apply != nil {
+				if err := flag.apply(spec, ""); err != nil {
+					return 0, err
+				}
+			}
+			continue
+		}
+
+		// Arg-taking: the rest of this token is the value if there is one,
+		// otherwise the next token. Either way this flag ends the cluster.
+		value, consumed := body[pos+1:], 0
+		if value == "" {
+			if i+1 >= len(tokens) {
+				return 0, fmt.Errorf("curl flag -%c expects a value", ch)
+			}
+			value, consumed = tokens[i+1], 1
+		}
+		if flag.apply != nil {
+			if err := flag.apply(spec, value); err != nil {
+				return 0, err
+			}
+		}
+		return consumed, nil
+	}
+	return 0, nil
+}
+
+// unknownFlagError explains why an unrecognized flag is fatal rather than
+// skipped, since "curl worked, vigolium didn't" needs a reason.
+func unknownFlagError(flag string) error {
+	return fmt.Errorf("unrecognized curl flag %q: refusing to guess whether it takes a value, "+
+		"because skipping it would make its argument look like the target URL "+
+		"(remove the flag, or report it so it can be added)", flag)
+}
+
+// build assembles the accumulated spec into a request.
+func (s *curlSpec) build() (*httpmsg.HttpRequestResponse, TransportHints, error) {
+	if s.rawURL == "" {
+		return nil, s.hints, fmt.Errorf("no URL found in curl command")
 	}
 
-	// Add Cookie header
-	if cookies != "" {
-		headers = append(headers, header{key: "Cookie", value: cookies})
+	// Resolve every data flag now; -G decides where the result lands.
+	var dataValues []string
+	for _, d := range s.data {
+		v, err := ResolveData(d.value, d.kind)
+		if err != nil {
+			return nil, s.hints, err
+		}
+		dataValues = append(dataValues, v)
+	}
+	dataJoined := strings.Join(dataValues, "&")
+
+	var (
+		body        string
+		contentType string
+	)
+
+	switch {
+	case len(s.forms) > 0 || len(s.formStrings) > 0:
+		body, contentType = BuildMultipartBody(s.forms, s.formStrings)
+
+	case s.uploadFile != "":
+		content, err := readDataFile(s.uploadFile)
+		if err != nil {
+			return nil, s.hints, err
+		}
+		body = content
+		contentType = "application/octet-stream"
+
+	case s.asGet:
+		// -G moves the data into the query string; the body stays empty.
+		if dataJoined != "" {
+			merged, err := appendQuery(s.rawURL, dataJoined)
+			if err != nil {
+				return nil, s.hints, err
+			}
+			s.rawURL = merged
+		}
+
+	case dataJoined != "":
+		body = dataJoined
+		if s.jsonShorthand {
+			contentType = "application/json"
+		} else {
+			contentType = GuessContentType(body)
+		}
 	}
 
-	// Add Authorization header for basic auth
-	if basicAuth != "" {
-		encoded := base64.StdEncoding.EncodeToString([]byte(basicAuth))
-		headers = append(headers, header{key: "Authorization", value: "Basic " + encoded})
+	method := s.resolveMethod(body)
+
+	headers := s.assembleHeaders(contentType)
+
+	rr, err := buildRawHTTPRequest(method, s.rawURL, headers, body)
+	return rr, s.hints, err
+}
+
+// resolveMethod applies curl's implicit-verb rules: -X wins, then -I means
+// HEAD, then a body (or -T) means POST/PUT, else GET.
+func (s *curlSpec) resolveMethod(body string) string {
+	switch {
+	case s.methodExplicit && s.method != "":
+		return s.method
+	case s.asHead:
+		return "HEAD"
+	case s.uploadFile != "":
+		return "PUT"
+	case body != "" && !s.asGet:
+		return "POST"
+	default:
+		return "GET"
+	}
+}
+
+// assembleHeaders merges the explicit -H headers with the ones curl would
+// synthesize from -b/-u/-A/-e/--json. Explicit headers always win.
+func (s *curlSpec) assembleHeaders(contentType string) []header {
+	headers := append([]header(nil), s.headers...)
+
+	add := func(k, v string) {
+		if v != "" && !hasHeader(headers, k) {
+			headers = append(headers, header{key: k, value: v})
+		}
 	}
 
-	return buildRawHTTPRequest(method, rawURL, headers, body)
+	if len(s.cookies) > 0 && !hasHeader(headers, "Cookie") {
+		headers = append(headers, header{key: "Cookie", value: strings.Join(s.cookies, "; ")})
+	}
+	if s.basicAuth != "" {
+		add("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(s.basicAuth)))
+	}
+	if s.bearer != "" {
+		add("Authorization", "Bearer "+s.bearer)
+	}
+	add("User-Agent", s.userAgent)
+	add("Referer", s.referer)
+	if s.jsonShorthand {
+		add("Accept", "application/json")
+	}
+	add("Content-Type", contentType)
+
+	return headers
+}
+
+// appendQuery merges -G data into the URL's query string.
+func appendQuery(rawURL, query string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL %q: %w", rawURL, err)
+	}
+	if u.RawQuery == "" {
+		u.RawQuery = query
+	} else {
+		u.RawQuery += "&" + query
+	}
+	return u.String(), nil
 }
 
 // tokenizeCurlCommand splits a curl command string into tokens, handling single/double
@@ -156,6 +378,7 @@ func tokenizeCurlCommand(cmd string) []string {
 	inSingle := false
 	inDouble := false
 	escaped := false
+	quoted := false
 
 	for i := 0; i < len(cmd); i++ {
 		ch := cmd[i]
@@ -185,14 +408,17 @@ func tokenizeCurlCommand(cmd string) []string {
 
 		case ch == '\'' && !inDouble:
 			inSingle = !inSingle
+			quoted = true
 
 		case ch == '"' && !inSingle:
 			inDouble = !inDouble
+			quoted = true
 
 		case (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') && !inSingle && !inDouble:
-			if current.Len() > 0 {
+			if current.Len() > 0 || quoted {
 				tokens = append(tokens, current.String())
 				current.Reset()
+				quoted = false
 			}
 
 		default:
@@ -200,7 +426,7 @@ func tokenizeCurlCommand(cmd string) []string {
 		}
 	}
 
-	if current.Len() > 0 {
+	if current.Len() > 0 || quoted {
 		tokens = append(tokens, current.String())
 	}
 
@@ -220,17 +446,8 @@ func buildRawHTTPRequest(method, fullURL string, headers []header, body string) 
 	var headerLines []string
 	headerLines = append(headerLines, fmt.Sprintf("Host: %s", host))
 
-	hasContentType := false
 	for _, h := range headers {
 		headerLines = append(headerLines, fmt.Sprintf("%s: %s", h.key, h.value))
-		if strings.EqualFold(h.key, "Content-Type") {
-			hasContentType = true
-		}
-	}
-
-	// Auto-add Content-Type if body present but no explicit Content-Type
-	if body != "" && !hasContentType {
-		headerLines = append(headerLines, "Content-Type: application/json")
 	}
 
 	// Add Content-Length for requests with body
@@ -270,29 +487,4 @@ func hasHeader(headers []header, name string) bool {
 		}
 	}
 	return false
-}
-
-// buildFormBody constructs a form body from -F fields.
-// File references (@path) have the @ stripped as a placeholder.
-func buildFormBody(fields []string) string {
-	var parts []string
-	for _, f := range fields {
-		k, v, ok := parseFormField(f)
-		if !ok {
-			continue
-		}
-		// Strip @ prefix for file uploads (placeholder)
-		v = strings.TrimPrefix(v, "@")
-		parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
-	}
-	return strings.Join(parts, "&")
-}
-
-// parseFormField splits a "key=value" form field.
-func parseFormField(s string) (string, string, bool) {
-	key, value, ok := strings.Cut(s, "=")
-	if !ok {
-		return s, "", true
-	}
-	return key, value, true
 }

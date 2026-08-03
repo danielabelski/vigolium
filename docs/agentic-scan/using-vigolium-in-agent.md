@@ -45,15 +45,27 @@ The skill uses lazy-loaded references: the main `SKILL.md` stays small, and deta
 
 ```
 public/skills/vigolium-scanner/
-├── SKILL.md                              # Main skill (decision tree, recipes, flags)
-└── references/
-    ├── scanning-commands.md              # scan, scan-url, scan-request, run
-    ├── server-and-ingestion.md           # server, ingest, traffic, traffic --replay
-    ├── agent-commands.md                 # agent, agent query, autopilot, swarm
-    ├── data-and-management.md            # db, module, ext, config, scope, export
-    ├── flags-reference.md                # Complete alphabetical flag index
-    └── writing-extensions.md             # JS extension API and examples
+├── SKILL.md                      # always loaded: router, mental model, invariants
+└── references/                   # loaded on demand, one hop from SKILL.md
+    ├── agent-loop.md             # driving vigolium from an agent: -j contracts,
+    │                             # triage, replay, fuzz, Burp handoff, exports
+    ├── scanning.md               # scan, scan-url, scan-request, run, phases, strategies
+    ├── agent-modes.md            # agent query/autopilot/swarm/audit/olium/triage/session
+    ├── auth.md                   # --auth-file / --auth, YAML format, extract rules
+    ├── data.md                   # db, finding, traffic, module, ext, js, config, export
+    ├── server-ingest.md          # server, ingest, proxy capture, live mirror
+    ├── extensions.md             # writing JS scanner modules against vigolium.*
+    └── flags.generated.md        # generated from the command tree — grep by flag name
 ```
+
+Only `SKILL.md` is always in context; it routes to at most one reference per
+task. `flags.generated.md` is produced by `make skill-flags` (which shells out to
+`vigolium skills gen-flags`), so its flag data always matches the binary.
+
+If you are building an agent integration rather than reading interactively,
+start with `references/agent-loop.md` — it documents the
+`scope → scan → read → confirm → hand off` loop, the two JSON contracts, and the
+token-bounding flags.
 
 ---
 

@@ -109,8 +109,7 @@ func (s *SwarmRunner) newSwarmPipelineState(ctx context.Context, cfg SwarmConfig
 	result.SessionDir = sessionDir
 	cfg.SessionDir = sessionDir
 
-	browserEnabled := s.engine != nil && s.engine.settings != nil && s.engine.settings.Agent.Browser.IsEnabled()
-	CopySkillsToSessionDir(sessionDir, browserEnabled)
+	CopySkillsToSessionDir(sessionDir)
 
 	var cleanup func()
 	// Pass swarm's own AgenticScan UUID as the audit child's parentAgenticScanUUID.

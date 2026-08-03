@@ -1,8 +1,32 @@
-# Agent Commands Reference
+# AI Agent Modes
 
-Complete flag reference for `agent`, `agent query`, `agent autopilot`, `agent swarm`, `agent olium`, `agent audit`, `agent triage`, and `agent session` commands. (The former `agent archon` command has been folded into `agent audit` — drive the vigolium-audit harness with `vigolium agent audit --driver=audit`.)
+> **Related:** [agent-loop.md](agent-loop.md) for parsing agent-run output · [auth.md](auth.md) for authenticated scans
 
-All agent dispatch is routed through the in-process **olium** engine — there are no subprocess SDK backends. Provider selection happens via `agent.olium.provider` in `vigolium-configs.yaml` or per-run flags (`--provider`, `--model`, `--oauth-cred`, `--oauth-token`, `--llm-api-key`, `--gcp-project`, `--gcp-location`).
+Flags, phases, and examples for every `vigolium agent` subcommand.
+
+**There are exactly seven subcommands:** `query`, `autopilot`, `swarm`, `olium`,
+`audit`, `triage`, `session`. Piolium is **not** a subcommand — it is a *driver*
+of `agent audit` (`--driver=piolium`), documented under
+[The piolium driver](#the-piolium-driver).
+
+Which one do I want?
+
+| Goal | Subcommand |
+|------|-----------|
+| One-shot prompt over source code (review, endpoint discovery) | `agent query` |
+| Autonomous end-to-end scan; the agent drives the CLI itself | `agent autopilot` |
+| Orchestrated scan: plan → generate extensions → native scan → triage | `agent swarm` |
+| Whitebox source audit, no running target required | `agent audit` |
+| Interactive TUI / ad-hoc prompt against the raw agent | `agent olium` |
+| Decide whether one existing finding is real | `agent triage` |
+| Inspect past agent runs | `agent session` |
+
+All dispatch routes through the in-process **olium** engine — there are no
+subprocess SDK backends. Providers come from `agent.olium.provider` in
+`vigolium-configs.yaml` or per-run flags (`--provider`, `--model`,
+`--oauth-cred`, `--oauth-token`, `--llm-api-key`, `--gcp-project`,
+`--gcp-location`). The one exception is the `agent audit` **audit leg**, which
+drives the `claude` or `codex` CLI directly.
 
 ## Table of Contents
 
@@ -12,6 +36,7 @@ All agent dispatch is routed through the in-process **olium** engine — there a
 - [agent swarm](#agent-swarm)
 - [agent olium](#agent-olium)
 - [agent audit](#agent-audit)
+  - [The piolium driver](#the-piolium-driver)
 - [agent triage](#agent-triage)
 - [agent session](#agent-session)
 - [Intensity Presets](#intensity-presets)
@@ -601,92 +626,25 @@ vigolium olium --provider anthropic-cli --claude-bin /usr/local/bin/claude
 
 ---
 
-## agent audit --driver=piolium (piolium driver)
-
-**Usage:** `vigolium agent audit --driver=piolium [flags]`
-
-Foreground audit driven by the user's installed **piolium** Pi extension. Drives `pi --mode json -p /piolium-<mode>` against a resolved source tree, syncs audit artifacts into the vigolium agent session directory, and imports findings into the database. Same `audit-state.json` schema as vigolium-audit (so the same parsing/reporting tooling applies), tagged separately in the DB.
-
-**Requires:** `pi` in PATH (install: `npm i -g @earendil-works/pi-coding-agent`) plus `piolium` registered in `~/.pi/agent/settings.json` (`pi install git:git@github.com:vigolium/piolium.git`). Run `vigolium doctor` if unsure.
-
-### piolium driver flags
-
-| Flag | Short | Type | Default | Description |
-|------|-------|------|---------|-------------|
-| `--intensity` | — | string | `balanced` | Audit intensity preset: `quick` (lite + shallow clone), `balanced` (default), `deep` (deep + full clone history). Explicit `--mode` / `--commit-depth` always override |
-| `--mode` | — | string | (from intensity) | Audit mode override: `lite`, `balanced`, `deep`, `revisit`, `confirm`, `merge`, `diff`, `longshot`, `status`, `smoke` |
-| `--source` | — | string | `.` | Source: local directory, git URL, `gs://<project>/<key>` archive, or local archive (`.zip / .tar.gz / .tar.bz2 / .tar.xz`) |
-| `--commit-depth` | — | int | `1` | `git clone --depth` value when `--source` is a git URL (0 = full history) |
-| `--no-stream` | — | bool | `false` | Don't echo agent output to the console (still written to `{session}/runtime.log`) |
-| `--upload-results` | — | bool | `false` | Upload session bundle to cloud storage after completion (requires storage config) |
-| `--pi-provider` | — | string | — | Override pi's `defaultProvider` for this run (e.g. `vertex-anthropic`, `google-vertex`) |
-| `--pi-model` | — | string | — | Override pi's `defaultModel` for this run (e.g. `claude-opus-4-6`, `gemini-3.1-pro`) |
-| `--no-preflight` | — | bool | `false` | Skip the pre-audit pi roundtrip check (auth + model availability) |
-| `--preflight-timeout` | — | duration | `30s` | Pi preflight timeout (e.g. `30s`, `1m`) |
-| `--plm-scan-limit` | — | int | `0` | [piolium] Cap commit-history scan to N commits (0 = piolium default) |
-| `--plm-scan-since` | — | string | — | [piolium] Cap commit-history scan to a `git --since` window (e.g. `"60 days ago"`) |
-| `--plm-phase-retries` | — | int | `0` | [piolium] Per-phase retry count (0 = piolium default) |
-| `--plm-command-retries` | — | int | `0` | [piolium] Per-command retry count (0 = piolium default) |
-| `--plm-longshot-limit` | — | int | `0` | [piolium] Max files hunted in `longshot` mode (0 = piolium default) |
-| `--plm-longshot-timeout` | — | int | `0` | [piolium] Per-file kill timer in `longshot` mode in ms (0 = piolium default) |
-| `--plm-longshot-langs` | — | string | — | [piolium] Longshot language allowlist (comma-separated, e.g. `python,go`) |
-
-### Audit modes
-
-| Mode | Phases | Description |
-|------|-------:|-------------|
-| `lite` | 4 | Quick recon, secrets, fast SAST |
-| `balanced` | 9 | Default audit path with PoCs and report |
-| `deep` | 17 | Full audit |
-| `revisit` | — | Anti-anchored second pass over an existing audit |
-| `confirm` | — | Confirm existing findings live or with tests |
-| `merge` | — | Merge and dedupe result trees from prior runs |
-| `diff` | — | Scan changed files since an audited commit |
-| `longshot` | — | Hail-mary file-by-file vulnerability hunt |
-| `status` | — | Read-only progress check on an existing run (no agent launched) |
-| `smoke` | — | Verify runner/provider wiring |
-
-### Examples
-
-```bash
-# Balanced 9-phase audit of a local repo
-vigolium agent audit --driver=piolium --mode balanced --source .
-
-# Quick lite audit of a remote git URL (auto-clones)
-vigolium agent audit --driver=piolium --mode lite --source https://github.com/org/repo
-
-# Hail-mary file-by-file vulnerability hunt over Python+Go files only
-vigolium agent audit --driver=piolium --mode longshot --source ./src \
-  --plm-longshot-langs python,go --plm-longshot-limit 200
-
-# Use a specific Pi provider/model for this run
-vigolium agent audit --driver=piolium --pi-provider vertex-anthropic --pi-model claude-opus-4-6 --source .
-
-# Full clone history via intensity preset
-vigolium agent audit --driver=piolium --intensity deep --source https://github.com/org/repo
-
-# Cap commit-history scan to last 60 days
-vigolium agent audit --driver=piolium --mode balanced --source . --plm-scan-since "60 days ago"
-
-# Resume / re-audit an existing tree
-vigolium agent audit --driver=piolium --mode revisit --source ./prior-piolium-tree
-
-# Read-only progress check on an in-progress run
-vigolium agent audit --driver=piolium --mode status --source ./in-progress-piolium
-
-# Skip preflight
-vigolium agent audit --driver=piolium --mode balanced --source . --no-preflight
-```
-
-To run piolium and the vigolium-audit harness back-to-back on the same source, use `vigolium agent audit` instead — that command dispatches both drivers (or just one with `--driver=audit|piolium`) under a single AgenticScan.
-
----
-
 ## agent audit
 
 **Usage:** `vigolium agent audit [flags]`
 
-Unified driver dispatcher: drives the embedded **vigolium-audit** harness (driver name `audit`) and/or **piolium** against the same source tree under a **single parent AgenticScan UUID**. There is no separate `agent archon` command — the vigolium-audit leg is reached here via `--driver=audit`.
+Whitebox source audit. One command, two interchangeable **drivers** running
+against the same source tree under a **single parent AgenticScan UUID**:
+
+| `--driver` | Behavior |
+|-----------|----------|
+| `auto` *(default)* | Run the embedded **vigolium-audit** harness; fall back to piolium **only** when the resolved claude/codex CLI is missing from PATH |
+| `both` | Run audit, then piolium, unconditionally and sequentially |
+| `audit` | vigolium-audit harness only (drives the `claude` or `codex` CLI) |
+| `piolium` | piolium only (drives the user's installed `pi` extension) |
+
+Both drivers write the same on-disk schema (`audit-state.json` +
+`findings-draft/`), so the same parsing and reporting tooling applies to either.
+They are tagged separately in the DB and get their own child rows and session
+subdirs (`{session}/audit/`, `{session}/piolium/`) — separated on disk, scored as
+one logical audit.
 
 Default `--driver=auto` preflights the resolved coding-agent CLI (claude or codex) on PATH: if present it runs the vigolium-audit harness and **only falls back to piolium when that CLI is missing** (a clean audit run never consults piolium; a mid-run audit failure surfaces directly rather than silently retrying). `--driver=both` runs audit then piolium unconditionally. After the participating drivers finish, a project-wide post-pass findings dedup collapses duplicates. Per-driver child rows + session subdirs (`{session}/audit/`, `{session}/piolium/`) keep them separated on disk and in the DB while still scoring as one logical audit.
 
@@ -722,7 +680,7 @@ If one driver fails under `--driver=both`, the other still runs — the parent r
 | `--pi-model` | — | string | — | [piolium] Override pi's `defaultModel` |
 | `--no-preflight` | — | bool | `false` | Skip the pre-audit roundtrip checks for both drivers |
 | `--preflight-timeout` | — | duration | `30s` | Per-driver preflight timeout |
-| `--plm-scan-limit` / `--plm-scan-since` / `--plm-phase-retries` / `--plm-command-retries` / `--plm-longshot-limit` / `--plm-longshot-timeout` / `--plm-longshot-langs` | — | — | — | [piolium] passthroughs — same semantics as `vigolium agent audit --driver=piolium`. Ignored when `--driver=audit` |
+| `--plm-scan-limit` / `--plm-scan-since` / `--plm-phase-retries` / `--plm-command-retries` / `--plm-longshot-limit` / `--plm-longshot-timeout` / `--plm-longshot-langs` | — | — | — | [piolium] passthroughs — see [The piolium driver](#the-piolium-driver). Ignored when `--driver=audit` |
 
 ### Driver availability
 
@@ -730,6 +688,88 @@ If one driver fails under `--driver=both`, the other still runs — the parent r
 - `--driver=piolium` and the piolium runtime is missing → **hard error**.
 - `--driver=auto`: audit runs when its claude/codex CLI is on PATH; otherwise it silently falls back to piolium (only then is piolium's availability reported).
 - `--driver=both` and one runtime is missing → warn, drop the missing driver, run the other; **both** missing → hard error with both reasons.
+
+### The piolium driver
+
+Reached with `--driver=piolium` (or as the `auto` fallback). There is **no**
+`vigolium agent piolium` command.
+
+Drives the user's installed **piolium** Pi extension via
+`pi --mode json -p /piolium-<mode>` against the resolved source tree, syncs audit
+artifacts into the vigolium agent session directory, and imports findings into
+the database.
+
+**Requires:** `pi` in PATH (install: `npm i -g @earendil-works/pi-coding-agent`) plus `piolium` registered in `~/.pi/agent/settings.json` (`pi install git:git@github.com:vigolium/piolium.git`). Run `vigolium doctor` if unsure.
+
+#### piolium-specific flags
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--intensity` | — | string | `balanced` | Audit intensity preset: `quick` (lite + shallow clone), `balanced` (default), `deep` (deep + full clone history). Explicit `--mode` / `--commit-depth` always override |
+| `--mode` | — | string | (from intensity) | Audit mode override: `lite`, `balanced`, `deep`, `revisit`, `confirm`, `merge`, `diff`, `longshot`, `status`, `smoke` |
+| `--source` | — | string | `.` | Source: local directory, git URL, `gs://<project>/<key>` archive, or local archive (`.zip / .tar.gz / .tar.bz2 / .tar.xz`) |
+| `--commit-depth` | — | int | `1` | `git clone --depth` value when `--source` is a git URL (0 = full history) |
+| `--no-stream` | — | bool | `false` | Don't echo agent output to the console (still written to `{session}/runtime.log`) |
+| `--upload-results` | — | bool | `false` | Upload session bundle to cloud storage after completion (requires storage config) |
+| `--pi-provider` | — | string | — | Override pi's `defaultProvider` for this run (e.g. `vertex-anthropic`, `google-vertex`) |
+| `--pi-model` | — | string | — | Override pi's `defaultModel` for this run (e.g. `claude-opus-4-6`, `gemini-3.1-pro`) |
+| `--no-preflight` | — | bool | `false` | Skip the pre-audit pi roundtrip check (auth + model availability) |
+| `--preflight-timeout` | — | duration | `30s` | Pi preflight timeout (e.g. `30s`, `1m`) |
+| `--plm-scan-limit` | — | int | `0` | [piolium] Cap commit-history scan to N commits (0 = piolium default) |
+| `--plm-scan-since` | — | string | — | [piolium] Cap commit-history scan to a `git --since` window (e.g. `"60 days ago"`) |
+| `--plm-phase-retries` | — | int | `0` | [piolium] Per-phase retry count (0 = piolium default) |
+| `--plm-command-retries` | — | int | `0` | [piolium] Per-command retry count (0 = piolium default) |
+| `--plm-longshot-limit` | — | int | `0` | [piolium] Max files hunted in `longshot` mode (0 = piolium default) |
+| `--plm-longshot-timeout` | — | int | `0` | [piolium] Per-file kill timer in `longshot` mode in ms (0 = piolium default) |
+| `--plm-longshot-langs` | — | string | — | [piolium] Longshot language allowlist (comma-separated, e.g. `python,go`) |
+
+#### piolium modes
+
+| Mode | Phases | Description |
+|------|-------:|-------------|
+| `lite` | 4 | Quick recon, secrets, fast SAST |
+| `balanced` | 9 | Default audit path with PoCs and report |
+| `deep` | 17 | Full audit |
+| `revisit` | — | Anti-anchored second pass over an existing audit |
+| `confirm` | — | Confirm existing findings live or with tests |
+| `merge` | — | Merge and dedupe result trees from prior runs |
+| `diff` | — | Scan changed files since an audited commit |
+| `longshot` | — | Hail-mary file-by-file vulnerability hunt |
+| `status` | — | Read-only progress check on an existing run (no agent launched) |
+| `smoke` | — | Verify runner/provider wiring |
+
+#### piolium examples
+
+```bash
+# Balanced 9-phase audit of a local repo
+vigolium agent audit --driver=piolium --mode balanced --source .
+
+# Quick lite audit of a remote git URL (auto-clones)
+vigolium agent audit --driver=piolium --mode lite --source https://github.com/org/repo
+
+# Hail-mary file-by-file vulnerability hunt over Python+Go files only
+vigolium agent audit --driver=piolium --mode longshot --source ./src \
+  --plm-longshot-langs python,go --plm-longshot-limit 200
+
+# Use a specific Pi provider/model for this run
+vigolium agent audit --driver=piolium --pi-provider vertex-anthropic --pi-model claude-opus-4-6 --source .
+
+# Full clone history via intensity preset
+vigolium agent audit --driver=piolium --intensity deep --source https://github.com/org/repo
+
+# Cap commit-history scan to last 60 days
+vigolium agent audit --driver=piolium --mode balanced --source . --plm-scan-since "60 days ago"
+
+# Resume / re-audit an existing tree
+vigolium agent audit --driver=piolium --mode revisit --source ./prior-piolium-tree
+
+# Read-only progress check on an in-progress run
+vigolium agent audit --driver=piolium --mode status --source ./in-progress-piolium
+
+# Skip preflight
+vigolium agent audit --driver=piolium --mode balanced --source . --no-preflight
+```
+
 
 ### Examples
 

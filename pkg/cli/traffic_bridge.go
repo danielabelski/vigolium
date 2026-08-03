@@ -18,10 +18,14 @@ func recordsQuery(db *database.DB, filters database.QueryFilters, includeRaw boo
 	return qb
 }
 
-// queryTrafficRecords is the shared traffic data path for listing, TUI, JSON,
-// Markdown, and replay modes. When --burp-bridge-url is set it merges live
-// Burp Proxy history with the ordinary database query and applies one global
-// sort/page over both sources.
+// queryTrafficRecords is the shared record-selection path for `traffic`
+// (listing, TUI, JSON, Markdown) and for `replay`'s bulk mode. When bridgeURL
+// is set it merges live Burp Proxy history with the ordinary database query and
+// applies one global sort/page over both sources.
+//
+// bridgeURL is passed in rather than read off a global because the two commands
+// carry their own --burp-bridge-url flag (trafficBurpBridgeURL /
+// replayBurpBridgeURL); an empty value selects the database-only path.
 //
 // includeRaw declares whether the caller reads the raw request/response off the
 // returned records; when false they are left out of the SELECT (see
@@ -33,8 +37,9 @@ func queryTrafficRecords(
 	db *database.DB,
 	filters database.QueryFilters,
 	includeRaw bool,
+	bridgeURL string,
 ) ([]*database.HTTPRecord, int64, error) {
-	if trafficBurpBridgeURL == "" || !burpbridge.Eligible(filters) {
+	if bridgeURL == "" || !burpbridge.Eligible(filters) {
 		return recordsQuery(db, filters, includeRaw).ExecuteWithCount(ctx)
 	}
 
@@ -48,7 +53,7 @@ func queryTrafficRecords(
 		return nil, 0, err
 	}
 
-	client, err := burpbridge.New(trafficBurpBridgeURL)
+	client, err := burpbridge.New(bridgeURL)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -71,4 +76,25 @@ func queryTrafficRecords(
 		filters.SortAsc,
 	)
 	return records, total, nil
+}
+
+// selectTrafficRecords is queryTrafficRecords for callers that don't display a
+// total. It skips the COUNT(*) that ExecuteWithCount issues alongside the rows —
+// a second pass applying the same predicates, which under --search/--body are
+// LIKE scans over the raw request/response blobs.
+//
+// The bridge path still counts, because merging two paged sources needs both
+// totals to page correctly.
+func selectTrafficRecords(
+	ctx context.Context,
+	db *database.DB,
+	filters database.QueryFilters,
+	includeRaw bool,
+	bridgeURL string,
+) ([]*database.HTTPRecord, error) {
+	if bridgeURL == "" || !burpbridge.Eligible(filters) {
+		return recordsQuery(db, filters, includeRaw).Execute(ctx)
+	}
+	records, _, err := queryTrafficRecords(ctx, db, filters, includeRaw, bridgeURL)
+	return records, err
 }

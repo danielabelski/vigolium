@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,9 +13,12 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/fuzz"
+	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/replay"
 	"github.com/vigolium/vigolium/pkg/terminal"
 )
@@ -42,23 +46,27 @@ var (
 	fuzzClasses   []string
 	fuzzPayloads  []string
 
-	// Matchers (keep) — long flags only; pflag shorthands are single-char.
-	fuzzMC []string // status (accepts "all")
-	fuzzMS []int
-	fuzzMW []int
-	fuzzML []int
-	fuzzMR string
-	fuzzMT int64
+	// Matchers (keep) and excludes (drop). Long flags only; pflag shorthands
+	// are single-char. Numeric values take the predicate grammar (N, N-M, >N,
+	// <N, !N). The flags bind straight into the struct buildCriteria consumes,
+	// so adding a category is one field plus one registration rather than a
+	// global, a struct field, and two hand-written copy lines that the compiler
+	// cannot check.
+	fuzzMatch   = criteriaFlags{kind: "match"}
+	fuzzExclude = criteriaFlags{kind: "exclude"}
 
-	// Exclude (drop).
-	fuzzEC []int
-	fuzzES []int
-	fuzzEW []int
-	fuzzEL []int
-	fuzzER string
-	fuzzET int64
+	// Attack mode / multi-marker.
+	fuzzMode            string
+	fuzzBaselineSamples int
+
+	// Anomaly detection.
+	fuzzAnomaly          bool
+	fuzzAnomalyThreshold string
+	fuzzAnomalyMinPop    int
 
 	// Behaviour / output.
+	fuzzDryRun      bool
+	fuzzIgnoreScope bool
 	fuzzNoCalibrate bool
 	fuzzConcurrency int
 	fuzzDelayMs     int
@@ -108,9 +116,25 @@ PAYLOADS (combine freely):
   -w/--wordlist <file|builtin>   builtins: ` + strings.Join(fuzz.BuiltinNames(), ", ") + `
   -p/--payload <literal>         inline payload (repeatable)
 
-MATCHERS keep a response (OR; empty = keep all), EXCLUDES drop it (OR):
-  --match-status-code 200,301  --match-size N  --match-words N  --match-lines N
-  --match-regex <re>  --match-time <ms>   (and the --exclude-* equivalents to drop)
+ANOMALY DETECTION (-a/--anomaly) — the alternative to writing matchers by hand:
+  Writing a matcher means knowing the interesting size or status up front. Instead,
+  --anomaly scores every response against the baseline AND against the run's own
+  population, and keeps the ones that stand out. Signals: a rare status, a body no
+  other payload produced, size/time outliers (median-absolute-deviation, so the
+  outliers can't hide themselves), an error signature the baseline didn't have,
+  a changed Location/Set-Cookie/WWW-Authenticate, and unencoded reflection.
+  Each result carries "anomaly_score" and "anomaly_reasons" explaining the score.
+    --anomaly-threshold low|medium|high   how strong a signal must be (default medium)
+  With --anomaly and no explicit matchers, "interesting" replaces "keep everything".
+  It reports where to look, never a verdict — confirm with the module scanner.
+
+MATCHERS keep a response, EXCLUDES drop it. Numeric flags take a predicate:
+  N (exact)  N-M (range)  >N  >=N  <N  <=N  !N (not), comma-separated:
+  --match-status-code 200,301  --match-size '>1000'  --match-words 50-80
+  --match-lines '!0'  --match-regex <re>  --match-time '>500'
+  --match-header 'Location: /admin'      (presence-only: --match-header Location)
+  --match-mode all                       require every matcher instead of any
+  (every flag has an --exclude-* twin, with --exclude-mode)
   --match-status-code all keeps every status. Auto-calibration (on by default) suppresses
   the target's wildcard/catch-all response; suppressed results carry "calibrated":true.
 
@@ -144,10 +168,10 @@ func init() {
 	f.StringVarP(&fuzzRecordUUID, "record-uuid", "u", "", "Use a stored HTTP record (by UUID) as the request to fuzz")
 	f.StringVarP(&fuzzTargetURL, "target", "t", "", "Override scheme/host/port the request is sent to (e.g. https://staging.acme.test)")
 
-	// Curl-style builder.
-	f.StringVarP(&fuzzMethod, "request", "X", "GET", "HTTP method when building from a positional URL")
-	f.StringArrayVarP(&fuzzHeaders, "header", "H", nil, "Request header 'Name: value' when building from a positional URL (repeatable)")
-	f.StringVarP(&fuzzData, "data", "d", "", "Request body when building from a positional URL")
+	// Curl-style builder — applied to whatever source resolved the request.
+	f.StringVarP(&fuzzMethod, "request", "X", "", "HTTP method override (default: the source request's, or GET)")
+	f.StringArrayVarP(&fuzzHeaders, "header", "H", nil, "Request header 'Name: value', added or replaced on the source request (repeatable)")
+	f.StringVarP(&fuzzData, "data", "d", "", "Request body override (refreshes Content-Length)")
 
 	// Positions.
 	f.StringVar(&fuzzSelector, "fuzz", "", "What to fuzz: method|path|params|param-name|headers|cookies|all (default: all insertion points)")
@@ -160,23 +184,27 @@ func init() {
 	f.StringArrayVarP(&fuzzWordlists, "wordlist", "w", nil, "Payload wordlist: a builtin name or file path (repeatable)")
 	f.StringArrayVarP(&fuzzPayloads, "payload", "p", nil, "Inline payload literal (repeatable)")
 
-	// Matchers.
-	f.StringSliceVar(&fuzzMC, "match-status-code", nil, "Match status codes (comma-list, or 'all')")
-	f.IntSliceVar(&fuzzMS, "match-size", nil, "Match response sizes (bytes)")
-	f.IntSliceVar(&fuzzMW, "match-words", nil, "Match response word counts")
-	f.IntSliceVar(&fuzzML, "match-lines", nil, "Match response line counts")
-	f.StringVar(&fuzzMR, "match-regex", "", "Match response body against this regex")
-	f.Int64Var(&fuzzMT, "match-time", 0, "Match responses taking at least this many ms")
+	// Matchers keep a response; excludes drop it. Same surface on both sides,
+	// registered from one table so they cannot drift.
+	registerCriteriaFlags(f, &fuzzMatch, "match", "Match")
+	registerCriteriaFlags(f, &fuzzExclude, "exclude", "Exclude")
 
-	// Exclude (drop) — the inverse of the matchers above.
-	f.IntSliceVar(&fuzzEC, "exclude-status-code", nil, "Exclude these status codes")
-	f.IntSliceVar(&fuzzES, "exclude-size", nil, "Exclude these response sizes (bytes)")
-	f.IntSliceVar(&fuzzEW, "exclude-words", nil, "Exclude these response word counts")
-	f.IntSliceVar(&fuzzEL, "exclude-lines", nil, "Exclude these response line counts")
-	f.StringVar(&fuzzER, "exclude-regex", "", "Exclude responses whose body matches this regex")
-	f.Int64Var(&fuzzET, "exclude-time", 0, "Exclude responses taking at least this many ms")
+	f.StringVar(&fuzzMode, "mode", "sniper",
+		"With several markers (FUZZ, FUZZ2, ...): sniper (one at a time) | batteringram (same payload everywhere) | pitchfork (lists in lockstep) | clusterbomb (every combination)")
+	f.IntVar(&fuzzBaselineSamples, "baseline-samples", 0,
+		"Send the un-fuzzed request this many times to measure timing jitter, enabling time_z (default 1, or 3 with --anomaly)")
+
+	// Anomaly detection — the alternative to writing matchers by hand.
+	f.BoolVarP(&fuzzAnomaly, "anomaly", "a", false,
+		"Auto-detect interesting responses instead of requiring explicit matchers: score each response against the baseline AND the run's own population (rare status, unique body, size/time outliers, new error signatures, changed headers, unencoded reflection)")
+	f.StringVar(&fuzzAnomalyThreshold, "anomaly-threshold", "medium",
+		"How strong a signal must be to report: low|medium|high, or a number")
+	f.IntVar(&fuzzAnomalyMinPop, "anomaly-min-population", 0,
+		"Responses needed before population signals (rarity/outliers) count (default 12)")
 
 	// Behaviour / output.
+	f.BoolVar(&fuzzDryRun, "dry-run", false, "Resolve positions and payloads, print what would be sent, and exit without any network traffic")
+	f.BoolVar(&fuzzIgnoreScope, "ignore-scope", false, "Fuzz a host outside the project's configured scope")
 	f.BoolVar(&fuzzNoCalibrate, "no-calibrate", false, "Disable auto-calibration of the target's catch-all response")
 	f.IntVarP(&fuzzConcurrency, "concurrency", "c", 10, "Concurrent requests")
 	f.IntVar(&fuzzDelayMs, "delay", 0, "Delay in ms before each request (per worker)")
@@ -199,6 +227,9 @@ func init() {
 		"With --send-via-burp: per-request response timeout (<=2m; default uses the bridge's 30s)")
 	f.BoolVar(&fuzzMatchesToOrganizer, "matches-to-organizer", false,
 		"Push each matched result's request to Burp's Organizer (Burp re-issues it) for manual triage; requires --burp-bridge-url")
+
+	// Curl-compatible request/transport/session flags.
+	registerFuzzNetFlags(f)
 }
 
 // fuzzOrganizerCap bounds how many matched requests are pushed to Burp's
@@ -208,6 +239,10 @@ const fuzzOrganizerCap = 200
 func runFuzz(cmd *cobra.Command, args []string) error {
 	defer closeDatabaseOnExit()
 	ctx := cmd.Context()
+
+	if err := validateFuzzNetFlags(); err != nil {
+		return err
+	}
 
 	src, err := resolveFuzzSource(ctx, args)
 	if err != nil {
@@ -222,8 +257,19 @@ func runFuzz(cmd *cobra.Command, args []string) error {
 	// repair it so insertion-point analysis and the send path both parse.
 	src.BaselineRequest = fuzz.NormalizeRawRequest(src.BaselineRequest)
 
-	bridge, err := setupFuzzBurpBridge(ctx, src)
+	// -X/-H/-d and the curl request flags apply to every source, not just a
+	// positional URL, and land before position analysis so a marker introduced
+	// by -H is discovered like any other.
+	overrides, err := buildFuzzOverrides(ctx, src, len(args) == 1)
 	if err != nil {
+		return err
+	}
+	src.BaselineRequest, err = overrides.Apply(src.BaselineRequest)
+	if err != nil {
+		return err
+	}
+
+	if err := checkFuzzScope(src.Hostname); err != nil {
 		return err
 	}
 
@@ -237,7 +283,28 @@ func runFuzz(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	payloads, err := fuzz.LoadPayloads(fuzzWordlists, fuzzClasses, fuzzPayloads)
+	payloads, sets, err := loadFuzzPayloadSets(positions)
+	if err != nil {
+		return err
+	}
+
+	mode, err := fuzz.ParseAttackMode(fuzzMode)
+	if err != nil {
+		return err
+	}
+	cases, err := fuzz.BuildCases(mode, positions, sets, payloads)
+	if err != nil {
+		return err
+	}
+
+	// --dry-run answers "will this do what I meant?" before any traffic —
+	// which position selector resolved to what, and the exact bytes a payload
+	// produces. Everything above this line is offline; nothing below is.
+	if fuzzDryRun {
+		return emitFuzzDryRun(src, positions, payloads, cases)
+	}
+
+	bridge, err := setupFuzzBurpBridge(ctx, src)
 	if err != nil {
 		return err
 	}
@@ -247,6 +314,10 @@ func runFuzz(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	filters, err := buildFilters()
+	if err != nil {
+		return err
+	}
+	anomalyCfg, err := buildAnomalyConfig()
 	if err != nil {
 		return err
 	}
@@ -266,32 +337,56 @@ func runFuzz(cmd *cobra.Command, args []string) error {
 	case globalJSON:
 		out = os.Stderr
 	}
-	enc := json.NewEncoder(out)
+	// Buffered: the engine calls OnResult on its serialized path, so an
+	// unbuffered write(2) per result put every worker behind one syscall.
+	sink := bufio.NewWriter(out)
+	defer func() { _ = sink.Flush() }()
+	enc := json.NewEncoder(sink)
 
-	fmt.Fprintf(os.Stderr, "%s fuzzing %s://%s (%d positions × %d payloads = %d sends)\n",
-		terminal.InfoSymbol(), src.Scheme, src.Hostname, len(positions), len(payloads), len(positions)*len(payloads))
+	cookies, jarLoaded, saveJar, err := fuzzCookieJar()
+	if err != nil {
+		return err
+	}
+	defer saveJar()
+	client, err := buildFuzzClient(cookies)
+	if err != nil {
+		return err
+	}
+	if jarLoaded > 0 {
+		fmt.Fprintf(os.Stderr, "%s session %s: preloaded %d cookie(s)\n",
+			terminal.InfoSymbol(), fuzzSessionID, jarLoaded)
+	}
+
+	fmt.Fprintf(os.Stderr, "%s fuzzing %s://%s (%d position(s), %s, %d sends)\n",
+		terminal.InfoSymbol(), src.Scheme, src.Hostname, len(positions), mode, len(cases))
 
 	// OnResult is called serially by the engine, so no extra locking is needed
 	// to accumulate the ranked top anomalies for the -j summary.
 	var topResults []fuzz.Result
 	job := fuzz.Job{
-		Raw:           src.BaselineRequest,
-		Scheme:        src.Scheme,
-		Hostname:      src.Hostname,
-		Port:          src.Port,
-		Positions:     positions,
-		Payloads:      payloads,
-		Matchers:      matchers,
-		Filters:       filters,
-		AutoCalibrate: !fuzzNoCalibrate,
-		Client:        replay.NewDefaultClient(nil, fuzzTimeout),
-		NoRedirects:   fuzzNoRedirects,
-		Concurrency:   fuzzConcurrency,
-		DelayMs:       fuzzDelayMs,
+		Raw:             src.BaselineRequest,
+		Scheme:          src.Scheme,
+		Hostname:        src.Hostname,
+		Port:            src.Port,
+		Positions:       positions,
+		Payloads:        payloads,
+		Cases:           cases,
+		Matchers:        matchers,
+		Filters:         filters,
+		Anomaly:         anomalyCfg,
+		BaselineSamples: resolveBaselineSamples(anomalyCfg != nil),
+		AutoCalibrate:   !fuzzNoCalibrate,
+		// buildFuzzClient (not replay.NewDefaultClient) so the global --proxy
+		// flag actually routes fuzz traffic — it was accepted and silently
+		// ignored here — and so the curl TLS/redirect/resolve options apply.
+		Client:      client,
+		NoRedirects: fuzzNoRedirects,
+		Concurrency: fuzzConcurrency,
+		DelayMs:     fuzzDelayMs,
 		OnResult: func(r fuzz.Result) {
 			if fuzzAllResults || r.Matched {
 				if fuzzPretty {
-					_, _ = fmt.Fprintln(out, prettyResult(r))
+					_, _ = fmt.Fprintln(sink, prettyResult(r))
 				} else {
 					_ = enc.Encode(r)
 				}
@@ -325,10 +420,14 @@ func runFuzz(cmd *cobra.Command, args []string) error {
 	}
 
 	report, runErr := fuzz.Run(ctx, job)
+	_ = sink.Flush()
 	if report != nil {
 		fmt.Fprintf(os.Stderr, "%s baseline: status=%d len=%d | sent=%d matched=%d calibrated=%d errors=%d\n",
 			terminal.InfoSymbol(), report.Baseline.Status, report.Baseline.Length,
 			report.Sent, report.Matched, report.Calibrated, report.Errors)
+		if anomalyCfg != nil {
+			emitAnomalyReport(out, report)
+		}
 	}
 	if runErr != nil {
 		return runErr
@@ -346,6 +445,254 @@ func runFuzz(cmd *cobra.Command, args []string) error {
 	}
 	if fuzzFailOnMatch && report != nil && report.Matched > 0 {
 		os.Exit(3)
+	}
+	return nil
+}
+
+// requestMethodOf reports a raw request's verb for display, tolerating a
+// malformed request rather than failing the whole dry run over it.
+func requestMethodOf(raw []byte) string {
+	method, err := httpmsg.GetMethod(raw)
+	if err != nil {
+		return ""
+	}
+	return method
+}
+
+// loadFuzzPayloadSets assembles the shared payload list plus, when a wordlist
+// or class was bound to a marker with the "ref:KEYWORD" suffix, a per-position
+// list.
+//
+// The binding syntax is what makes pitchfork and clusterbomb usable: they need
+// to know which list belongs to FUZZ and which to FUZZ2, and there is no way
+// to say that with a flat payload set. Unbound lists stay in the shared pool,
+// so single-marker runs are unaffected.
+func loadFuzzPayloadSets(positions []fuzz.Position) (shared []string, sets [][]string, err error) {
+	indexOf := make(map[string]int, len(positions))
+	for i, p := range positions {
+		indexOf[strings.ToUpper(p.Name)] = i
+	}
+	sets = make([][]string, len(positions))
+
+	var sharedWordlists, sharedClasses []string
+	boundWordlists := make(map[int][]string)
+	boundClasses := make(map[int][]string)
+
+	// bind splits "value:KEYWORD" when KEYWORD names a resolved marker. A
+	// wordlist path containing a colon is far more likely than a stray marker
+	// name, so the suffix only counts when it actually matches a position.
+	bind := func(ref string, sharedDst *[]string, boundDst map[int][]string) {
+		if base, keyword, ok := lastCut(ref, ":"); ok {
+			if idx, known := indexOf[strings.ToUpper(keyword)]; known {
+				boundDst[idx] = append(boundDst[idx], base)
+				return
+			}
+		}
+		*sharedDst = append(*sharedDst, ref)
+	}
+	for _, w := range fuzzWordlists {
+		bind(w, &sharedWordlists, boundWordlists)
+	}
+	for _, c := range fuzzClasses {
+		bind(c, &sharedClasses, boundClasses)
+	}
+
+	// Inline -p payloads are always shared; there is no sensible place to hang
+	// a keyword off a literal.
+	shared, err = fuzz.LoadPayloads(sharedWordlists, sharedClasses, fuzzPayloads)
+	if err != nil && len(boundWordlists)+len(boundClasses) == 0 {
+		return nil, nil, err
+	}
+
+	for idx := range positions {
+		if len(boundWordlists[idx]) == 0 && len(boundClasses[idx]) == 0 {
+			continue
+		}
+		list, lerr := fuzz.LoadPayloads(boundWordlists[idx], boundClasses[idx], nil)
+		if lerr != nil {
+			return nil, nil, fmt.Errorf("payloads for %s: %w", positions[idx].Name, lerr)
+		}
+		sets[idx] = list
+	}
+	return shared, sets, nil
+}
+
+// lastCut splits s at the final occurrence of sep.
+func lastCut(s, sep string) (before, after string, found bool) {
+	if i := strings.LastIndex(s, sep); i >= 0 {
+		return s[:i], s[i+len(sep):], true
+	}
+	return s, "", false
+}
+
+// resolveBaselineSamples picks how many baseline sends to make. Anomaly runs
+// default to 3 because the detector's timing signal is worthless without a
+// deviation to compare against; plain runs stay at 1 so nothing gets slower
+// for a statistic nobody asked for.
+func resolveBaselineSamples(anomalyOn bool) int {
+	if fuzzBaselineSamples > 0 {
+		return fuzzBaselineSamples
+	}
+	if anomalyOn {
+		return 3
+	}
+	return 1
+}
+
+// emitAnomalyReport prints the ranked anomalies after a --anomaly run.
+//
+// It goes to stderr (not the result sink) so it never contaminates the JSONL
+// stream a caller is parsing; the same anomalies also ride in the -j summary
+// object, which is where an agent should read them from.
+func emitAnomalyReport(sink *os.File, report *fuzz.Report) {
+	if len(report.Anomalies) == 0 {
+		fmt.Fprintf(os.Stderr, "%s no anomalies at the %s threshold — every response looked like the others\n",
+			terminal.InfoSymbol(), fuzzAnomalyThreshold)
+		return
+	}
+	// Only render the human table when the results themselves aren't already
+	// going to stdout as JSONL for something else to read.
+	if sink != os.Stdout || fuzzPretty {
+		fmt.Fprintf(os.Stderr, "%s %d anomal%s found:\n",
+			terminal.InfoSymbol(), len(report.Anomalies), plural(len(report.Anomalies), "y", "ies"))
+		for _, a := range report.Anomalies {
+			fmt.Fprintf(os.Stderr, "  [%3d] %s:%s = %q  status=%d len=%d\n",
+				a.AnomalyScore, a.PositionType, a.Position, a.Payload, a.Status, a.Length)
+			for _, reason := range a.AnomalyReasons {
+				fmt.Fprintf(os.Stderr, "        +%-2d %s%s\n", reason.Weight, reason.Signal, detailSuffix(reason.Detail))
+			}
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "%s %d anomal%s found (scored in the JSONL stream)\n",
+			terminal.InfoSymbol(), len(report.Anomalies), plural(len(report.Anomalies), "y", "ies"))
+	}
+	if report.AnomaliesElided > 0 {
+		fmt.Fprintf(os.Stderr, "  ... and %d more above the threshold\n", report.AnomaliesElided)
+	}
+}
+
+func detailSuffix(detail string) string {
+	if detail == "" {
+		return ""
+	}
+	return " — " + detail
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// checkFuzzScope refuses to fuzz a host outside the project's configured
+// scope. fuzz sends a lot of traffic at whatever it's pointed at, and the
+// source is often a pasted command whose target isn't obvious at a glance, so
+// the cheap guard is worth it. A project with no host scope configured passes
+// everything, and --ignore-scope is the deliberate override.
+func checkFuzzScope(hostname string) error {
+	if fuzzIgnoreScope || hostname == "" {
+		return nil
+	}
+	settings, err := config.LoadSettings(globalConfig)
+	if err != nil {
+		// Scope is a guard rail, not a gate: an unreadable config shouldn't
+		// stop an operator who asked for a specific target.
+		return nil
+	}
+	matcher := config.NewScopeMatcher(settings.Scope, globalTargets...)
+	if matcher.HostInScope(hostname) {
+		return nil
+	}
+	return fmt.Errorf("%s is outside the project's configured scope; pass --ignore-scope to fuzz it anyway", hostname)
+}
+
+// fuzzDryRun is the --dry-run report: what fuzz resolved, and the exact bytes
+// the first payload produces at each position.
+type fuzzDryRunReport struct {
+	Target      string             `json:"target"`
+	Method      string             `json:"method"`
+	Mode        string             `json:"mode,omitempty"`
+	Positions   []fuzzDryRunPos    `json:"positions"`
+	Payloads    fuzzDryRunPayloads `json:"payloads"`
+	Sends       int                `json:"sends"`
+	Request     string             `json:"baseline_request"`
+	ExampleCase string             `json:"example_case,omitempty"`
+}
+
+type fuzzDryRunPos struct {
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Base    string `json:"base_value,omitempty"`
+	Example string `json:"example_request"`
+}
+
+type fuzzDryRunPayloads struct {
+	Count  int      `json:"count"`
+	Sample []string `json:"sample"`
+	Elided int      `json:"elided,omitempty"`
+}
+
+// fuzzDryRunSample bounds how many payloads the report echoes back.
+const fuzzDryRunSample = 10
+
+func emitFuzzDryRun(src *replaySource, positions []fuzz.Position, payloads []string, cases []fuzz.Case) error {
+	probe := "FUZZED"
+	if len(payloads) > 0 {
+		probe = payloads[0]
+	}
+	report := fuzzDryRunReport{
+		Target:  replaySourceURL(src),
+		Method:  requestMethodOf(src.BaselineRequest),
+		Mode:    fuzzMode,
+		Sends:   len(cases),
+		Request: string(src.BaselineRequest),
+		Payloads: fuzzDryRunPayloads{
+			Count:  len(payloads),
+			Sample: payloads[:min(len(payloads), fuzzDryRunSample)],
+			Elided: max(0, len(payloads)-fuzzDryRunSample),
+		},
+	}
+	for _, p := range positions {
+		report.Positions = append(report.Positions, fuzzDryRunPos{
+			Type:    p.Label,
+			Name:    p.Name,
+			Base:    p.Base,
+			Example: string(fuzz.BuildAt(p, src.BaselineRequest, probe)),
+		})
+	}
+	// Under a multi-position mode the per-position example understates what
+	// actually goes on the wire, so show the first real case too.
+	if len(cases) > 0 && len(cases[0].Assignments) > 1 {
+		report.ExampleCase = string(fuzz.BuildCase(cases[0], src.BaselineRequest))
+	}
+
+	if globalJSON {
+		return writeAgentJSON(report)
+	}
+	fmt.Printf("%s dry run — %d position(s), %s, %d sends, nothing sent\n\n",
+		terminal.InfoSymbol(), len(positions), fuzzMode, report.Sends)
+	for _, p := range report.Positions {
+		fmt.Printf("  %s:%s\n", p.Type, p.Name)
+		if p.Base != "" {
+			fmt.Printf("    base value: %q\n", p.Base)
+		}
+		fmt.Printf("    with payload %q:\n", probe)
+		for _, line := range strings.Split(strings.TrimRight(p.Example, "\r\n"), "\n") {
+			fmt.Printf("      %s\n", strings.TrimRight(line, "\r"))
+		}
+		fmt.Println()
+	}
+	if report.ExampleCase != "" {
+		fmt.Printf("  first %s case (all positions at once):\n", fuzzMode)
+		for _, line := range strings.Split(strings.TrimRight(report.ExampleCase, "\r\n"), "\n") {
+			fmt.Printf("      %s\n", strings.TrimRight(line, "\r"))
+		}
+		fmt.Println()
+	}
+	fmt.Printf("  payloads (%d): %s\n", report.Payloads.Count, strings.Join(report.Payloads.Sample, ", "))
+	if report.Payloads.Elided > 0 {
+		fmt.Printf("  ... and %d more\n", report.Payloads.Elided)
 	}
 	return nil
 }
@@ -489,7 +836,13 @@ func resolveFuzzSource(ctx context.Context, args []string) (*replaySource, error
 
 	switch {
 	case len(args) == 1:
-		rr, err := buildRequestFromFlags(args[0], fuzzMethod, fuzzData, fuzzHeaders)
+		// -X defaults to empty so it can mean "leave the source request's verb
+		// alone"; a URL has no verb to leave alone, so it falls back to GET.
+		method := fuzzMethod
+		if method == "" {
+			method = "GET"
+		}
+		rr, err := buildRequestFromFlags(args[0], method, fuzzData, fuzzHeaders)
 		if err != nil {
 			return nil, err
 		}
@@ -521,39 +874,143 @@ func resolveFuzzSource(ctx context.Context, args []string) (*replaySource, error
 	}
 }
 
-func buildMatchers() (fuzz.Matchers, error) {
-	m := fuzz.Matchers{Sizes: fuzzMS, Words: fuzzMW, Lines: fuzzML, TimeMs: fuzzMT}
-	for _, s := range fuzzMC {
-		if strings.EqualFold(s, "all") {
-			m.AllStatus = true
-			continue
-		}
-		n, err := strconv.Atoi(strings.TrimSpace(s))
-		if err != nil {
-			return m, fmt.Errorf("bad --match-status-code value %q: want an int or 'all'", s)
-		}
-		m.Status = append(m.Status, n)
-	}
-	if fuzzMR != "" {
-		re, err := regexp.Compile(fuzzMR)
-		if err != nil {
-			return m, fmt.Errorf("bad --match-regex: %w", err)
-		}
-		m.Regex = re
-	}
-	return m, nil
+// registerCriteriaFlags registers one criteria family (keep or drop) against
+// its own destination struct. verb is the flag prefix ("match"/"exclude") and
+// Verb its capitalized form for help text.
+func registerCriteriaFlags(f *pflag.FlagSet, dst *criteriaFlags, verb, Verb string) {
+	const grammar = "N, N-M, >N, <N, !N"
+	f.StringSliceVar(&dst.status, verb+"-status-code", nil, Verb+" status codes: "+grammar+", or 'all'")
+	f.StringSliceVar(&dst.sizes, verb+"-size", nil, Verb+" response sizes in bytes: "+grammar)
+	f.StringSliceVar(&dst.words, verb+"-words", nil, Verb+" response word counts: "+grammar)
+	f.StringSliceVar(&dst.lines, verb+"-lines", nil, Verb+" response line counts: "+grammar)
+	f.StringVar(&dst.regex, verb+"-regex", "", Verb+" responses whose body matches this regex")
+	f.StringSliceVar(&dst.times, verb+"-time", nil, Verb+" response times in ms: "+grammar+" (bare N means >=N)")
+	f.StringSliceVar(&dst.timeZ, verb+"-time-z", nil,
+		Verb+" response times by standard deviations above the baseline mean (needs --baseline-samples > 1); e.g. 4 or '>3'")
+	f.StringArrayVar(&dst.headers, verb+"-header", nil,
+		Verb+" on a response header: 'Name' for presence, or 'Name: regex' (repeatable)")
+	f.StringVar(&dst.mode, verb+"-mode", "any", "Combine "+verb+" flags with 'any' (OR) or 'all' (AND)")
 }
 
-func buildFilters() (fuzz.Filters, error) {
-	f := fuzz.Filters{Status: fuzzEC, Sizes: fuzzES, Words: fuzzEW, Lines: fuzzEL, TimeMs: fuzzET}
-	if fuzzER != "" {
-		re, err := regexp.Compile(fuzzER)
-		if err != nil {
-			return f, fmt.Errorf("bad --exclude-regex: %w", err)
+func buildMatchers() (fuzz.Matchers, error) { return buildCriteria(fuzzMatch) }
+
+func buildFilters() (fuzz.Filters, error) { return buildCriteria(fuzzExclude) }
+
+// criteriaFlags is the raw flag input for one criteria set; kind names the
+// flag family so errors point at the flag the operator actually typed.
+type criteriaFlags struct {
+	kind    string
+	status  []string
+	sizes   []string
+	words   []string
+	lines   []string
+	times   []string
+	timeZ   []string
+	regex   string
+	headers []string
+	mode    string
+}
+
+func buildCriteria(in criteriaFlags) (fuzz.Criteria, error) {
+	var c fuzz.Criteria
+
+	// "all" is only meaningful on the keep side, but accepting it either way
+	// and letting it mean "every status" keeps the two families symmetrical.
+	var statusTokens []string
+	for _, s := range in.status {
+		if strings.EqualFold(strings.TrimSpace(s), "all") {
+			c.AllStatus = true
+			continue
 		}
-		f.Regex = re
+		statusTokens = append(statusTokens, s)
 	}
-	return f, nil
+
+	var err error
+	if c.Status, err = fuzz.ParseNumPredicates(statusTokens, "--"+in.kind+"-status-code"); err != nil {
+		return c, err
+	}
+	if c.Sizes, err = fuzz.ParseNumPredicates(in.sizes, "--"+in.kind+"-size"); err != nil {
+		return c, err
+	}
+	if c.Words, err = fuzz.ParseNumPredicates(in.words, "--"+in.kind+"-words"); err != nil {
+		return c, err
+	}
+	if c.Lines, err = fuzz.ParseNumPredicates(in.lines, "--"+in.kind+"-lines"); err != nil {
+		return c, err
+	}
+	// Bare numbers on the time flags mean "at least this", which is the only
+	// reading that ever fires against a millisecond measurement.
+	if c.TimeMs, err = fuzz.ParseNumPredicatesDefaultOp(in.times, ">=", "--"+in.kind+"-time"); err != nil {
+		return c, err
+	}
+	if c.TimeZ, err = fuzz.ParseNumPredicatesDefaultOp(in.timeZ, ">=", "--"+in.kind+"-time-z"); err != nil {
+		return c, err
+	}
+
+	if in.regex != "" {
+		re, cerr := regexp.Compile(in.regex)
+		if cerr != nil {
+			return c, fmt.Errorf("bad --%s-regex: %w", in.kind, cerr)
+		}
+		c.Regex = re
+	}
+
+	for _, h := range in.headers {
+		hm, herr := parseHeaderMatcher(h, "--"+in.kind+"-header")
+		if herr != nil {
+			return c, herr
+		}
+		c.Headers = append(c.Headers, hm)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(in.mode)) {
+	case "", "any", "or":
+		c.Mode = fuzz.MatchAny
+	case "all", "and":
+		c.Mode = fuzz.MatchAll
+	default:
+		return c, fmt.Errorf("bad --%s-mode %q: want 'any' or 'all'", in.kind, in.mode)
+	}
+	return c, nil
+}
+
+// parseHeaderMatcher accepts "Name" (presence) or "Name: regex".
+func parseHeaderMatcher(spec, flag string) (fuzz.HeaderMatcher, error) {
+	name, pattern, hasPattern := strings.Cut(spec, ":")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fuzz.HeaderMatcher{}, fmt.Errorf("%s %q: want 'Name' or 'Name: regex'", flag, spec)
+	}
+	hm := fuzz.HeaderMatcher{Name: name}
+	if pattern = strings.TrimSpace(pattern); hasPattern && pattern != "" {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return hm, fmt.Errorf("%s %q: bad regex: %w", flag, spec, err)
+		}
+		hm.Value = re
+	}
+	return hm, nil
+}
+
+// buildAnomalyConfig returns the detector config, or nil when --anomaly is off.
+func buildAnomalyConfig() (*fuzz.AnomalyConfig, error) {
+	if !fuzzAnomaly {
+		return nil, nil
+	}
+	cfg := fuzz.DefaultAnomalyConfig()
+	if t := strings.TrimSpace(fuzzAnomalyThreshold); t != "" {
+		if score, ok := fuzz.ParseAnomalyThreshold(t); ok {
+			cfg.Threshold = score
+		} else if n, err := strconv.Atoi(t); err == nil && n > 0 {
+			cfg.Threshold = n
+		} else {
+			return nil, fmt.Errorf("bad --anomaly-threshold %q: want low|medium|high or a positive number", t)
+		}
+	}
+	if fuzzAnomalyMinPop > 0 {
+		cfg.MinPopulation = fuzzAnomalyMinPop
+	}
+	return &cfg, nil
 }
 
 const (
@@ -576,6 +1033,8 @@ type fuzzJSONSummary struct {
 	Errors          int           `json:"errors"`
 	Baseline        fuzz.Baseline `json:"baseline"`
 	TopResults      []fuzz.Result `json:"top_results"`
+	Anomalies       []fuzz.Result `json:"anomalies,omitempty"`
+	AnomaliesElided int           `json:"anomalies_elided,omitempty"`
 	Query           string        `json:"query,omitempty"`
 	SentViaBurp     bool          `json:"sent_via_burp,omitempty"`
 	OrganizerPushed int           `json:"organizer_pushed,omitempty"`
@@ -596,6 +1055,8 @@ func emitFuzzJSONSummary(src *replaySource, args []string, positions, payloadCou
 		Errors:          report.Errors,
 		Baseline:        report.Baseline,
 		TopResults:      top,
+		Anomalies:       report.Anomalies,
+		AnomaliesElided: report.AnomaliesElided,
 		Query:           fuzzFollowUpQuery(args, report.Matched),
 		SentViaBurp:     sentViaBurp,
 		OrganizerPushed: organizerPushed,

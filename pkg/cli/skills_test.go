@@ -16,65 +16,21 @@ func TestLoadBundledSkills(t *testing.T) {
 		t.Fatal("expected at least one bundled skill")
 	}
 
-	byName := map[string]bundledSkill{}
-	for _, s := range skills {
-		byName[s.Name] = s
-	}
-
 	// The flagship scanner skill must always be present with metadata.
-	vs, ok := byName[defaultInstallSkill]
+	vs, ok := findBundle(skills, defaultInstallSkill)
 	if !ok {
-		t.Fatalf("bundled skills missing %q: got %v", defaultInstallSkill, byName)
-	}
-	if vs.Description == "" {
-		t.Error("vigolium-scanner description should be non-empty")
+		t.Fatalf("bundled skills missing %q: got %s", defaultInstallSkill, bundleNames(skills))
 	}
 	if len(vs.References) == 0 {
 		t.Error("vigolium-scanner should expose reference files")
 	}
 
-	if vs.ThirdParty {
-		t.Error("vigolium-scanner must be first-party")
-	}
-
-	// agent-browser uses the comma-string allowed-tools form that skill.Parse
-	// rejects; the lenient fallback must still recover its description.
-	if ab, ok := byName["agent-browser"]; ok {
-		if ab.Description == "" {
-			t.Error("agent-browser description should be recovered via lenient parse")
+	// Descriptions come from skill.Parse, which is strict — an empty one
+	// means the bundle's frontmatter is malformed and it would list blank.
+	for _, s := range skills {
+		if s.Description == "" {
+			t.Errorf("bundle %q has no description (malformed frontmatter?)", s.Name)
 		}
-		if !ab.ThirdParty {
-			t.Error("agent-browser must be classified third-party")
-		}
-	}
-}
-
-func TestVisibleBundles(t *testing.T) {
-	skills := []bundledSkill{
-		{Name: "vigolium-scanner"},
-		{Name: "agent-browser", ThirdParty: true},
-	}
-
-	defer func(prev bool) { skillsOpts.ThirdParty = prev }(skillsOpts.ThirdParty)
-
-	// Default: third-party hidden.
-	skillsOpts.ThirdParty = false
-	visible, hidden := visibleBundles(skills)
-	if len(visible) != 1 || visible[0].Name != "vigolium-scanner" {
-		t.Errorf("default visible = %+v, want only vigolium-scanner", visible)
-	}
-	if hidden != 1 {
-		t.Errorf("hidden = %d, want 1", hidden)
-	}
-
-	// Opted in: all shown, none hidden.
-	skillsOpts.ThirdParty = true
-	visible, hidden = visibleBundles(skills)
-	if len(visible) != 2 {
-		t.Errorf("with flag, visible = %d, want 2", len(visible))
-	}
-	if hidden != 0 {
-		t.Errorf("with flag, hidden = %d, want 0", hidden)
 	}
 }
 
@@ -143,30 +99,15 @@ func TestCopyEmbeddedSkillBundle(t *testing.T) {
 	}
 }
 
-func TestLenientFrontmatter(t *testing.T) {
-	raw := []byte("---\nname: demo\ndescription: A demo skill\nallowed-tools: Bash(x:*), Bash(y:*)\n---\n\n# body\n")
-	name, desc := lenientFrontmatter(raw)
-	if name != "demo" {
-		t.Errorf("name = %q, want demo", name)
-	}
-	if desc != "A demo skill" {
-		t.Errorf("description = %q, want 'A demo skill'", desc)
-	}
-
-	if n, d := lenientFrontmatter([]byte("no frontmatter here")); n != "" || d != "" {
-		t.Errorf("expected empty for no frontmatter, got (%q,%q)", n, d)
-	}
-}
-
 func TestFindBundleCaseInsensitive(t *testing.T) {
-	skills := []bundledSkill{{Name: "vigolium-scanner"}, {Name: "agent-browser"}}
+	skills := []bundledSkill{{Name: "vigolium-scanner"}, {Name: "other-skill"}}
 	if _, ok := findBundle(skills, "VIGOLIUM-SCANNER"); !ok {
 		t.Error("findBundle should be case-insensitive")
 	}
 	if _, ok := findBundle(skills, "missing"); ok {
 		t.Error("findBundle should not match a missing name")
 	}
-	if got := bundleNames(skills); !strings.Contains(got, "vigolium-scanner") || !strings.Contains(got, "agent-browser") {
+	if got := bundleNames(skills); !strings.Contains(got, "vigolium-scanner") || !strings.Contains(got, "other-skill") {
 		t.Errorf("bundleNames = %q", got)
 	}
 }

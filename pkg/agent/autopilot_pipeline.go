@@ -190,10 +190,9 @@ func (r *AutopilotPipelineRunner) RunAutonomous(ctx context.Context, cfg Autopil
 	}
 
 	// Seed on-disk SKILL.md files so the operator agent can read them via
-	// filesystem tools. Mirrors the swarm pipeline. Browser SKILL is only
-	// dropped when the browser is actually available to the agent.
+	// filesystem tools. Mirrors the swarm pipeline.
 	if cfg.SessionDir != "" {
-		CopySkillsToSessionDir(cfg.SessionDir, cfg.BrowserEnabled || cfg.BrowserRequested)
+		CopySkillsToSessionDir(cfg.SessionDir)
 	}
 
 	result := &AutopilotPipelineResult{
