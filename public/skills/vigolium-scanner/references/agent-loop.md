@@ -1,6 +1,6 @@
 # The Agent Loop
 
-> **Related:** [scanning.md](scanning.md) · [agent-modes.md](agent-modes.md) · [data.md](data.md) · [flags.generated.md](flags.generated.md)
+> **Related:** [scanning.md](scanning.md) · [fuzzing.md](fuzzing.md) · [burp.md](burp.md) · [agent-modes.md](agent-modes.md) · [data.md](data.md) · [flags.generated.md](flags.generated.md)
 
 How to drive vigolium **non-interactively** from a coding agent (Claude Code,
 Codex, Cursor, Pi, CI) and parse what comes back. Everything here is additive —
@@ -227,9 +227,12 @@ vigolium replay -u <uuid> --to-organizer --notes "IDOR candidate" -B http://127.
 vigolium fuzz -u <uuid> --class sqli --matches-to-organizer -B http://127.0.0.1:9009
 ```
 
-`--send-via-burp` (on `replay` / `fuzz`) routes the actual send through Burp's
-engine byte-for-byte. Pair it with `--http-mode http1` for smuggling/desync work
-so `auto` doesn't reframe the request.
+`--send-via-burp` (on `replay` / `fuzz` / `finding`) routes the actual send
+through Burp's engine byte-for-byte. Pair it with `--http-mode http1` for
+smuggling/desync work so `auto` doesn't reframe the request.
+
+Reading Burp's live history, Site map sync, limits, and the full flag surface:
+**[burp.md](burp.md)**.
 
 ### To a report
 
@@ -307,9 +310,13 @@ are not reproduced — the JSON says so in `browser.method_note`.
 
 ```bash
 vigolium replay --all --with-browser --proxy http://127.0.0.1:8080
+vigolium traffic --replay --with-browser --proxy http://127.0.0.1:8080
 ```
 
-`--with-browser` exists only on `traffic --replay`, not on `replay`.
+`validateReplayFlags` rejects it alongside every flag downstream of the send
+(`--in-replace`, `--raw-request`, and the Burp send/stage targets), and warns
+when `--proxy` is absent — a browser run with nothing intercepting it captures
+nothing.
 
 ## Payload fuzzing
 
@@ -353,88 +360,34 @@ vigolium fuzz -u <uuid> --class xss,sqli -a -j --fail-on-match
 base64 / URL / `-`), `--input-file`, `-u/--record-uuid`, or a piped request on
 stdin. `-t/--target` overrides scheme/host/port without touching the bytes.
 
-**Request builder** — curl-compatible flags shape the request before fuzzing:
-`-X/--request`, `-H/--header`, `-d/--data`, `--data-binary`, `--data-raw`,
-`--data-urlencode`, `--form`, `--form-string`, `--get` (curl's `-G`), `--head`,
-`--cookie`, `--user`, `--user-agent`, `--referer`.
-
 **Positions** (first match wins): a literal `FUZZ` marker anywhere →
 `--point TYPE:name` → `--fuzz-header` →
 `--fuzz method|path|params|param-name|headers|cookies|all` (default: all
-insertion points). Request-line markers are auto-encoded so space-bearing
-payloads stay well-formed. `--keyword` changes the marker from `FUZZ`.
-
-With **several markers** (`FUZZ`, `FUZZ2`, …), `--mode` picks the pairing:
-
-| `--mode` | Behavior |
-|----------|----------|
-| `sniper` *(default)* | one marker at a time, others left alone |
-| `batteringram` | the same payload in every marker |
-| `pitchfork` | lists advanced in lockstep (pair i with pair i) |
-| `clusterbomb` | every combination |
+insertion points).
 
 **Payloads** combine `--class` (`cmdi,crlf,lfi,open_redirect,path_traversal,sqli,
 ssrf,ssti,xss,xxe`) + `-w/--wordlist` (builtin `dir-long`, `dir-short`,
 `file-long`, `file-short`, `fuzz`, or a file path) + `-p/--payload` (inline,
 repeatable).
 
-### Anomaly detection (`-a`) — prefer this over hand-written matchers
-
-Writing a matcher means knowing the interesting size or status **up front**.
-`-a/--anomaly` instead scores every response against the baseline *and* against
-the run's own population, keeping the ones that stand out: rare status, a body no
-other payload produced, size/time outliers (median-absolute-deviation, so
-outliers can't hide themselves), a new error signature, a changed
-`Location`/`Set-Cookie`/`WWW-Authenticate`, unencoded reflection.
-
-Each result carries `anomaly_score` and `anomaly_reasons` explaining the score.
-`--anomaly-threshold low|medium|high` (or a number, default `medium`) sets the
-bar; `--anomaly-min-population` (default 12) is how many responses must land
-before population signals count. With `-a` and no explicit matchers,
-"interesting" replaces "keep everything".
-
-It reports **where to look, never a verdict** — confirm with the module scanner.
-
-**Matchers** keep a response, **excludes** drop it. Numeric flags take a
-predicate: `N` (exact), `N-M` (range), `>N`, `>=N`, `<N`, `<=N`, `!N` (not),
-comma-separated.
-
-```bash
---match-status-code 200,301   --match-size '>1000'   --match-words 50-80
---match-lines '!0'            --match-regex <re>     --match-time '>500'
---match-header 'Location: /admin'    # presence-only: --match-header Location
---match-mode all                     # require every matcher instead of any
-```
-
-Every `--match-*` has an `--exclude-*` twin (with `--exclude-mode`).
-`--match-status-code all` keeps every status. `--baseline-samples N` re-sends the
-un-fuzzed request N times to measure timing jitter, enabling `time_z` (default 1,
-or 3 under `-a`). Auto-calibration suppresses the target's wildcard/catch-all by
-default; suppressed results carry `"calibrated":true`, and `--no-calibrate`
-turns it off.
+**Prefer `-a/--anomaly` over hand-written matchers.** A matcher requires knowing
+the interesting size or status up front; `-a` instead scores every response
+against the baseline *and* the run's own population and keeps what stands out,
+with `anomaly_score` + `anomaly_reasons` on each result. It reports where to
+look, never a verdict.
 
 **Output:** JSONL to stdout by default (matched only unless `--all-results`);
 `--pretty` for a human table; `-o` to a file. Under `-j`, JSONL streams to stderr
 and ONE summary object goes to stdout —
-`{target, sent, matched, calibrated, baseline, top_results, query}` — where
-`query` is a ready `scan-request` confirmation command. `--fail-on-match` exits 3
-for CI/agent gating.
+`{target, sent, matched, calibrated, baseline, top_results, anomalies, query}` —
+where `query` is a ready `scan-request` confirmation command.
+`--fail-on-match` exits 3 for CI/agent gating.
 
-**Operational flags worth knowing:**
+Always `--dry-run` a large run first: it resolves positions and payloads and
+prints the exact bytes each would send, with **zero** network traffic.
 
-| Flag | Why you want it |
-|------|-----------------|
-| `--dry-run` | resolve positions + payloads and print what *would* be sent, **no network traffic** — always sanity-check a big run this way first |
-| `-c/--concurrency` | concurrent requests (default 10); lower it when routing through Burp |
-| `--delay <ms>` | per-worker delay before each request — the polite knob for rate-limited targets |
-| `--auth-session <name>` | merge in headers from a stored session (`vigolium auth list`) |
-| `--session-id <id>` | persist cookies across runs, same jar as `replay` |
-| `--ignore-scope` | fuzz a host outside the project's configured scope |
-| `--verify-tls` | **not** the default — TLS verification is off unless you ask for it |
-
-Everything else (`--cacert`, `--cert`, `--http1`/`--http2`, `--max-redirs`,
-`--resolve`, `--connect-timeout`, …) is in
-[flags.generated.md](flags.generated.md) under `vigolium fuzz`.
+Attack modes, the full signal/weight table, matcher grammar, curl-parity flags,
+and operational knobs: **[fuzzing.md](fuzzing.md)**.
 
 ## Reading exports without a database
 
@@ -571,7 +524,8 @@ parent batch fails only when every target fails.
   but `--scan-on-receive` on `server`/`ingest`. Same letter, different flag.
 - `--json` (one compact object) ≠ `--format jsonl` (bulk, one line per row).
 - `replay` has no `--mutate` — payload fuzzing lives entirely in `vigolium fuzz`.
-- `--with-browser` is on `traffic --replay`, not on `replay`.
+- `--with-browser` produces **no diff** — a navigation has no status code or
+  body to compare, so `result` is null and a `browser` object is emitted instead.
 - Agentic scans need a configured LLM provider (`agent.olium` in
   `vigolium-configs.yaml`); check with `vigolium doctor --json`.
 - `db clean` with no selector is rejected — it never implicitly wipes the DB.

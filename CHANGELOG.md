@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.7] - 2026-08-04
+
+A **scan throughput** release. Dynamic assessment is ~99.7% idle wait, so a static concurrency cap sets the phase wall clock outright — four changes attack that. Also ships the `vigolium fuzz` curl-parity + anomaly-scoring overhaul and bulk/browser replay. Registry stays at 201 active + 116 passive.
+
+### Added
+
+- **`fuzz` curl parity** — accepts curl's long-form flags, with body assembly shared with the curl parser so `--data-urlencode`/`--form` behave identically as a flag or inside a pasted command.
+- **`fuzz -a/--anomaly`** scores each response against the baseline *and* the run's own population, so a status change every payload triggers reads as normal behaviour rather than a signal.
+- **`fuzz` attack modes** — `sniper`/`batteringram`/`pitchfork`/`clusterbomb` over numbered `FUZZ` markers, plus a comparison-predicate matcher grammar (`N-M`, `>N`, `!N`).
+- **`replay` bulk pattern search** reuses `traffic`'s own filters verbatim, and `--with-browser` emits a `browser` object instead of a hollow diff a navigation can't produce.
+- **Adaptive per-host concurrency ramps above `MaxPerHost`** (2× headroom) so a scan can discover a host tolerates more; WAF auto-arm stays pinned, since a block is not licence to raise concurrency.
+
+### Fixed
+
+- **`curl -e https://referer/ https://target/` silently retargeted the request at the referer** — the parser is now table-driven and strict, and an unknown flag is a hard error rather than a skip.
+- **A per-module timeout never stopped the module** — 725+ abandoned modules kept hammering the target for discarded findings; `WithAbandonSignal` now refuses to start new requests.
+- **`ReuseRatio` read healthy during heavy churn** — a 17.6× undercount from httptrace misattribution, now derived from dials counted in the transport's own dialers.
+- **Discovery pre-warm ran 10 sequential waves before any fuzzing** — 66% of a host's discovery time at ~0.01 CPU cores; now sized to configured concurrency, capped at 16.
+- **`input-behavior-probe` re-learned one number per insertion point** — 40 round trips where 2 suffice; now memoized per endpoint, with identical detection behaviour.
+
+### Changed
+
+- **The four costliest probes are tagged `heavy`, not `moderate`** — affects `--intensity quick` only; the default scan still runs all 201 active modules, and every deferred module is logged.
+
+### Internal
+
+- **`modkit.ScanContext.EndpointMeasurement`** replaces the fifth hand-rolled per-endpoint memo; per-scan lifetime drops the copied TTL and stops calibration leaking across server-mode runs.
+- **The abandon signal is an `atomic.Bool`**, not a per-dispatch context child that took the phase context's lock twice to carry one bit.
+- **The transport reads `HostRateLimiter.CeilingPerHost()`** instead of the runner re-deriving it, removing two hand-synced writers and fixing four sites that never published at all.
+- **Observability** — module metrics Debug → Info, the SQL hook now needs `VIGOLIUM_SQL_TRACE=1`, and `make build-prof` emits an unstripped binary with real profiler frames.
+- **Skills restructure** — `agent-browser` dropped, `vigolium-scanner` references renamed to shorter stems, and `flags-reference.md` replaced by a generated `flags.generated.md`.
+
 ## [v0.3.6] - 2026-08-03
 
 A **false-positive and severity-calibration** release. Three families of live High

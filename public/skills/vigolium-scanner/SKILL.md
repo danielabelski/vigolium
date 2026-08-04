@@ -104,6 +104,8 @@ from an agent.
 | Payload / insertion-point fuzzing | `vigolium fuzz -u <uuid> --point URL_PARAM:id --class sqli -a` |
 | Fuzz a wordlist at a `FUZZ` marker | `vigolium fuzz https://t/FUZZ -w file-long --match-status-code 200,301` |
 | Hand a finding to Burp | `vigolium finding --id 42 --push-to-burp -B http://127.0.0.1:9009` |
+| Pull live Burp Proxy history into the DB | `vigolium import -B http://127.0.0.1:9009` |
+| Send exact bytes through Burp's engine | `vigolium replay --raw-request-file req.txt --send-via-burp --http-mode http1 -B …` |
 | Persist cookies across replays | `vigolium replay --session-id login --record-uuid <uuid>` |
 | View database statistics | `vigolium db stats` |
 | Export results | `vigolium export --format jsonl -o results.jsonl` |
@@ -133,8 +135,10 @@ Load the file that matches the task — don't read them all.
 
 | Topic | Reference | Load when |
 |-------|-----------|-----------|
-| **Driving vigolium from an agent** | `references/agent-loop.md` | triage, `-j` contracts, replay, fuzz, Burp handoff, exports, exit codes |
+| **Driving vigolium from an agent** | `references/agent-loop.md` | triage, `-j` contracts, replay, exports, exit codes |
 | Scanning commands | `references/scanning.md` | scan / scan-url / scan-request / run flags, phases, strategies, output formats |
+| Fuzzing | `references/fuzzing.md` | `vigolium fuzz` — positions, markers, attack modes, payload classes, anomaly scoring, matchers |
+| Burp Suite | `references/burp.md` | bridge setup, live history, Repeater/Organizer/Site map handoff, `--send-via-burp`, proxy channel |
 | AI agent modes | `references/agent-modes.md` | agent query / autopilot / swarm / audit / olium / triage / session, intensities, providers, templates |
 | Auth & sessions | `references/auth.md` | `--auth-file` / `--auth`, YAML format, extract rules, authenticated scanning |
 | Data & management | `references/data.md` | db, finding, traffic, module, extensions, js, config, scope, export, import, log, project, storage |
