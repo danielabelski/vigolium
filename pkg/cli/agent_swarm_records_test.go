@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,7 +55,9 @@ func TestParseRecordsFromSpec(t *testing.T) {
 		}
 	})
 
-	t.Run("since accepts YYYY-MM-DD", func(t *testing.T) {
+	// A bare date is the operator's own midnight, not UTC's — sharing the
+	// listing commands' --from/--since parser keeps that consistent.
+	t.Run("since accepts YYYY-MM-DD in local time", func(t *testing.T) {
 		filters, err := parseRecordsFromSpec("since=2026-04-01", project)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -62,9 +65,36 @@ func TestParseRecordsFromSpec(t *testing.T) {
 		if filters.DateFrom == nil {
 			t.Fatal("DateFrom should be set")
 		}
-		want := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+		want := time.Date(2026, 4, 1, 0, 0, 0, 0, time.Local)
 		if !filters.DateFrom.Equal(want) {
 			t.Errorf("DateFrom = %v, want %v", *filters.DateFrom, want)
+		}
+	})
+
+	// until closes at the END of a bare day, so a single-day window is not empty.
+	t.Run("until covers the whole named day", func(t *testing.T) {
+		filters, err := parseRecordsFromSpec("since=2026-04-01,until=2026-04-01", project)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if filters.DateFrom == nil || filters.DateTo == nil {
+			t.Fatalf("DateFrom=%v DateTo=%v, want both set", filters.DateFrom, filters.DateTo)
+		}
+		if span := filters.DateTo.Sub(*filters.DateFrom); span < 23*time.Hour {
+			t.Errorf("single-day window spans %v, want ~24h", span)
+		}
+	})
+
+	// The spec routes both bounds through the shared range helper, so an
+	// inverted window fails loudly. Silence is worst here: a swarm that selects
+	// zero records looks exactly like a clean run.
+	t.Run("rejects an inverted window", func(t *testing.T) {
+		_, err := parseRecordsFromSpec("since=2026-04-05,until=2026-04-01", project)
+		if err == nil {
+			t.Fatal("expected an error for an inverted since/until window")
+		}
+		if !strings.Contains(err.Error(), "matches nothing") {
+			t.Errorf("error %q does not explain the empty range", err)
 		}
 	})
 

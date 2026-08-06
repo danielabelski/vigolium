@@ -10,6 +10,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/input/formats"
 	"github.com/vigolium/vigolium/pkg/input/formats/burpraw"
+	"github.com/vigolium/vigolium/pkg/input/formats/burpscope"
 	"github.com/vigolium/vigolium/pkg/input/formats/burpxml"
 	"github.com/vigolium/vigolium/pkg/input/formats/curl"
 	"github.com/vigolium/vigolium/pkg/input/formats/deparos"
@@ -53,6 +54,17 @@ func NewFileSource(cfg FileSourceConfig) (*FileSource, error) {
 		return nil, err
 	}
 
+	// A Burp scope export arrives through the same slots as a plain URL list
+	// (-T/--target-file, or -i with the default -I urls), and reading its JSON
+	// line by line would hand the scanner a pile of "{" and regex fragments as
+	// targets. Sniffing the content is the only signal available: the file has
+	// a .json extension like several other formats. Only the URL-list parser is
+	// ever displaced, so an explicit -I always wins.
+	if _, isURLList := format.(*urls.URLListFormat); isURLList && burpscope.SniffFile(cfg.FilePath) {
+		zap.L().Info("detected burp scope file, expanding include rules to targets", zap.String("file", cfg.FilePath))
+		format = burpscope.New()
+	}
+
 	// Apply format options
 	format.SetOptions(cfg.FormatOptions)
 
@@ -90,6 +102,7 @@ var formatRegistry = []formatEntry{
 	{"curl", nil, func() formats.Format { return curl.New() }},
 	{"burpraw", []string{"burp-raw", "raw"}, func() formats.Format { return burpraw.New() }},
 	{"burpxml", []string{"burp-xml", "burp", "burpstate"}, func() formats.Format { return burpxml.New() }},
+	{"burpscope", []string{"burp-scope", "burp-config", "burp-project-config"}, func() formats.Format { return burpscope.New() }},
 	{"har", []string{"http-archive"}, func() formats.Format { return har.New() }},
 	{"deparos", []string{"deparos-output"}, func() formats.Format { return deparos.New() }},
 }

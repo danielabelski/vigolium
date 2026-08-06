@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dustin/go-humanize"
@@ -22,6 +23,7 @@ import (
 	"github.com/vigolium/vigolium/internal/runner"
 	"github.com/vigolium/vigolium/pkg/agent"
 	"github.com/vigolium/vigolium/pkg/database"
+	"github.com/vigolium/vigolium/pkg/input/formats/burpscope"
 	"github.com/vigolium/vigolium/pkg/input/formats/detect"
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
 	"github.com/vigolium/vigolium/pkg/input/source"
@@ -945,9 +947,57 @@ func readTargetFilesLines(paths []string) ([]string, error) {
 	return lines, nil
 }
 
+// targetFileCounts memoizes how many targets each -T file yielded, so the scan
+// banner can report the real total without re-reading (and, for a Burp scope,
+// re-expanding) a file the run has already parsed.
+var (
+	targetFileCountsMu sync.Mutex
+	targetFileCounts   = map[string]int{}
+)
+
+// countTargetFileTargets returns the number of targets the given -T files
+// contribute. It answers from the cache readTargetFileLines fills during flag
+// validation and only falls back to reading when a caller reaches the banner
+// first. A read failure reports what it has: the banner must never be the thing
+// that fails a scan.
+func countTargetFileTargets(paths []string) int {
+	total := 0
+	for _, p := range paths {
+		targetFileCountsMu.Lock()
+		n, ok := targetFileCounts[p]
+		targetFileCountsMu.Unlock()
+		if !ok {
+			lines, err := readTargetFileLines(p)
+			if err != nil {
+				continue
+			}
+			n = len(lines)
+		}
+		total += n
+	}
+	return total
+}
+
 // readTargetFileLines reads a target file (one URL or address per line),
-// trimming whitespace and skipping blank lines and `#` comments.
+// trimming whitespace and skipping blank lines and `#` comments. A Burp Suite
+// scope export is expanded into the URLs its include rules describe instead —
+// see expandBurpScopeTargets.
 func readTargetFileLines(path string) ([]string, error) {
+	lines, err := parseTargetFileLines(path)
+	if err != nil {
+		return nil, err
+	}
+	targetFileCountsMu.Lock()
+	targetFileCounts[path] = len(lines)
+	targetFileCountsMu.Unlock()
+	return lines, nil
+}
+
+func parseTargetFileLines(path string) ([]string, error) {
+	if burpscope.SniffFile(path) {
+		return expandBurpScopeTargets(path)
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open target file %q: %w", path, err)
@@ -1956,13 +2006,20 @@ func printScanSummary(opts *types.Options, settings *config.Settings, strategyNa
 	if opts.ScanningProfile != "" {
 		fmt.Fprintf(os.Stderr, "  %s Profile: %s\n", terminal.Purple(terminal.SymbolInfo), terminal.HiTeal(opts.ScanningProfile))
 	}
-	targetsLine := fmt.Sprintf("Targets: %s (CLI: %s)", terminal.Orange(fmt.Sprintf("%d", len(opts.Targets))), terminal.HiBlue(summarizeTargetList(opts.Targets, 3)))
+	// The headline count is every target the scan will actually seed, CLI and
+	// -T file alike. Counting only the CLI ones reported "Targets: 0" for a run
+	// driven entirely by a target file, which reads as though nothing was found.
+	fileTargets := countTargetFileTargets(opts.TargetsFilePaths)
+	targetsLine := fmt.Sprintf("Targets: %s", terminal.Orange(fmt.Sprintf("%d", len(opts.Targets)+fileTargets)))
+	if len(opts.Targets) > 0 {
+		targetsLine += fmt.Sprintf(" (CLI: %s)", terminal.HiBlue(summarizeTargetList(opts.Targets, 3)))
+	}
 	if len(opts.TargetsFilePaths) > 0 {
 		label := "file"
 		if len(opts.TargetsFilePaths) > 1 {
 			label = "files"
 		}
-		targetsLine += fmt.Sprintf(" (+ %s: %s)", label, terminal.HiTeal(strings.Join(opts.TargetsFilePaths, ", ")))
+		targetsLine += fmt.Sprintf(" (+%d from %s: %s)", fileTargets, label, terminal.HiTeal(strings.Join(opts.TargetsFilePaths, ", ")))
 	}
 	if repo != nil {
 		ctx := context.Background()

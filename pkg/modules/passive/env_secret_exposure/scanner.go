@@ -35,12 +35,39 @@ var (
 	}
 
 	// These values are identifiers or publishable browser credentials by design.
-	// A variable name containing KEY or TOKEN does not turn them into secrets.
+	// A variable name containing KEY or TOKEN does not turn them into secrets, so
+	// without this list each falls through to the "unrecognized high-entropy key"
+	// branch of assessCredential and reports Medium.
+	//
+	// Every entry must be public by design, because a match here suppresses the
+	// finding outright. Only Stripe's `pk_` prefix qualifies: `rk_` is a RESTRICTED
+	// key, i.e. a scoped SECRET key ("never put a secret API key (prefixed sk_live_
+	// or rk_live_) in a variable that your framework bundles" — Stripe), and it
+	// belongs in knownSecretPatterns alone. TestKnownValueListsAreDisjoint pins that
+	// no value can land in both.
+	//
+	// Shapes that secret_detect also needs live in modkit rather than being encoded
+	// twice; passive modules do not import each other.
 	knownPublicValuePatterns = []*regexp.Regexp{
-		regexp.MustCompile(`^(?:pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}$`),
+		regexp.MustCompile(`^pk_(?:live|test)_[A-Za-z0-9]{8,}$`),
 		regexp.MustCompile(`^AIza[0-9A-Za-z_-]{20,}$`),
 		regexp.MustCompile(`^[0-9]+-[0-9A-Za-z_-]+\.apps\.googleusercontent\.com$`),
 		regexp.MustCompile(`^[0-9]+:[0-9]+:web:[0-9a-f]+$`),
+		// Branch.io key — the app's public id, required to init the web/mobile
+		// SDK. The sensitive half is `secret_live_…`, which does not match this.
+		regexp.MustCompile(`^key_(?:live|test)_[A-Za-z0-9]{16,40}$`),
+		// Braintree tokenization key — "publishable, meaning safe to include in
+		// your app"; authorizes tokenization only.
+		regexp.MustCompile(`^(?:sandbox|production)_[a-z0-9]{6,10}_[a-z0-9]{14,20}$`),
+	}
+
+	// knownPublicValueShapes are the public-by-design shapes shared with
+	// secret_detect (a reCAPTCHA site key rendered into the widget, a Salesforce
+	// Connected App Consumer Key riding in the /services/oauth2/authorize
+	// redirect). They live in modkit so the two modules cannot drift.
+	knownPublicValueShapes = []func(string) bool{
+		modkit.IsReCaptchaSiteKeyShape,
+		modkit.HasSalesforceConsumerKeyPrefix,
 	}
 )
 
@@ -194,13 +221,20 @@ func newCandidate(urlx *urlutil.URL, name, description string, extracted []strin
 
 func assessCredential(key, value string) credentialAssessment {
 	value = trimAssignmentValue(value)
-	if !dotenvValueIsSubstantive(value) || isKnownPublicValue(value) {
+	if !dotenvValueIsSubstantive(value) {
 		return credentialAssessment{}
 	}
+	// A recognised secret family is classified BEFORE the public list. The two are
+	// disjoint today (TestKnownValueListsAreDisjoint pins that), but should they
+	// ever overlap again the value must be reported rather than silently dropped —
+	// which is what happened while `rk_live_…` sat in both lists.
 	for _, pattern := range knownSecretPatterns {
 		if pattern.re.MatchString(value) {
 			return credentialAssessment{label: pattern.name, severity: severity.High, confidence: severity.Firm, reportable: true}
 		}
+	}
+	if isKnownPublicValue(value) {
+		return credentialAssessment{}
 	}
 
 	keyLower := strings.ToLower(key)
@@ -224,6 +258,11 @@ func assessCredential(key, value string) credentialAssessment {
 func isKnownPublicValue(value string) bool {
 	for _, pattern := range knownPublicValuePatterns {
 		if pattern.MatchString(value) {
+			return true
+		}
+	}
+	for _, shape := range knownPublicValueShapes {
+		if shape(value) {
 			return true
 		}
 	}

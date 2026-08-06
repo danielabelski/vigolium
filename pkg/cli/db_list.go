@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
@@ -122,8 +121,8 @@ func registerListFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&listRecordKind, "record-kind", "", "Filter by record kind (finding, candidate, observation; comma-separated). Default: finding")
 
 	// Date range flags
-	cmd.Flags().StringVar(&listFrom, "from", "", "Show records created after this date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().StringVar(&listTo, "to", "", "Show records created before this date (YYYY-MM-DD or RFC3339)")
+	cmd.Flags().StringVar(&listFrom, "from", "", fmt.Sprintf("Show records at or after this time — %s (alias: --since)", clicommon.TimeFilterSyntax))
+	cmd.Flags().StringVar(&listTo, "to", "", fmt.Sprintf("Show records at or before this time — %s; %s (alias: --until)", clicommon.TimeFilterSyntax, clicommon.TimeFilterUpperBoundNote))
 
 	// Search flags
 	cmd.Flags().StringVar(&listHeader, "header", "", "Search within HTTP header names and values")
@@ -132,6 +131,8 @@ func registerListFlags(cmd *cobra.Command) {
 	// Sorting flags
 	cmd.Flags().StringVar(&listSort, "sort", "created_at", "Sort results by field: uuid, created_at, sent_at, method, status_code, response_time")
 	cmd.Flags().BoolVar(&listAsc, "asc", false, "Sort in ascending order instead of descending")
+
+	addFlagAliases(cmd, timeFilterAliases)
 }
 
 func runDBList(cmd *cobra.Command, args []string) error {
@@ -216,21 +217,10 @@ func runListColumns(ctx context.Context, db *database.DB, tableName string) erro
 
 // runListHTTPRecords handles the default http_records table listing with full filter support.
 func runListHTTPRecords(ctx context.Context, db *database.DB) error {
-	// Parse date filters
-	var dateFrom, dateTo *time.Time
-	if listFrom != "" {
-		t, err := clicommon.ParseDate(listFrom)
-		if err != nil {
-			return fmt.Errorf("invalid --from date: %w", err)
-		}
-		dateFrom = &t
-	}
-	if listTo != "" {
-		t, err := clicommon.ParseDate(listTo)
-		if err != nil {
-			return fmt.Errorf("invalid --to date: %w", err)
-		}
-		dateTo = &t
+	dateFrom, dateTo, err := parseDateRangeFlags(listFrom, listTo,
+		timeFilterFromLabel, timeFilterToLabel)
+	if err != nil {
+		return err
 	}
 
 	var severities []string
@@ -287,20 +277,10 @@ func runListHTTPRecords(ctx context.Context, db *database.DB) error {
 
 // runListFindings handles the findings table listing.
 func runListFindings(ctx context.Context, db *database.DB) error {
-	var dateFrom, dateTo *time.Time
-	if listFrom != "" {
-		t, err := clicommon.ParseDate(listFrom)
-		if err != nil {
-			return fmt.Errorf("invalid --from date: %w", err)
-		}
-		dateFrom = &t
-	}
-	if listTo != "" {
-		t, err := clicommon.ParseDate(listTo)
-		if err != nil {
-			return fmt.Errorf("invalid --to date: %w", err)
-		}
-		dateTo = &t
+	dateFrom, dateTo, err := parseDateRangeFlags(listFrom, listTo,
+		timeFilterFromLabel, timeFilterToLabel)
+	if err != nil {
+		return err
 	}
 
 	var severities []string

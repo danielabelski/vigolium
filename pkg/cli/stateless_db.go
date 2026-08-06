@@ -155,10 +155,36 @@ func mapRecordsToFile(ctx context.Context, db *database.DB, afterRowid int64, fi
 
 // statelessReadRequested reports whether a read/query command should source its
 // data from a standalone file rather than the shared project DB — true under
-// -S/--stateless or whenever --glob-db is set (which implies stateless).
+// -S/--stateless, whenever --glob-db is set (which implies stateless), or when
+// $VIGOLIUM_DB_PATH pinned the shell to a session database.
+//
+// Every read path funnels through here (openReadDB, openExportDB,
+// effectiveProjectUUID), which is why the env var implies its read semantics
+// here rather than by enumerating command names: a command is covered the
+// moment it asks this question, including ones that never register -S at all
+// (`fuzz -u <uuid>` resolves a record through effectiveProjectUUID).
 func statelessReadRequested() bool {
-	return globalStateless || strings.TrimSpace(globalGlobDB) != ""
+	return globalStateless || strings.TrimSpace(globalGlobDB) != "" || dbPathEnvAutoStateless
 }
+
+// statelessSourceError reports why path cannot back a stateless read, or nil
+// when it can. openStatelessDB surfaces the error; applyDBPathEnv only needs the
+// yes/no (statelessSourceUsable) to decide whether to imply a stateless read at
+// all. Both read the same rule, so the gate can't drift from the opener whose
+// outcome it exists to predict.
+func statelessSourceError(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("--db %q: %w", path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("--db %q is a directory; expected a .jsonl export or .sqlite file", path)
+	}
+	return nil
+}
+
+// statelessSourceUsable reports whether path can back a stateless read.
+func statelessSourceUsable(path string) bool { return statelessSourceError(path) == nil }
 
 // openReadDB returns the database for read/query commands (traffic, finding).
 // Under -S/--stateless (or --glob-db) it reads from the --db source directly (a
@@ -230,12 +256,8 @@ func openStatelessDB(skip globDBSkipSet) (*database.DB, error) {
 		return nil, fmt.Errorf("--stateless requires --db <file.jsonl|file.sqlite> or --glob-db <pattern>")
 	}
 	path := globalDB
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("--db %q: %w", path, err)
-	}
-	if info.IsDir() {
-		return nil, fmt.Errorf("--db %q is a directory; expected a .jsonl export or .sqlite file", path)
+	if err := statelessSourceError(path); err != nil {
+		return nil, err
 	}
 
 	if isJSONLSource(path) {

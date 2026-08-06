@@ -195,6 +195,60 @@ func TestScanPerInsertionPoint_BooleanNonDeterministicNotLDAP(t *testing.T) {
 	assert.Empty(t, res, "a non-deterministic (flapping) endpoint must not yield a boolean-based LDAP finding")
 }
 
+// TestScanPerInsertionPoint_DetectsNegationOracle drives the negation boolean
+// oracle: the endpoint behaves as an LDAP filter, returning a large (match-all) page
+// for the disjunction payload and a small (match-none) page for its negation, while
+// the original value is stable. The TRUE/FALSE divergence is reported.
+func TestScanPerInsertionPoint_DetectsNegationOracle(t *testing.T) {
+	t.Parallel()
+	big := strings.Repeat("a", 5000)
+	small := strings.Repeat("b", 400)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Query().Get("username") {
+		case negationTruePayload:
+			_, _ = io.WriteString(w, big) // always-true disjunction -> whole directory
+		case negationFalsePayload:
+			_, _ = io.WriteString(w, small) // negation -> nothing
+		default:
+			_, _ = io.WriteString(w, small) // baseline / original value / error probes
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "GET", srv.URL+"/login?username=bob", "")
+	rr = modtest.Response(rr, "text/html", small)
+	ip := modtest.InsertionPoint(t, rr, "username")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "an LDAP boolean oracle (TRUE match-all vs FALSE negation) must be reported")
+	assert.Contains(t, res[0].Info.Name, "negation oracle")
+}
+
+// TestScanPerInsertionPoint_NegationOracleReflectionNotLDAP: a plain search page that
+// merely reflects the input. The TRUE and FALSE payloads differ by a single operator
+// character, so a text search returns near-identical pages — no substantial divergence,
+// no finding. This is the key false-positive the negation operator guards against.
+func TestScanPerInsertionPoint_NegationOracleReflectionNotLDAP(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<html><body>Results for "+r.URL.Query().Get("username")+"</body></html>")
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "GET", srv.URL+"/login?username=bob", "")
+	rr = modtest.Response(rr, "text/html", "<html><body>Results for bob</body></html>")
+	ip := modtest.InsertionPoint(t, rr, "username")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a reflecting search page must not be reported as an LDAP boolean oracle")
+}
+
 // TestIsLDAPRelatedParam exercises the pure parameter-name gate.
 func TestIsLDAPRelatedParam(t *testing.T) {
 	t.Parallel()

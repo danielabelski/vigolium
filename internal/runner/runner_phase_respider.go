@@ -126,50 +126,21 @@ func (r *Runner) runTargetedReSpiderPhase(ctx context.Context, infra *phaseInfra
 		spCfg.Headless = false
 	}
 
-	var scopeFilter func(host, path string) bool
-	if infra.scopeMatcher != nil && !infra.scopeMatcher.IsPassAll() {
-		sm := infra.scopeMatcher
-		scopeFilter = func(host, path string) bool { return sm.InScopeRequest(host, path, "", "") }
-	}
-
 	stepCtx, stepCancel := context.WithTimeout(ctx, rcfg.StepDuration())
 	defer stepCancel()
 
-	// Per-seed config template — browser settings + auth bridge + scope. TargetURL
-	// is set per seed (per-seed path) or per session (session path) below.
-	loginCredsAttempts, loginCredsFull := loginCredsPolicy(r.options.Intensity)
-	browserCookies, browserHeaders := browserAuthFromHeaders(r.options.Headers)
-	baseCfg := spitolas.SpiderConfig{
-		MaxDepth:            rcfg.Depth(),
-		MaxStates:           rcfg.PerSeedStates(),
-		MaxDuration:         rcfg.PerSeedDuration(),
-		MaxConsecutiveFails: spCfg.MaxConsecutiveFails,
-		Headless:            spCfg.Headless,
-		BrowserCount:        spCfg.BrowserCount,
-		Strategy:            spCfg.Strategy,
-		IncludeResponseBody: spCfg.IncludeResponseBody,
-		IncludeHeaders:      true,
-		Silent:              r.options.Silent,
-		Verbose:             r.options.Verbose,
-		BrowserEngine:       spCfg.BrowserEngine,
-		BrowserPath:         spCfg.BrowserPath,
-		NoCDP:               spCfg.NoCDP,
-		NoForms:             spCfg.NoForms,
-		ProxyURL:            r.options.ProxyURL,
-		ScopeFilter:         scopeFilter,
-		ProjectUUID:         r.options.ProjectUUID,
-		Source:              "respider",
-		// Common-credential login attempts against confirmed local login forms:
-		// on at balanced (minimal list) and deep (full list), off at quick/lite
-		// (lockout/authorization risk).
-		LoginCredentialAttempts: loginCredsAttempts,
-		LoginCredentialFullList: loginCredsFull,
-		InitialCookies:          browserCookies,
-		ExtraHeaders:            browserHeaders,
-	}
+	// Per-seed config template. Built by the same helper the spidering phase uses
+	// so the browser settings, auth bridge, scope adapter, and intensity-derived
+	// login/registration policy are one decision rather than two copies that drift
+	// — only the re-spider budgets and the record source differ. TargetURL is set
+	// per seed (per-seed path) or per session (session path) below.
+	baseCfg := r.buildSpiderConfig("", spCfg, rcfg.PerSeedDuration(), infra)
+	baseCfg.MaxDepth = rcfg.Depth()
+	baseCfg.MaxStates = rcfg.PerSeedStates()
+	baseCfg.Source = "respider"
 
 	var totalRecords, crawled, ssoHit int
-	if reSpiderSessionReuseDisabled() {
+	if spiderSessionReuseDisabled() {
 		// Escape hatch: the proven fresh-browser-per-seed path (seeds of one host
 		// are interspersed by score, so it needs the shared ssoSkip map).
 		ssoSkip := map[string]struct{}{}
@@ -198,28 +169,12 @@ func (r *Runner) runTargetedReSpiderPhase(ctx context.Context, infra *phaseInfra
 	return nil
 }
 
-// reSpiderSessionReuseDisabled reports whether the operator opted out of reusing
-// one browser context across a host's re-spider seeds (the escape hatch if the
-// session path misbehaves), reverting to a fresh browser per seed.
-func reSpiderSessionReuseDisabled() bool {
+// spiderSessionReuseDisabled reports whether the operator opted out of reusing
+// one browser context across a host's seeds (the escape hatch if the session
+// path misbehaves), reverting to a fresh browser per seed. Governs both the
+// spidering phase and the re-spider phase — it is the same mechanism.
+func spiderSessionReuseDisabled() bool {
 	return utils.EnvTruthy("VIGOLIUM_SPIDER_NO_SESSION_REUSE")
-}
-
-// groupReSpiderSeedsByHost groups seeds by hostKey, preserving first-appearance
-// host order and each host's original (score) seed order, so one browser session
-// can crawl all of a host's seeds consecutively.
-func groupReSpiderSeedsByHost(chosen []respiderSeed) [][]respiderSeed {
-	idx := make(map[string]int)
-	var groups [][]respiderSeed
-	for _, s := range chosen {
-		if i, ok := idx[s.hostKey]; ok {
-			groups[i] = append(groups[i], s)
-			continue
-		}
-		idx[s.hostKey] = len(groups)
-		groups = append(groups, []respiderSeed{s})
-	}
-	return groups
 }
 
 // applyReSpiderSSO records an SSO/login-wall landing: it marks the host so its
@@ -341,7 +296,7 @@ func (r *Runner) crawlReSpiderHostGroup(ctx context.Context, group []respiderSee
 // browser), so the only shared state — the aggregate totals and the scan-wide
 // SSO-host feed — is merged under a lock.
 func (r *Runner) crawlReSpiderBySession(ctx context.Context, chosen []respiderSeed, baseCfg spitolas.SpiderConfig, perSeed time.Duration) (crawled, totalRecords, ssoHit int) {
-	groups := groupReSpiderSeedsByHost(chosen)
+	groups := groupByHost(chosen, func(s respiderSeed) string { return s.hostKey })
 	par := reSpiderHostParallelism(len(groups))
 
 	if par <= 1 {

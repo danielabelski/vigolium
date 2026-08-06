@@ -151,8 +151,11 @@ func init() {
 	pf.StringSliceVar(&trafficMethods, "method", nil, "Filter by HTTP method (repeatable, e.g. --method GET --method POST)")
 	pf.IntSliceVar(&trafficStatus, "status", nil, "Filter by HTTP status code (repeatable, e.g. --status 200 --status 404)")
 	pf.StringVar(&trafficPath, "path", "", "Filter by URL path pattern")
-	pf.StringVar(&trafficFrom, "from", "", "Show records after this date (YYYY-MM-DD or RFC3339)")
-	pf.StringVar(&trafficTo, "to", "", "Show records before this date (YYYY-MM-DD or RFC3339)")
+	pf.StringVar(&trafficFrom, "from", "", fmt.Sprintf(
+		"Show records at or after this time — %s (alias: --since)", clicommon.TimeFilterSyntax))
+	pf.StringVar(&trafficTo, "to", "", fmt.Sprintf(
+		"Show records at or before this time — %s; %s (alias: --until)",
+		clicommon.TimeFilterSyntax, clicommon.TimeFilterUpperBoundNote))
 	pf.StringArrayVar(&trafficSearch, "search", nil, "Search across URL, path, and the raw request/response (headers + body); repeatable, AND-combined (each term further narrows)")
 	pf.StringVar(&trafficHeader, "header", "", "Search within HTTP header names and values")
 	pf.StringVar(&trafficBody, "body", "", "Search within HTTP request/response body content")
@@ -202,6 +205,8 @@ func init() {
 	f.DurationVar(&globalTimeout, "timeout", 15*time.Second, "Per-request timeout for --replay (e.g. 30s, 1m)")
 
 	tui.AddFlags(trafficCmd, &trafficTUI, &trafficNoTUI)
+
+	addFlagAliases(trafficCmd, timeFilterAliases)
 }
 
 func runTraffic(cmd *cobra.Command, args []string) error {
@@ -215,7 +220,11 @@ func runTraffic(cmd *cobra.Command, args []string) error {
 	if trafficSaveToBurp && trafficSaveToVigoliumDB {
 		return fmt.Errorf("--save-to-burp and --save-to-vigolium-db cannot be combined")
 	}
-	if trafficSaveToVigoliumDB && statelessReadRequested() {
+	// Validate against the flags the user actually passed, not the effective
+	// read mode: $VIGOLIUM_DB_PATH also implies a stateless read, and rejecting
+	// the run over it would name two flags that never appeared on the command
+	// line — while saving into the pinned session DB is exactly what it means.
+	if trafficSaveToVigoliumDB && (globalStateless || strings.TrimSpace(globalGlobDB) != "") {
 		return fmt.Errorf("--save-to-vigolium-db cannot be used with --stateless or --glob-db")
 	}
 	if trafficSaveToVigoliumDB && trafficReplay {
@@ -372,20 +381,12 @@ func runTraffic(cmd *cobra.Command, args []string) error {
 
 // buildTrafficFilters constructs QueryFilters from traffic flags and an optional fuzzy term.
 func buildTrafficFilters(fuzzyTerm string) (database.QueryFilters, error) {
-	var dateFrom, dateTo *time.Time
-	if trafficFrom != "" {
-		t, err := clicommon.ParseDate(trafficFrom)
-		if err != nil {
-			return database.QueryFilters{}, fmt.Errorf("invalid --from date: %w", err)
-		}
-		dateFrom = &t
-	}
-	if trafficTo != "" {
-		t, err := clicommon.ParseDate(trafficTo)
-		if err != nil {
-			return database.QueryFilters{}, fmt.Errorf("invalid --to date: %w", err)
-		}
-		dateTo = &t
+	// The alias normalization erases which spelling the user typed, so the error
+	// names every accepted one.
+	dateFrom, dateTo, err := parseDateRangeFlags(trafficFrom, trafficTo,
+		timeFilterFromLabel, timeFilterToLabel)
+	if err != nil {
+		return database.QueryFilters{}, err
 	}
 
 	projectUUID, err := effectiveProjectUUID()
@@ -479,10 +480,10 @@ func printActiveTrafficFilters(filters database.QueryFilters, fuzzyTerm string) 
 	s.add("exclude-body", filters.ExcludeBodySearch)
 	s.add("source", filters.Source)
 	if filters.DateFrom != nil {
-		s.add("from", filters.DateFrom.Format("2006-01-02"))
+		s.add("from", clicommon.FormatTimeFilter(*filters.DateFrom))
 	}
 	if filters.DateTo != nil {
-		s.add("to", filters.DateTo.Format("2006-01-02"))
+		s.add("to", clicommon.FormatTimeFilter(*filters.DateTo))
 	}
 	s.print()
 }

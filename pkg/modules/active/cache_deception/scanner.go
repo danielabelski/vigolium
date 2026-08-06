@@ -23,10 +23,27 @@ type pathConfusionTechnique struct {
 }
 
 var techniques = []pathConfusionTechnique{
+	// Plain static-extension append: the origin routing ignores the suffix and
+	// serves the dynamic page, while the cache keys on the ".css"/".js"/… tail and
+	// caches it as a static asset.
 	{".css", "Static extension append (.css)"},
 	{".js", "Static extension append (.js)"},
 	{".png", "Static extension append (.png)"},
 	{".svg", "Static extension append (.svg)"},
+	{".ico", "Static extension append (.ico)"},
+	{".woff2", "Static extension append (.woff2)"},
+	// Delimiter confusion: a character the origin treats as a path-parameter,
+	// query, fragment, or terminator (so it still resolves the authenticated route)
+	// but that the cache keeps as part of the literal path preceding a static
+	// extension. Both raw and percent-encoded forms are tried because the origin and
+	// the cache disagree about which they decode.
+	{";.css", "Delimiter confusion (path parameter ; + extension)"},
+	{"%3b.css", "Delimiter confusion (encoded ; + extension)"},
+	{"%23.css", "Delimiter confusion (encoded fragment # + extension)"},
+	{"%3f.css", "Delimiter confusion (encoded query ? + extension)"},
+	{"%00.css", "Delimiter confusion (null byte + extension)"},
+	{"%0a.css", "Delimiter confusion (newline + extension)"},
+	// Path-separator confusion via encoded dot-segments / slashes.
 	{"/..%2f..%2fstatic.css", "Path separator confusion (double dot-segment encoded)"},
 	{"%2f.css", "Path separator confusion (encoded slash + extension)"},
 	{"/nonexistent.css", "Trailing static path segment"},

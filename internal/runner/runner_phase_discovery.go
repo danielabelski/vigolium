@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/core"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/deparos/discovery"
@@ -641,6 +642,153 @@ func closeReSpiderSession(sess *spitolas.SpiderSession, rw *database.RecordWrite
 	)
 }
 
+// groupByHost groups items by the host their key function returns, preserving
+// both the order hosts first appear and each host's own item order, so one
+// browser context can crawl all of a host's items consecutively. An item with no
+// resolvable host gets its own group rather than being dropped.
+//
+// Shared by the spidering and re-spider phases: both need exactly this ordering
+// contract, and the only thing that differs between them is the element type.
+func groupByHost[T any](items []T, host func(T) string) [][]T {
+	idx := make(map[string]int, len(items))
+	var groups [][]T
+	for _, item := range items {
+		h := host(item)
+		if h == "" {
+			groups = append(groups, []T{item})
+			continue
+		}
+		if i, ok := idx[h]; ok {
+			groups[i] = append(groups[i], item)
+			continue
+		}
+		idx[h] = len(groups)
+		groups = append(groups, []T{item})
+	}
+	return groups
+}
+
+// buildSpiderConfig assembles the crawl configuration for one target: browser
+// settings from the resolved spidering config, the operator's auth bridge and
+// scope boundary, and the intensity-derived login and registration policy.
+//
+// Both browser phases build from here. They differ only in their budgets and
+// their record source, which the caller overrides — everything else (the auth
+// bridge, the scope adapter, the intensity policy, the graph output) is one
+// decision, and keeping two copies is how a field added to one phase silently
+// goes missing from the other.
+func (r *Runner) buildSpiderConfig(target string, settingsCfg config.SpideringConfig, maxDuration time.Duration, infra *phaseInfra) spitolas.SpiderConfig {
+	loginCredsAttempts, loginCredsFull := loginCredsPolicy(r.options.Intensity)
+	// Bridge the operator's session/custom headers into the browser so the crawl
+	// explores authenticated content, not just the login shell.
+	browserCookies, browserHeaders := browserAuthFromHeaders(r.options.Headers)
+
+	cfg := spitolas.SpiderConfig{
+		TargetURL:           target,
+		MaxDepth:            settingsCfg.MaxDepth,
+		MaxStates:           settingsCfg.MaxStates,
+		MaxDuration:         maxDuration,
+		MaxConsecutiveFails: settingsCfg.MaxConsecutiveFails,
+		Headless:            settingsCfg.Headless,
+		BrowserCount:        settingsCfg.BrowserCount,
+		Strategy:            settingsCfg.Strategy,
+		IncludeResponseBody: settingsCfg.IncludeResponseBody,
+		IncludeHeaders:      true,
+		Silent:              r.options.Silent,
+		Verbose:             r.options.Verbose,
+		BrowserEngine:       settingsCfg.BrowserEngine,
+		BrowserPath:         settingsCfg.BrowserPath,
+		NoCDP:               settingsCfg.NoCDP,
+		NoForms:             settingsCfg.NoForms,
+		ProxyURL:            r.options.ProxyURL,
+		ProjectUUID:         r.options.ProjectUUID,
+		// Common-credential login attempts against confirmed local login forms:
+		// on at balanced (minimal list) and deep (full list), off at quick/lite
+		// (lockout/authorization risk).
+		LoginCredentialAttempts: loginCredsAttempts,
+		LoginCredentialFullList: loginCredsFull,
+		// Completing a signup creates an account, so it rides the same intensity
+		// gate as the credential pass but only at deep — unless the operator asked
+		// for it explicitly in config.
+		SelfRegister:   settingsCfg.SelfRegister || strings.EqualFold(r.options.Intensity, "deep"),
+		InitialCookies: browserCookies,
+		ExtraHeaders:   browserHeaders,
+		// A directory, not a path: the crawl names its own file from the target it
+		// actually runs against, so a session reusing this config across a host's
+		// seeds still writes each graph under the right name.
+		GraphOutputDir: settingsCfg.GraphOutputDir,
+	}
+
+	if infra.scopeMatcher != nil && !infra.scopeMatcher.IsPassAll() {
+		sm := infra.scopeMatcher
+		cfg.ScopeFilter = func(host, path string) bool {
+			return sm.InScopeRequest(host, path, "", "")
+		}
+	}
+	return cfg
+}
+
+// openSpiderSession starts one browser context for a host group's targets, or
+// returns nil when a session is not wanted: a single-target group (the shared
+// context buys nothing), the operator's opt-out, or a launch failure — in which
+// case each target falls back to its own fresh browser, which is the path that
+// ran before sessions existed.
+func (r *Runner) openSpiderSession(ctx context.Context, group []string, settingsCfg config.SpideringConfig, maxDuration time.Duration, infra *phaseInfra) (*spitolas.SpiderSession, *database.RecordWriter) {
+	if len(group) < 2 || spiderSessionReuseDisabled() {
+		return nil, nil
+	}
+	base := r.buildSpiderConfig(group[0], settingsCfg, maxDuration, infra)
+	rw := database.NewRecordWriter(r.repository, database.RecordWriterConfig{})
+	sess, err := spitolas.NewSpiderSession(ctx, base, rw)
+	if err != nil {
+		zap.L().Warn("Spidering: shared session launch failed, falling back to one browser per target",
+			zap.String("host", httpmsg.HostnameFromURL(group[0])), zap.Error(err))
+		rw.Close()
+		return nil, nil
+	}
+	zap.L().Info("Spidering: reusing one browser context across a host's targets",
+		zap.String("host", httpmsg.HostnameFromURL(group[0])),
+		zap.Int("targets", len(group)))
+	return sess, rw
+}
+
+// reportSpiderCoverage surfaces what the crawl reached beyond ordinary clicking:
+// locations its own route declarations named, strings scraped out of the rendered
+// document, an account it registered, and the extra sweeps it ran. Each is
+// reported only when it did something, so a plain crawl stays quiet.
+func (r *Runner) reportSpiderCoverage(result *spitolas.SpiderResult, target string) {
+	if result.SeedURLsDiscovered > 0 {
+		zap.L().Info("Spidering: seeded frontier from the host's route declarations",
+			zap.String("target", target),
+			zap.Int("declared", result.SeedURLsDiscovered),
+			zap.Int("browsed", result.SeedURLsCrawled))
+		r.printPhaseDetail(fmt.Sprintf("%s robots.txt/sitemap declared %s location(s) on %s — all recorded, %s browsed into the crawl.",
+			terminal.Purple(terminal.SymbolArrow),
+			terminal.Orange(fmt.Sprintf("%d", result.SeedURLsDiscovered)),
+			terminal.Gray(target),
+			terminal.Orange(fmt.Sprintf("%d", result.SeedURLsCrawled))))
+	}
+	if result.SpeculativeLinksFetched > 0 {
+		zap.L().Info("Spidering: fetched URLs scraped from comments and inline script",
+			zap.String("target", target), zap.Int("count", result.SpeculativeLinksFetched))
+	}
+	if result.SelfRegistered {
+		zap.L().Info("Spidering: registered an account to reach authenticated content",
+			zap.String("target", target), zap.String("identity", result.SelfRegisterIdentity))
+		r.printPhaseDetail(fmt.Sprintf("%s Registered %s on %s so the crawl could continue past the signup wall.",
+			terminal.Purple(terminal.SymbolArrow),
+			terminal.Orange(result.SelfRegisterIdentity),
+			terminal.Gray(target)))
+	}
+	if result.FollowUpPassesRun > 0 || result.ActionsRecovered > 0 {
+		zap.L().Info("Spidering: extra sweeps after the first pass drained",
+			zap.String("target", target),
+			zap.Int("follow_up_passes", result.FollowUpPassesRun),
+			zap.Int("actions_retried", result.ActionsRetried),
+			zap.Int("actions_recovered", result.ActionsRecovered))
+	}
+}
+
 // runSpideringPhase runs browser-based crawling using spitolas.
 // Captured traffic is stored in vigolium's HTTPRecord table via RepositoryWriter.
 // Targets are merged from CLI targets and in-scope hosts discovered by prior phases.
@@ -753,11 +901,19 @@ func (r *Runner) runSpideringPhase(ctx context.Context, infra *phaseInfra) error
 		harvested = make(map[string]httpmsg.CarriedSession)
 	}
 
-	for i, target := range targets {
+	// Crawl one host's targets consecutively on a single browser context.
+	// Cookies, local storage and capture-level dedup then persist between them,
+	// so a session established on one seed is still in force on the next and a
+	// shared asset is recorded once rather than once per target — neither of
+	// which a fresh browser per target can do.
+	groups := groupByHost(targets, httpmsg.HostnameFromURL)
+	processed := 0
+
+	for _, group := range groups {
 		// Overall ceiling exhausted — skip the remaining targets rather than
 		// launching crawls against an already-expired context.
 		if phaseCtx.Err() != nil {
-			skippedTargets = len(targets) - i
+			skippedTargets = len(targets) - processed
 			zap.L().Warn("Spidering: phase budget ceiling reached, skipping remaining targets",
 				zap.Int("skipped", skippedTargets),
 				zap.Int("total", len(targets)),
@@ -765,157 +921,165 @@ func (r *Runner) runSpideringPhase(ctx context.Context, infra *phaseInfra) error
 				zap.Int("budget_cap", spideringPhaseBudgetCap))
 			break
 		}
-		zap.L().Info("Spidering target", zap.String("target", target))
 
-		loginCredsAttempts, loginCredsFull := loginCredsPolicy(r.options.Intensity)
-		// Bridge the operator's session/custom headers into the browser so the
-		// crawl explores authenticated content, not just the login shell.
-		browserCookies, browserHeaders := browserAuthFromHeaders(r.options.Headers)
-		cfg := spitolas.SpiderConfig{
-			TargetURL:           target,
-			MaxDepth:            settingsCfg.MaxDepth,
-			MaxStates:           settingsCfg.MaxStates,
-			MaxDuration:         maxDuration,
-			MaxConsecutiveFails: settingsCfg.MaxConsecutiveFails,
-			Headless:            settingsCfg.Headless,
-			BrowserCount:        settingsCfg.BrowserCount,
-			Strategy:            settingsCfg.Strategy,
-			IncludeResponseBody: settingsCfg.IncludeResponseBody,
-			IncludeHeaders:      true,
-			Silent:              r.options.Silent,
-			Verbose:             r.options.Verbose,
-			BrowserEngine:       settingsCfg.BrowserEngine,
-			BrowserPath:         settingsCfg.BrowserPath,
-			NoCDP:               settingsCfg.NoCDP,
-			NoForms:             settingsCfg.NoForms,
-			ProxyURL:            r.options.ProxyURL,
-			// Common-credential login attempts against confirmed local login
-			// forms: on at balanced (minimal list) and deep (full list), off at
-			// quick/lite (lockout/authorization risk).
-			LoginCredentialAttempts: loginCredsAttempts,
-			LoginCredentialFullList: loginCredsFull,
-			InitialCookies:          browserCookies,
-			ExtraHeaders:            browserHeaders,
-		}
+		// A shared session only pays for itself across several seeds; for a lone
+		// target it is machinery around the proven single-crawl path.
+		sess, sessRW := r.openSpiderSession(phaseCtx, group, settingsCfg, maxDuration, infra)
+		abandoned := false
 
-		if infra.scopeMatcher != nil && !infra.scopeMatcher.IsPassAll() {
-			sm := infra.scopeMatcher
-			cfg.ScopeFilter = func(host, path string) bool {
-				return sm.InScopeRequest(host, path, "", "")
+		for gi, target := range group {
+			if phaseCtx.Err() != nil {
+				break
 			}
-		}
+			processed++
+			zap.L().Info("Spidering target", zap.String("target", target))
 
-		rw := database.NewRecordWriter(r.repository, database.RecordWriterConfig{})
-		// Derive from phaseCtx so the per-target budget is min(max-duration,
-		// remaining phase ceiling) — the overall cap is enforced automatically.
-		// The watchdog guarantees this returns within budget+grace even if the
-		// browser/teardown wedges, so a single target can never hang the scan.
-		timeoutCtx, cancel := context.WithTimeout(phaseCtx, maxDuration)
-		result, err := runSpiderWatchdog(timeoutCtx, cfg, rw, maxDuration, target)
-		cancel()
+			// Derive from phaseCtx so the per-target budget is min(max-duration,
+			// remaining phase ceiling) — the overall cap is enforced automatically.
+			// The watchdog guarantees this returns within budget+grace even if the
+			// browser/teardown wedges, so a single target can never hang the scan.
+			timeoutCtx, cancel := context.WithTimeout(phaseCtx, maxDuration)
+			var result *spitolas.SpiderResult
+			var err error
+			if sess != nil {
+				result, err = runReSpiderSessionCrawl(timeoutCtx, sess, target, maxDuration)
+			} else {
+				cfg := r.buildSpiderConfig(target, settingsCfg, maxDuration, infra)
+				rw := database.NewRecordWriter(r.repository, database.RecordWriterConfig{})
+				result, err = runSpiderWatchdog(timeoutCtx, cfg, rw, maxDuration, target)
+			}
+			cancel()
 
-		if err != nil {
-			zap.L().Error("Spidering failed",
-				zap.String("target", target), zap.Error(err))
-			continue
-		}
+			if err != nil {
+				zap.L().Error("Spidering failed",
+					zap.String("target", target), zap.Error(err))
+				if sess != nil {
+					// The shared browser may be wedged, so the rest of this host's
+					// targets cannot be trusted to it. Abandon the session and move
+					// on rather than replaying the failure per target.
+					zap.L().Warn("Spidering: abandoning shared browser session for host",
+						zap.String("target", target))
+					abandoned = true
+					// The rest of this host's targets are never attempted, so count
+					// them as processed — they are abandoned, not waiting on budget,
+					// and reporting them as "skipped by the ceiling" would misattribute
+					// a browser failure to the phase clock.
+					processed += len(group) - gi - 1
+					break
+				}
+				continue
+			}
 
-		totalStates += result.StatesDiscovered
-		totalActions += result.ActionsExecuted
-		totalRecords += result.RecordsSaved
+			totalStates += result.StatesDiscovered
+			totalActions += result.ActionsExecuted
+			totalRecords += result.RecordsSaved
 
-		if carrySession && (len(result.HarvestedCookies) > 0 || result.HarvestedAuthorization != "") {
-			// Scope the session to the host the crawl actually settled on: the
-			// adopted/landing host when the start URL relocated off-host, else the
-			// target host.
-			sessionHost := httpmsg.HostnameFromURL(target)
-			sessionURL := target
-			if result.HostAdopted && result.LandingURL != "" {
-				if adopted := httpmsg.HostnameFromURL(result.LandingURL); adopted != "" {
-					sessionHost = adopted
-					sessionURL = result.LandingURL
+			if carrySession && (len(result.HarvestedCookies) > 0 || result.HarvestedAuthorization != "") {
+				// Scope the session to the host the crawl actually settled on: the
+				// adopted/landing host when the start URL relocated off-host, else the
+				// target host.
+				sessionHost := httpmsg.HostnameFromURL(target)
+				sessionURL := target
+				if result.HostAdopted && result.LandingURL != "" {
+					if adopted := httpmsg.HostnameFromURL(result.LandingURL); adopted != "" {
+						sessionHost = adopted
+						sessionURL = result.LandingURL
+					}
+				}
+				cookieHeader := httpmsg.FlattenCookiesForHost(sessionHost, result.HarvestedCookies)
+				// Carry the session when the crawl earned EITHER cookies (cookie-auth
+				// apps + WAF clearance) OR a token (token-auth SPAs send Authorization,
+				// not a cookie — carrying only cookies would leave the scan unauthenticated).
+				if cookieHeader != "" || result.HarvestedAuthorization != "" {
+					// Named `carried`, not `sess`: the enclosing scope already holds the
+					// shared browser session under that name, and shadowing it here
+					// would make a later `sess.Close()` in this block close the wrong
+					// thing while still compiling.
+					carried := httpmsg.CarriedSession{CookieHeader: cookieHeader}
+					if carryUA {
+						carried.UserAgent = result.BrowserUserAgent
+					}
+					if result.HarvestedAuthorization != "" {
+						carried.AuthorizationHeader = "Bearer " + result.HarvestedAuthorization
+						// Scope the bearer token to the exact origin (scheme+host+port) the
+						// crawl harvested it from, so it isn't attached to a different
+						// service sharing the hostname on another port/scheme.
+						carried.Origin = httpmsg.OriginFromURL(sessionURL)
+					}
+					harvested[sessionHost] = carried
 				}
 			}
-			cookieHeader := httpmsg.FlattenCookiesForHost(sessionHost, result.HarvestedCookies)
-			// Carry the session when the crawl earned EITHER cookies (cookie-auth
-			// apps + WAF clearance) OR a token (token-auth SPAs send Authorization,
-			// not a cookie — carrying only cookies would leave the scan unauthenticated).
-			if cookieHeader != "" || result.HarvestedAuthorization != "" {
-				sess := httpmsg.CarriedSession{CookieHeader: cookieHeader}
-				if carryUA {
-					sess.UserAgent = result.BrowserUserAgent
-				}
-				if result.HarvestedAuthorization != "" {
-					sess.AuthorizationHeader = "Bearer " + result.HarvestedAuthorization
-					// Scope the bearer token to the exact origin (scheme+host+port) the
-					// crawl harvested it from, so it isn't attached to a different
-					// service sharing the hostname on another port/scheme.
-					sess.Origin = httpmsg.OriginFromURL(sessionURL)
-				}
-				harvested[sessionHost] = sess
+
+			// Persist any browser-confirmed DOM-XSS the crawl found on reflected client routes.
+			if len(result.DOMXssFindings) > 0 {
+				r.emitSpiderDOMXssFindings(ctx, infra.scanUUID, result.DOMXssFindings)
+				r.printPhaseDetail(fmt.Sprintf("%s confirmed %s DOM-based XSS on reflected client route(s) during the crawl.",
+					terminal.Orange(terminal.SymbolArrow),
+					terminal.Orange(fmt.Sprintf("%d", len(result.DOMXssFindings)))))
 			}
-		}
 
-		// Persist any browser-confirmed DOM-XSS the crawl found on reflected client routes.
-		if len(result.DOMXssFindings) > 0 {
-			r.emitSpiderDOMXssFindings(ctx, infra.scanUUID, result.DOMXssFindings)
-			r.printPhaseDetail(fmt.Sprintf("%s confirmed %s DOM-based XSS on reflected client route(s) during the crawl.",
-				terminal.Orange(terminal.SymbolArrow),
-				terminal.Orange(fmt.Sprintf("%d", len(result.DOMXssFindings)))))
-		}
-
-		zap.L().Info("Spidering completed for target",
-			zap.String("target", target),
-			zap.Int("states", result.StatesDiscovered),
-			zap.Int("actions", result.ActionsExecuted),
-			zap.Int("records_saved", result.RecordsSaved))
-
-		// A landing whose "Log on" CTA was driven means the crawler entered the
-		// app's OAuth/SAML/SSO flow — surface it so the captured login-flow URLs
-		// aren't a surprise.
-		if result.LoginCTADriven {
-			zap.L().Info("Spidering: drove login CTA into the auth flow",
+			zap.L().Info("Spidering completed for target",
 				zap.String("target", target),
-				zap.String("cta", result.LoginCTAText))
-			r.printPhaseDetail(fmt.Sprintf("%s clicked the %s call-to-action on %s to enter and capture the OAuth/SAML login flow.",
-				terminal.Purple(terminal.SymbolArrow),
-				terminal.Orange(fmt.Sprintf("%q", result.LoginCTAText)),
-				terminal.Gray(target)))
-		}
+				zap.Int("states", result.StatesDiscovered),
+				zap.Int("actions", result.ActionsExecuted),
+				zap.Int("records_saved", result.RecordsSaved))
 
-		// The start URL bounced the browser off-host. Two cases: a login/SSO wall
-		// (the crawler can't go past it unauthenticated, so the run yields next
-		// to nothing — advise auth), or a relocated app on another host (the
-		// crawler adopts that host and crawls it). Either way, say so — a silent
-		// near-empty result otherwise reads like the site has no content.
-		switch {
-		case result.OffHostRedirect && result.LandingIsLogin:
-			if lu, perr := neturl.Parse(result.LandingURL); perr == nil && lu.Host != "" {
-				ssoHosts = append(ssoHosts, lu.Host)
+			// A landing whose "Log on" CTA was driven means the crawler entered the
+			// app's OAuth/SAML/SSO flow — surface it so the captured login-flow URLs
+			// aren't a surprise.
+			if result.LoginCTADriven {
+				zap.L().Info("Spidering: drove login CTA into the auth flow",
+					zap.String("target", target),
+					zap.String("cta", result.LoginCTAText))
+				r.printPhaseDetail(fmt.Sprintf("%s clicked the %s call-to-action on %s to enter and capture the OAuth/SAML login flow.",
+					terminal.Purple(terminal.SymbolArrow),
+					terminal.Orange(fmt.Sprintf("%q", result.LoginCTAText)),
+					terminal.Gray(target)))
 			}
-			zap.L().Warn("Spidering: start URL redirected off-host to a login wall",
-				zap.String("target", target),
-				zap.String("landing", result.LandingURL))
-			r.printPhaseDetail(fmt.Sprintf("%s %s redirected off-host to %s — likely an SSO/login wall. The crawler stays in scope, so little was discovered. Supply authentication (--auth) or add the redirect host to scope to crawl behind the login.",
-				terminal.Yellow(terminal.SymbolArrow),
-				terminal.Gray(target),
-				terminal.Yellow(result.LandingURL)))
-		case result.OffHostRedirect && result.HostAdopted:
-			zap.L().Info("Spidering: adopted off-host redirect target into scope",
-				zap.String("target", target),
-				zap.String("landing", result.LandingURL))
-			r.printPhaseDetail(fmt.Sprintf("%s %s redirected off-host to %s — not a login page, so its host was added to scope and crawled.",
-				terminal.Purple(terminal.SymbolArrow),
-				terminal.Gray(target),
-				terminal.Orange(result.LandingURL)))
-		case result.OffHostRedirect:
-			zap.L().Info("Spidering: start URL redirected off-host",
-				zap.String("target", target),
-				zap.String("landing", result.LandingURL))
-			r.printPhaseDetail(fmt.Sprintf("%s %s redirected off-host to %s.",
-				terminal.Purple(terminal.SymbolArrow),
-				terminal.Gray(target),
-				terminal.Orange(result.LandingURL)))
+
+			// The start URL bounced the browser off-host. Two cases: a login/SSO wall
+			// (the crawler can't go past it unauthenticated, so the run yields next
+			// to nothing — advise auth), or a relocated app on another host (the
+			// crawler adopts that host and crawls it). Either way, say so — a silent
+			// near-empty result otherwise reads like the site has no content.
+			switch {
+			case result.OffHostRedirect && result.LandingIsLogin:
+				if lu, perr := neturl.Parse(result.LandingURL); perr == nil && lu.Host != "" {
+					ssoHosts = append(ssoHosts, lu.Host)
+				}
+				zap.L().Warn("Spidering: start URL redirected off-host to a login wall",
+					zap.String("target", target),
+					zap.String("landing", result.LandingURL))
+				r.printPhaseDetail(fmt.Sprintf("%s %s redirected off-host to %s — likely an SSO/login wall. The crawler stays in scope, so little was discovered. Supply authentication (--auth) or add the redirect host to scope to crawl behind the login.",
+					terminal.Yellow(terminal.SymbolArrow),
+					terminal.Gray(target),
+					terminal.Yellow(result.LandingURL)))
+			case result.OffHostRedirect && result.HostAdopted:
+				zap.L().Info("Spidering: adopted off-host redirect target into scope",
+					zap.String("target", target),
+					zap.String("landing", result.LandingURL))
+				r.printPhaseDetail(fmt.Sprintf("%s %s redirected off-host to %s — not a login page, so its host was added to scope and crawled.",
+					terminal.Purple(terminal.SymbolArrow),
+					terminal.Gray(target),
+					terminal.Orange(result.LandingURL)))
+			case result.OffHostRedirect:
+				zap.L().Info("Spidering: start URL redirected off-host",
+					zap.String("target", target),
+					zap.String("landing", result.LandingURL))
+				r.printPhaseDetail(fmt.Sprintf("%s %s redirected off-host to %s.",
+					terminal.Purple(terminal.SymbolArrow),
+					terminal.Gray(target),
+					terminal.Orange(result.LandingURL)))
+			}
+
+			r.reportSpiderCoverage(result, target)
+		}
+
+		// A session abandoned after a wedged crawl is left to the process to
+		// reclaim, exactly as the per-target watchdog does — closing a browser that
+		// did not answer would hang the phase we are trying to protect.
+		if sess != nil && !abandoned {
+			closeReSpiderSession(sess, sessRW)
 		}
 	}
 

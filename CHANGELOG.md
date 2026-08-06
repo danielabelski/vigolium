@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`VIGOLIUM_DB_PATH`** — env-var default for the global `--db` flag, so a shell can be pinned to one session database. Writes (`scan`, `ingest`, …) go to it normally; reads additionally treat it as a standalone source with project scoping off, via `statelessReadRequested` — so every command that reads through the shared query path is covered, including `fuzz -u <uuid>`, which registers no `-S` flag. The implication is skipped until the file exists, and never sets the `--stateless` flag itself (on the scan family that flag means a throwaway temp DB and is mutually exclusive with `--db`). An explicit `--db` wins, and an explicit `-S` on a command where it means "throwaway database" makes the variable a no-op. Each run prints a one-line notice naming the resolved database, suppressed under `--silent`/`-j`/`--ci-output-format`.
+
+## [v0.3.8] - 2026-08-06
+
+A **coverage** release: six new active modules (registry now 207 active + 116 passive), unified `--from`/`--to` date filtering across the read commands, and richer browser-crawl seeding.
+
+### Added
+
+- **`ssi-injection`** — Server-Side Includes injection detection.
+- **`server-side-js-injection`** — server-side JavaScript (Node) injection detection.
+- **`smtp-header-injection`** — SMTP header injection via email-bearing parameters.
+- **`react-rsc-rce`** — React Server Components RCE probe.
+- **`dependent-response`** — responses that change based on a spoofable request header.
+- **`path-relative-stylesheet`** — path-relative stylesheet import (RPO) exposure.
+- **`--from`/`--to`** (aliases `--since`/`--until`) time filtering on `finding`/`traffic`/`db ls`/`db export`/`replay`, plus `db clean --before` and swarm `--records-from`, sharing one parser (relative offsets like `2d`/`today` or absolute dates).
+- **`burpscope` input mode** — parses a Burp Suite scope export and expands its include rules into seed URLs; content-sniffed so it works through `-T` and `-i` alike.
+- **Frontier seeding from `robots.txt` and `sitemap.xml`** reaches crawl routes that nothing links to (default on).
+- **Speculative link scraping** pulls same-origin URLs out of inline scripts and HTML comments a rendered SPA never serves in static HTML (default on).
+- **Spidering knobs** — `max_depth`/`max_states` bounds (default 6/1500), `self_register`, and `graph_output_dir`.
+
+### Changed
+
+- **`code-exec`** now ships language-specific interpreter payloads across several string-breakout contexts, not just generic OS-shell payloads.
+- **`ssti-blind`** confirms JVM template stacks with a pure-JVM DNS/URL callback, needing no shell on the target.
+- **`cors-misconfiguration`** adds a single-mutation trusted-origin probe gated on a negative control, so a blanket reflector isn't re-reported.
+- **`file-upload-scan`** confirms PHP web shells by an arithmetic execution marker that proves evaluation, not mere storage.
+- **`graphql-scan`** walks endpoint names over parent-path prefixes and nested `api`/version permutations.
+- **`ldap-injection`** adds a negation boolean oracle (match-all vs match-none divergence).
+- **`open-redirect`** matches a wider set of leading separators to catch blocklist-bypass redirect targets.
+- **`cache-deception`** adds delimiter-confusion variants alongside the static-extension append.
+- **`web-cache-poisoning`** probes `X-Host`/`X-Forwarded-Server`/`X-Original-Host`/`X-Forwarded-Prefix` as cached-authority vectors.
+- **`secret-detect`/`env-secret-exposure`** treat Pusher/Salesforce client-side keys as public identifiers and keep Stripe restricted live keys graded as secrets.
+- **Input-mode help** clarifies `-i/--input` vs `-T/--target-file` so a spec isn't mistaken for a target list.
+
 ## [v0.3.7] - 2026-08-04
 
 A **scan throughput** release. Dynamic assessment is ~99.7% idle wait, so a static concurrency cap sets the phase wall clock outright — four changes attack that. Also ships the `vigolium fuzz` curl-parity + anomaly-scoring overhaul and bulk/browser replay. Registry stays at 201 active + 116 passive.

@@ -55,50 +55,59 @@ const inPageFetchScript = `(async () => {
   return ok;
 })()`
 
+// primeChunkSize bounds how many URLs go into one in-page fetch eval.
+//
+// The eval is bounded by iframePrimeTimeout and runs 6 requests concurrently, so
+// a list far larger than the window can drain does not merely finish late — it
+// hits the bound, returns an error, and the whole batch is reported as failed
+// even though the page is still fetching. Sized so a chunk completes inside the
+// window at an unremarkable per-request latency, and so a slow host costs one
+// chunk rather than the entire list.
+const primeChunkSize = 120
+
 // fetchURLsInPage fetches urls in-page with bounded concurrency so the browser's
-// network capture records them. The fetch eval runs on a goroutine so
-// crawl-context cancellation returns promptly even if CDP is slow; the eval
-// itself is bounded by iframePrimeTimeout. Best-effort: an empty list is a no-op
-// and any failure is logged at debug (tagged with kind) and swallowed. This is
-// the shared tail of every in-page URL primer (iframe/form/anchor).
+// network capture records them, in chunks that each fit the eval's time bound.
+// The fetch eval runs on a goroutine so crawl-context cancellation returns
+// promptly even if CDP is slow. Best-effort: an empty list is a no-op and any
+// failure is logged at debug (tagged with kind) and swallowed. This is the shared
+// tail of every in-page URL primer (iframe/form/anchor/seed/speculative).
 func (c *Crawler) fetchURLsInPage(ctx context.Context, page *browser.Page, urls []string, kind string) {
 	if page == nil || len(urls) == 0 || ctx.Err() != nil {
 		return
 	}
 	// Drop destructive endpoints before priming with live credentials. Applied here
-	// — the shared tail of every in-page URL primer (iframe, GET-form, anchor) — so
-	// all priming paths inherit one guard instead of each script filtering its own.
+	// — the shared tail of every in-page URL primer — so all priming paths inherit
+	// one guard instead of each script filtering its own.
 	urls = filterDestructiveURLs(urls)
 	if len(urls) == 0 {
 		return
 	}
-	payload, err := json.Marshal(urls)
-	if err != nil {
-		return
-	}
-	script := fmt.Sprintf(inPageFetchScript, string(payload))
 
-	done := make(chan struct{})
-	var primed interface{}
-	var evalErr error
-	go func() {
-		defer close(done)
-		primed, evalErr = page.EvalAwait(script, iframePrimeTimeout)
-	}()
+	fetched := 0
+	for start := 0; start < len(urls); start += primeChunkSize {
+		if ctx.Err() != nil {
+			break
+		}
+		end := min(start+primeChunkSize, len(urls))
+		chunk := urls[start:end]
 
-	select {
-	case <-ctx.Done():
-		zap.L().Debug("In-page priming aborted by context", zap.String("kind", kind))
-		return
-	case <-done:
+		payload, err := json.Marshal(chunk)
+		if err != nil {
+			continue
+		}
+		script := fmt.Sprintf(inPageFetchScript, string(payload))
+
+		if _, ok := evalAwaitCtx(ctx, page, script, iframePrimeTimeout, "prime:"+kind); !ok {
+			// A chunk that timed out says the host is slower than the window; the
+			// remaining chunks would fare no better, so stop rather than spend the
+			// budget discovering that repeatedly.
+			break
+		}
+		fetched += len(chunk)
 	}
 
-	if evalErr != nil {
-		zap.L().Debug("In-page priming failed", zap.String("kind", kind), zap.Error(evalErr))
-		return
-	}
 	zap.L().Debug("In-page URLs primed",
 		zap.String("kind", kind),
-		zap.Int("fetched", len(urls)),
-		zap.Any("ok", primed))
+		zap.Int("requested", len(urls)),
+		zap.Int("fetched", fetched))
 }

@@ -7,8 +7,8 @@ import (
 
 // SpideringConfig configures the browser-based spidering phase.
 type SpideringConfig struct {
-	MaxDepth            int    `yaml:"max_depth"`             // 0 = unlimited
-	MaxStates           int    `yaml:"max_states"`            // 0 = unlimited
+	MaxDepth            int    `yaml:"max_depth"`             // default: 6 (0 = unlimited)
+	MaxStates           int    `yaml:"max_states"`            // default: 1500 (0 = unlimited)
 	MaxDuration         string `yaml:"max_duration"`          // default: "30m"
 	MaxConsecutiveFails int    `yaml:"max_consecutive_fails"` // default: 100
 	Headless            bool   `yaml:"headless"`              // default: true
@@ -19,13 +19,31 @@ type SpideringConfig struct {
 	BrowserPath         string `yaml:"browser_path"`          // explicit path to browser binary (overrides auto-detection)
 	NoCDP               bool   `yaml:"no_cdp"`                // disable CDP event listener detection
 	NoForms             bool   `yaml:"no_forms"`              // disable automatic form filling
+
+	// SelfRegister lets the crawl complete a public signup form and continue as
+	// the account it creates. On an app with open registration this is the
+	// difference between crawling the marketing shell and crawling the product.
+	// Off by default because registering is a write; the runner turns it on at
+	// deep intensity, and this setting forces it on at any intensity.
+	SelfRegister bool `yaml:"self_register"`
+
+	// GraphOutputDir, when set, is a directory the crawl graph is written into
+	// (one file per host). The graph records which action on which state led
+	// where, so a run can be reproduced and a specific state re-reached without
+	// rediscovering the path to it. Empty disables.
+	GraphOutputDir string `yaml:"graph_output_dir"`
 }
 
 // DefaultSpideringConfig returns sensible defaults for spidering.
 func DefaultSpideringConfig() *SpideringConfig {
 	return &SpideringConfig{
-		MaxDepth:            0,
-		MaxStates:           0,
+		// Bound how the crawl spends its clock. Unbounded, a link-dense site can
+		// sink the whole max_duration into one deep branch and never revisit the
+		// breadth near the seed; and a template that mints a state per row (a
+		// paginated table, a calendar) can spend it on near-identical pages. Both
+		// are generous enough that a normal application finishes well inside them.
+		MaxDepth:            6,
+		MaxStates:           1500,
 		MaxDuration:         "30m",
 		MaxConsecutiveFails: 100,
 		Headless:            true,

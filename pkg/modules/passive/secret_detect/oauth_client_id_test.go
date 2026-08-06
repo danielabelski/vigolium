@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vigolium/vigolium/pkg/secretscan"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
@@ -68,6 +69,13 @@ func TestIsPublicIdentifierRule(t *testing.T) {
 		"Lob Publishable API Key",
 		"MongoDB API PUBLIC Key",
 		"eBay Sandbox Client ID",
+		// Client-side SDK keys: the "tokenization key" / "app key" markers, and
+		// the two Branch.io families carried by publicIdentifierRuleNames.
+		"Braintree Tokenization Key",
+		"Pusher Channels App Key",
+		"Branch.io Live Key",
+		"Branch.io Test Key",
+		"branch.io live key", // the curated set is matched case-insensitively
 	}
 	for _, name := range public {
 		t.Run("public/"+name, func(t *testing.T) {
@@ -91,6 +99,12 @@ func TestIsPublicIdentifierRule(t *testing.T) {
 		// A hypothetical combined rule must not be downgraded on its public half.
 		"Acme Client ID and Secret",
 		"Acme Public/Private Key Pair",
+		// The paired server-side halves of the client-SDK families above.
+		"Branch.io Secret",
+		"Pusher Channels App Secret",
+		// publicIdentifierRuleNames is a whole-name match, so a longer name that
+		// merely contains a listed family does not inherit its carve-out.
+		"Acme Branch.io Live Key Derivation Token",
 	}
 	for _, name := range sensitive {
 		t.Run("sensitive/"+name, func(t *testing.T) {
@@ -158,5 +172,101 @@ func TestSalesforceConsumerKeyLabelAndDescription(t *testing.T) {
 	}
 	if strings.Contains(desc, "Leaked secret detected") {
 		t.Errorf("description still uses the generic leaked-secret wording:\n%s", desc)
+	}
+}
+
+// The client-side SDK keys below are synthetic values shaped to match their
+// catalog rules. Both come from the same false positive: a blog served by a
+// hosted publishing platform inlined its public front-end config blob into the
+// page HTML, and the two integration keys sitting in it graded High while the
+// Google client id and reCAPTCHA site key beside them were already floored to
+// Info. Neither is a credential — see publicIdentifierRuleNames and the
+// "tokenization key" marker for the vendor documentation each rests on.
+const (
+	braintreeTokenizationKey = "production_qw83hs21_kd94mzp67vbx2r"
+	branchLiveKey            = "key_live_hK4mZq8tRw2vNp6xLb3yFc9sJd5g"
+)
+
+// publicFrontEndConfig reproduces that blob: the vendor integration identifiers
+// a single-page front end cannot boot without, side by side in one JSON object.
+const publicFrontEndConfig = `<script>window.__APOLLO_STATE__={"config":` +
+	`{"nodeEnv":"production","productName":"Example",` +
+	`"authGoogleClientId":"111111111111-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6.apps.googleusercontent.com",` +
+	`"branchKey":"` + branchLiveKey + `",` +
+	`"braintreeClientKey":"` + braintreeTokenizationKey + `",` +
+	`"braintree":{"enabled":true,"braintreeEnvironment":"production"}}}</script>`
+
+// TestPublicIdentifierRuleNamesExistInCatalog pins every curated entry to a rule
+// the module actually RUNS. These are whole-name matches against a GENERATED
+// catalog (`make update-secret-rules`), so an upstream rename would silently drop
+// the carve-out and the family would grade High again — the exact false positive
+// it fixes. Membership alone is not enough: a rule the catalog carries but ships
+// `visible: false` never reaches the detector, so the enabled set is what counts.
+func TestPublicIdentifierRuleNamesExistInCatalog(t *testing.T) {
+	cat, err := secretscan.LoadCatalog()
+	if err != nil {
+		t.Fatalf("load catalog: %v", err)
+	}
+	enabled := make(map[string]struct{}, len(cat.Rules))
+	present := make(map[string]struct{}, len(cat.Rules))
+	for _, r := range cat.Rules {
+		name := strings.ToLower(strings.TrimSpace(r.Name))
+		present[name] = struct{}{}
+		if r.Visible {
+			enabled[name] = struct{}{}
+		}
+	}
+	for name := range publicIdentifierRuleNames {
+		if _, ok := enabled[name]; !ok {
+			t.Errorf("publicIdentifierRuleNames entry %q matches no ENABLED catalog rule — renamed or disabled upstream?", name)
+		}
+	}
+
+	// Known gap, asserted so it surfaces the day it closes rather than silently:
+	// kingfisher carries "Branch.io Secret" (the `secret_live_…` half the Branch
+	// key carve-out defers to) but ships it disabled, so vigolium does not detect
+	// a leaked Branch secret today. Downgrading the public half is still correct —
+	// the key is public regardless — but the pair is not covered end to end.
+	if _, ok := present["branch.io secret"]; !ok {
+		t.Error(`the "Branch.io Secret" rule is gone from the catalog entirely`)
+	}
+	if _, ok := enabled["branch.io secret"]; ok {
+		t.Log(`"Branch.io Secret" is now enabled upstream — the Branch pair is covered end to end; drop this note`)
+	}
+}
+
+// TestModule_PublicFrontEndConfigGradesInfo is the end-to-end pin: the whole
+// passive path over a real-shaped front-end config blob must report the Braintree
+// tokenization key and the Branch key as Info, not High.
+func TestModule_PublicFrontEndConfigGradesInfo(t *testing.T) {
+	m := New()
+	ctx := makeHTTPCtx("text/html; charset=utf-8", publicFrontEndConfig)
+	if !m.CanProcess(ctx) {
+		t.Fatal("module cannot process the config blob response")
+	}
+	findings, err := m.ScanPerRequest(ctx, nil)
+	if err != nil {
+		t.Fatalf("ScanPerRequest: %v", err)
+	}
+
+	graded := map[string]severity.Severity{}
+	for _, f := range findings {
+		for _, v := range f.ExtractedResults {
+			graded[v] = f.Info.Severity
+		}
+	}
+	for label, value := range map[string]string{
+		"braintree tokenization key": braintreeTokenizationKey,
+		"branch key":                 branchLiveKey,
+	} {
+		t.Run(label, func(t *testing.T) {
+			sev, ok := graded[value]
+			if !ok {
+				t.Fatalf("no finding for %s (%q) — the detector stopped matching it, so the downgrade is untested", label, value)
+			}
+			if sev != severity.Info {
+				t.Errorf("%s graded %v, want Info", label, sev)
+			}
+		})
 	}
 }

@@ -347,12 +347,12 @@ func TestIsHyphenatedResourceSlug(t *testing.T) {
 		assert.Truef(t, isHyphenatedResourceSlug(s), "%q should read as a resource slug", s)
 	}
 	notSlugs := []string{
-		"9a6bf21a-4846-4161-ab04-00ff945e5ad3",    // UUID: all-hex, no pure-letter word
-		"correct-horse-battery-staple",            // diceware: no mixed alnum segment
+		"9a6bf21a-4846-4161-ab04-00ff945e5ad3",                   // UUID: all-hex, no pure-letter word
+		"correct-horse-battery-staple",                           // diceware: no mixed alnum segment
 		"AIzaSyACWT" + "6Y3-lpoTMN" + "cqwQqhutbr" + "reMAmQJgU", // one hyphen, <4 segments
-		"sk-proj-Abc123def456",                    // real prefixed key: 3 segments
-		"just-two-words",                          // <4 segments
-		"a-b-Cd1-e",                               // words too short (<3 letters)
+		"sk-proj-Abc123def456",                                   // real prefixed key: 3 segments
+		"just-two-words",                                         // <4 segments
+		"a-b-Cd1-e",                                              // words too short (<3 letters)
 		"",
 	}
 	for _, s := range notSlugs {
@@ -412,14 +412,6 @@ func TestTrimEdgePunct(t *testing.T) {
 			t.Errorf("trimEdgePunct(%q) = %q, want %q", in, got, want)
 		}
 	}
-}
-
-func TestIsReCaptchaSiteKeyShape(t *testing.T) {
-	assert.True(t, isReCaptchaSiteKeyShape("6LfnSAoUAAAAAG49XsPZF3YJHzE3KiAuQuoivYZb"))
-	assert.True(t, isReCaptchaSiteKeyShape("6Lc-1234567890abcdefABCDEF_-1234567890ab"))
-	assert.False(t, isReCaptchaSiteKeyShape("6LfnSAoUAAAAAG49XsPZF3YJHzE3KiAuQuoivYZ"), "39 chars is wrong length")
-	assert.False(t, isReCaptchaSiteKeyShape("7LfnSAoUAAAAAG49XsPZF3YJHzE3KiAuQuoivYZb"), "wrong prefix")
-	assert.False(t, isReCaptchaSiteKeyShape("6LfnSAoUAAAAAG49XsPZF3YJHzE3KiAuQuoiv=Zb"), "illegal char")
 }
 
 // TestModule_ValueShapeGuardDropsGenericMarkup proves the guard drops a

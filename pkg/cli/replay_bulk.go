@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"time"
 
-	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/terminal"
 )
@@ -201,20 +199,10 @@ func buildReplayBulkFilters(fuzzy string) (database.QueryFilters, error) {
 		return database.QueryFilters{}, err
 	}
 
-	var dateFrom, dateTo *time.Time
-	if replayBulkFrom != "" {
-		t, perr := clicommon.ParseDate(replayBulkFrom)
-		if perr != nil {
-			return database.QueryFilters{}, fmt.Errorf("invalid --from date: %w", perr)
-		}
-		dateFrom = &t
-	}
-	if replayBulkTo != "" {
-		t, perr := clicommon.ParseDate(replayBulkTo)
-		if perr != nil {
-			return database.QueryFilters{}, fmt.Errorf("invalid --to date: %w", perr)
-		}
-		dateTo = &t
+	dateFrom, dateTo, derr := parseDateRangeFlags(replayBulkFrom, replayBulkTo,
+		timeFilterFromLabel, timeFilterToLabel)
+	if derr != nil {
+		return database.QueryFilters{}, derr
 	}
 
 	// --all lifts the cap: a zero Limit means "no LIMIT clause" in the query.

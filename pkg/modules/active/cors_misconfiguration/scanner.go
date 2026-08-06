@@ -2,6 +2,7 @@ package cors_misconfiguration
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/vigolium/vigolium/pkg/dedup"
@@ -10,6 +11,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
+	"github.com/vigolium/vigolium/pkg/utils"
 )
 
 // corsProbe defines a single CORS test case.
@@ -26,8 +28,15 @@ type corsProbe struct {
 	// fixed value (null / wildcard) and confirmation falls back to a
 	// reproducibility check instead.
 	canaryOrigin func(host, canary string) string
-	sev          severity.Severity
-	desc         string
+	// selective marks a probe whose signal is only meaningful when the server does
+	// NOT reflect arbitrary origins: an origin derived from a trusted host by a
+	// single structural mutation (a changed or removed '.') is reflected, but an
+	// unrelated origin is not. runProbe enforces that negative control so a blanket
+	// origin reflector (already reported by the Reflected Origin probe) is not
+	// re-reported here.
+	selective bool
+	sev       severity.Severity
+	desc      string
 }
 
 var probes = []corsProbe{
@@ -117,6 +126,73 @@ var probes = []corsProbe{
 		sev:          severity.Low,
 		desc:         "The server reflects HTTP-scheme origins in ACAO, enabling mixed-content cross-origin attacks.",
 	},
+	{
+		// An origin identical to a trusted host except that its last '.' is replaced
+		// by another character. A validator that exact-matches or correctly escapes
+		// its allowlist rejects this; one that uses a regex with an unescaped '.'
+		// (e.g. "https://.*example.com$") accepts it, because '.' matches any char.
+		name: "Unescaped Dot in Origin Regex",
+		originFunc: func(host string) string {
+			m := replaceLastDot(host)
+			if m == "" {
+				return ""
+			}
+			return "https://" + m
+		},
+		check:     func(acao, _ string) bool { return acao != "" },
+		selective: true,
+		sev:       severity.Low,
+		desc:      "The server's origin allowlist appears to use a regular expression with an unescaped '.' metacharacter. An origin identical to a trusted host except that a '.' is replaced by another character is still reflected in Access-Control-Allow-Origin, while an unrelated origin is not. An attacker can register a look-alike domain that satisfies the flawed pattern and read cross-origin responses on behalf of authenticated users.",
+	},
+	{
+		// An origin formed by removing a '.' from a trusted host, so the trusted host
+		// appears as a substring (sub.example.com -> subexample.com contains
+		// "example.com"). A substring/contains/endsWith check accepts it; an exact
+		// match does not. subexample.com is itself registrable, so it is directly
+		// exploitable.
+		name: "Origin Substring Match",
+		originFunc: func(host string) string {
+			m := deleteFirstDot(host)
+			if m == "" {
+				return ""
+			}
+			return "https://" + m
+		},
+		check:     func(acao, _ string) bool { return acao != "" },
+		selective: true,
+		sev:       severity.Low,
+		desc:      "The server validates the Origin with a substring/suffix check rather than an exact match. An origin formed by removing a '.' from a trusted host (so the trusted host name appears as a substring) is still reflected in Access-Control-Allow-Origin, while an unrelated origin is not. An attacker can register a domain that embeds the trusted host name and read cross-origin responses on behalf of authenticated users.",
+	},
+}
+
+// replaceLastDot returns host with its final '.' replaced by 'x'. It returns ""
+// when the mutation is not meaningful — a host with no '.' or a bare IPv4 literal
+// (where every label is numeric), so those hosts are skipped rather than probed
+// with a nonsensical origin.
+func replaceLastDot(host string) string {
+	i := strings.LastIndexByte(host, '.')
+	if i < 0 || isIPv4(host) {
+		return ""
+	}
+	return host[:i] + "x" + host[i+1:]
+}
+
+// deleteFirstDot returns host with its first '.' removed, collapsing the first two
+// labels into one so the remaining host name contains the trusted host as a
+// substring. Same not-applicable rules as replaceLastDot.
+func deleteFirstDot(host string) string {
+	i := strings.IndexByte(host, '.')
+	if i < 0 || isIPv4(host) {
+		return ""
+	}
+	return host[:i] + host[i+1:]
+}
+
+// isIPv4 reports whether host is a dotted-decimal IPv4 literal. Dot mutations
+// against an IP are meaningless, so callers skip them.
+func isIPv4(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() != nil
 }
 
 // Module implements the CORS misconfiguration active scanner.
@@ -194,6 +270,11 @@ func (m *Module) ScanPerRequest(
 		origin := probe.origin
 		if probe.originFunc != nil {
 			origin = probe.originFunc(host)
+		}
+		// A probe may opt out for this host (e.g. dot mutations against an IP or a
+		// dotless host) by returning an empty origin.
+		if origin == "" {
+			continue
 		}
 
 		result, err := m.runProbe(ctx, httpClient, probe, origin)
@@ -282,6 +363,18 @@ func (m *Module) runProbe(
 	// a usable cross-origin read; drop it.
 	if status < 200 || status >= 300 {
 		return nil, nil
+	}
+
+	// Negative control for selective probes: a wholly-unrelated origin must NOT be
+	// reflected. If it is, the server reflects arbitrary origins (reported by the
+	// Reflected Origin probe), and this narrower structural signal would be a
+	// duplicate false positive — drop it. Fail closed only on a completed reflection
+	// of the control; an inconclusive fetch leaves the primary match standing.
+	if probe.selective {
+		control := "https://" + utils.RandomString(12) + ".com"
+		if _, ca, _, _, cok := corsHeaders(ctx, httpClient, control); cok && ca == control {
+			return nil, nil
+		}
 	}
 
 	// Strict confirmation.

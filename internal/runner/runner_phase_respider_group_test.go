@@ -15,7 +15,7 @@ func TestGroupReSpiderSeedsByHost(t *testing.T) {
 		{url: "https://b.example/2", hostKey: "b.example", score: 50},
 	}
 
-	groups := groupReSpiderSeedsByHost(chosen)
+	groups := groupByHost(chosen, func(s respiderSeed) string { return s.hostKey })
 
 	if len(groups) != 3 {
 		t.Fatalf("expected 3 host groups, got %d", len(groups))
@@ -45,7 +45,7 @@ func TestGroupReSpiderSeedsByHost(t *testing.T) {
 }
 
 func TestGroupReSpiderSeedsByHostEmpty(t *testing.T) {
-	if groups := groupReSpiderSeedsByHost(nil); len(groups) != 0 {
+	if groups := groupByHost(nil, func(s respiderSeed) string { return s.hostKey }); len(groups) != 0 {
 		t.Errorf("expected no groups for nil input, got %d", len(groups))
 	}
 }

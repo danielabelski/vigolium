@@ -1,6 +1,6 @@
 # Scanner Modules Reference
 
-Vigolium ships with **317 scanner modules** — 201 active and 116 passive — covering the OWASP Top 10 and beyond. The categorized tables below are a curated selection synchronized with the current registry. Run `vigolium module ls` (or call `GET /api/modules`) for all modules and the authoritative live metadata.
+Vigolium ships with **323 scanner modules** — 207 active and 116 passive — covering the OWASP Top 10 and beyond. The categorized tables below are a curated selection synchronized with the current registry. Run `vigolium module ls` (or call `GET /api/modules`) for all modules and the authoritative live metadata.
 
 ## Severity Scale
 

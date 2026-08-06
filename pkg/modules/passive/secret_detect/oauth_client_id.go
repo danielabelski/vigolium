@@ -1,11 +1,10 @@
 package secret_detect
 
-import "strings"
+import (
+	"strings"
 
-// salesforceConsumerKeyPrefix is the fixed prefix every Salesforce Connected App
-// Consumer Key (OAuth client_id) carries. The paired Consumer Secret has no such
-// prefix, so the prefix alone separates the public identifier from the credential.
-const salesforceConsumerKeyPrefix = "3MVG9"
+	"github.com/vigolium/vigolium/pkg/modules/modkit"
+)
 
 // IsSalesforceConsumerKey reports whether the matched snippet is a Salesforce
 // Connected App Consumer Key — the `3MVG9…` OAuth client_id.
@@ -20,9 +19,10 @@ const salesforceConsumerKeyPrefix = "3MVG9"
 //
 // Like a Google OAuth client ID, a match on the key alone is reported as
 // informational rather than a leaked credential (see IsPublicIdentifierRule for
-// the paired-secret rationale).
+// the paired-secret rationale). The shape itself lives in modkit because
+// env_secret_exposure needs the same judgement (modkit.HasSalesforceConsumerKeyPrefix).
 func IsSalesforceConsumerKey(snippet string) bool {
-	return strings.HasPrefix(strings.TrimSpace(snippet), salesforceConsumerKeyPrefix)
+	return modkit.HasSalesforceConsumerKeyPrefix(snippet)
 }
 
 // IsPublicOAuthClientID reports whether the matched snippet is the public half of
@@ -45,12 +45,39 @@ func IsPublicOAuthClientID(snippet string) bool {
 // one of them is a NAMED provider family, so without this list each grades High —
 // the same false positive the Google client ID and the Salesforce consumer key
 // carve-outs already fix by hand, waiting to fire ~50 more ways.
+//
+// "app key" and "tokenization key" name the client-side half of a two-value pair
+// the same way "app id" does. A Pusher Channels app key is the value passed to
+// `new Pusher(key, …)` in the browser (the paired app secret stays server-side),
+// and a Braintree tokenization key is documented as "publishable, meaning safe to
+// include in your app … not sensitive information and can be exposed in an
+// insecure client" — it authorizes tokenization only, and cannot read the Vault or
+// create a transaction. Both currently match exactly one catalog rule each.
 var publicIdentifierNameMarkers = []string{
 	"client id", "clientid",
 	"publishable",
 	"public key", "public access token", "public api token",
-	"app id", "application id",
+	"app id", "application id", "app key",
 	"site key", "sitekey",
+	"tokenization key",
+}
+
+// publicIdentifierRuleNames are whole catalog rule names whose family is public by
+// design but whose NAME carries none of publicIdentifierNameMarkers' phrases —
+// they assert something about one vendor's credential model rather than a naming
+// convention, so the exact name is the only handle.
+//
+// Branch.io calls the PUBLIC half of its pair a "key": the `key_live_…` /
+// `key_test_…` Branch key identifies the app, is required to initialise every
+// Branch web and mobile SDK, and is documented as safe to store in client-side
+// code and public repositories. The sensitive half is the `secret_live_…` Branch
+// Secret — a separate catalog rule (kingfisher.branchio.3) which upstream ships
+// DISABLED (`visible: false`), so vigolium does not currently detect it either;
+// TestPublicIdentifierRuleNamesExistInCatalog records that gap rather than
+// asserting a coverage we do not have.
+var publicIdentifierRuleNames = map[string]struct{}{
+	"branch.io live key": {},
+	"branch.io test key": {},
 }
 
 // credentialHalfNameMarkers are rule-name substrings that name the SENSITIVE half
@@ -61,7 +88,8 @@ var publicIdentifierNameMarkers = []string{
 var credentialHalfNameMarkers = []string{"secret", "private", "password"}
 
 // IsPublicIdentifierRule reports whether a secret-scan rule NAME identifies a
-// family that is public by design — see publicIdentifierNameMarkers.
+// family that is public by design — either by naming convention
+// (publicIdentifierNameMarkers) or by exact family (publicIdentifierRuleNames).
 //
 // These values are meant to be shipped to the browser: an OAuth client id rides in
 // every authorization redirect, a Stripe publishable key initialises Stripe.js, a
@@ -71,13 +99,17 @@ var credentialHalfNameMarkers = []string{"secret", "private", "password"}
 // full severity.
 //
 // Name-based rather than value-based because these families have no shared value
-// shape — the same approach IsReCaptchaSiteKey already takes.
+// shape — the same approach IsReCaptchaSiteKey already takes. Callers pass catalog
+// rule names verbatim, which never carry padding, so lowering alone suffices.
 func IsPublicIdentifierRule(ruleName string) bool {
 	n := strings.ToLower(ruleName)
 	for _, m := range credentialHalfNameMarkers {
 		if strings.Contains(n, m) {
 			return false
 		}
+	}
+	if _, ok := publicIdentifierRuleNames[n]; ok {
+		return true
 	}
 	for _, m := range publicIdentifierNameMarkers {
 		if strings.Contains(n, m) {
@@ -96,7 +128,7 @@ func IsPublicIdentifier(ruleName, snippet string) bool {
 	return IsPublicOAuthClientID(snippet) || IsPublicIdentifierRule(ruleName)
 }
 
-const publicIdentifierDescription = `**What it means:** This value is the public half of a credential pair — an OAuth client id, a publishable/public API key, or a widget application id. Values in this family are designed to be shipped to the browser: a client id rides in every authorization redirect, a publishable key initialises the vendor's client-side SDK, an app id identifies the widget to the vendor. Its presence in a response is expected, not a leaked credential. The sensitive half — the client secret, secret key, or private key — is a separate value matched by a separate rule, and is reported separately when present.
+const publicIdentifierDescription = `**What it means:** This value is the public half of a credential pair — an OAuth client id, a publishable/public API key, a widget application id, or a client-side SDK key. Values in this family are designed to be shipped to the browser: a client id rides in every authorization redirect, a publishable key initialises the vendor's client-side SDK, an app id identifies the widget to the vendor, a payment tokenization key lets the page tokenize a card without reaching the vault. Its presence in a response is expected, not a leaked credential. The sensitive half — the client secret, secret key, or private key — is a separate value matched by a separate rule, and is reported separately when present.
 
 **How it's exploited:** Nothing on its own. A public identifier cannot authenticate or authorize a caller; it only identifies the application to the vendor. It becomes useful to an attacker when paired with a leaked secret, refresh token, or access token (each its own finding) — check this same response for those, as the two halves are often served together. Some families also carry a weak abuse ceiling worth confirming: a publishable key with an over-permissive vendor configuration, or a client id whose OAuth application allows a loose redirect_uri.
 

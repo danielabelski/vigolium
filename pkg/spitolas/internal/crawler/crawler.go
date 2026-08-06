@@ -128,6 +128,23 @@ type Crawler struct {
 	loginCredMu    sync.Mutex
 	loginCredHosts map[string]bool
 
+	// selfRegisterHosts single-flights the self-registration pass per host.
+	// Registering is a write, so it must happen at most once regardless of how
+	// many states expose the signup form. Guarded by selfRegisterMu.
+	selfRegisterMu    sync.Mutex
+	selfRegisterHosts map[string]bool
+
+	// speculativeScript is the link-discovery script with the crawl's cap already
+	// substituted. Rendered once: the cap is fixed for the crawl and the script is
+	// several KB, so rebuilding it per state would re-ship the same bytes on the
+	// hottest path.
+	speculativeScript string
+
+	// failedActions collects actions that errored mid-crawl so the retry sweep can
+	// re-attempt them after the queue drains. Guarded by failedActionsMu.
+	failedActionsMu sync.Mutex
+	failedActions   []failedAction
+
 	mu      sync.Mutex
 	stats   Stats
 	running bool
@@ -174,6 +191,29 @@ type Stats struct {
 	LoginCredsTried     int
 	LoginCredsSucceeded int
 	LoginCredsURL       string
+
+	// Frontier seeding from robots.txt / sitemap.xml. SeedURLsDiscovered counts
+	// in-scope locations those files declared; SeedURLsCrawled counts how many of
+	// them were additionally browsed into states (the rest are recorded only).
+	SeedURLsDiscovered int
+	SeedURLsCrawled    int
+
+	// SpeculativeLinksFetched counts URL-like strings scraped from comments and
+	// inline script that were fetched and recorded.
+	SpeculativeLinksFetched int
+
+	// Self-registration. SelfRegistered is true when a signup form was completed
+	// and the app accepted it; SelfRegisterIdentity is the identity created, which
+	// the login pass then reuses.
+	SelfRegistered       bool
+	SelfRegisterIdentity string
+
+	// FollowUpPassesRun counts extra sweeps run after the first pass drained.
+	// ActionsRetried / ActionsRecovered count the end-of-crawl retry sweep and how
+	// many of those retries then succeeded.
+	FollowUpPassesRun int
+	ActionsRetried    int
+	ActionsRecovered  int
 }
 
 // New creates a new crawler.
@@ -205,6 +245,8 @@ func New(cfg *config.Config) (*Crawler, error) {
 		writer:              network.NopWriter{}, // Default no-op; override with SetWriter()
 		stats:               Stats{},
 		loginCredHosts:      make(map[string]bool),
+		selfRegisterHosts:   make(map[string]bool),
+		speculativeScript:   renderSpeculativeScript(cfg.SpeculativeMaxLinks),
 		// NOTE: stateMachine, crawlPath, session initialized in initializeIndexState()
 	}
 
@@ -441,10 +483,31 @@ func (c *Crawler) crawlWithBrowser(ctx context.Context, br *browser.Browser, cap
 		capture.SetTargetHost(c.adoptedHost)
 	}
 
+	// Seed the frontier from the host's own route declarations before the loop
+	// starts. This belongs here rather than in index-state initialization: every
+	// step there operates on the landing page, whereas this navigates to other
+	// locations and folds each into the graph — a frontier-level operation, and a
+	// sibling of the follow-up/retry passes below. Running it after
+	// initializeIndexState also means scope adoption is already decided, so seeds
+	// filter against the final boundary and land under the retargeted capture.
+	if page := br.CurrentPage(); page != nil {
+		c.seedFrontier(ctx, page)
+	}
+
 	// Main crawl loop
 	if err := c.crawlLoop(ctx); err != nil {
 		zap.L().Debug("Crawl loop ended", zap.Error(err))
 	}
+
+	// Re-walk for actions that only became available partway through the pass
+	// (an authenticated menu, a section unlocked by an earlier action), then
+	// re-attempt the actions that failed on transient page conditions. Both are
+	// no-ops when the crawl stopped on its budget rather than by draining.
+	c.runFollowUpPasses(ctx)
+	c.retryFailedActions(ctx)
+
+	// Persist the map of what was reached and how, if the caller asked for one.
+	c.writeGraphDump()
 
 	// Log final MAB summary
 	c.logMABFinalSummary()
@@ -664,11 +727,21 @@ func (c *Crawler) initializeIndexState(ctx context.Context) error {
 	// interaction budget never clicks them.
 	c.primeAnchorLinks(ctx, page)
 
+	// Scrape URL-like strings out of the rendered document's comments and inline
+	// script — locations reachable by no click.
+	c.harvestSpeculativeLinks(ctx, page)
+
 	// If the landing itself is a login form, try common credentials (deep
 	// intensity only, confirmed-login-gated) so the crawl can proceed
 	// authenticated. Runs after form-filling so the fixed-identity fill has
 	// already seeded the fill context that this pass reuses.
 	c.attemptLoginCredentials(ctx, page)
+
+	// Complete a public signup form, if the app has one and the operator opted
+	// in, so the crawl continues as an authenticated user. Runs after the
+	// credential pass so an existing-account login is preferred over creating a
+	// new one; the identity it registers is reused by later login attempts.
+	c.attemptSelfRegistration(ctx, page)
 
 	return nil
 }
@@ -1307,6 +1380,12 @@ func (c *Crawler) crawlThroughActions(ctx context.Context) {
 			added := c.candidates.DisableInputsForAction(act)
 			if added {
 				c.candidates.ReAddAction(act, currentState.ID)
+			} else {
+				// The normal path has run out of re-queues for this action, so it
+				// is about to be dropped for good. Hand it to the retry sweep
+				// instead: most of these failed on a transient page condition that
+				// will not still be true at the end of the crawl.
+				c.recordFailedAction(act, currentState.ID)
 			}
 			c.stats.ActionsFailed++
 			c.stats.ConsecutiveFailures++
@@ -1631,6 +1710,13 @@ func (c *Crawler) inspectNewState(ctx context.Context, page *browser.Page, event
 		return 0 // Don't capture out-of-scope state
 	}
 
+	// Wait out an in-progress render before snapshotting. The snapshot decides
+	// whether this is a new state at all, so a half-rendered DOM here compares as
+	// a duplicate of the state we came from and the route is discarded — the
+	// settle that runs further down would never be reached. Gated on cheap
+	// signals, so a click that changed nothing costs nothing.
+	settled := c.settleBeforeCapture(ctx, page, currentState.URL)
+
 	// Capture current DOM state
 	zap.L().Debug("Capturing DOM state for comparison")
 	newState, err := c.captureState(ctx, page, currentState.Depth+1)
@@ -1727,8 +1813,9 @@ func (c *Crawler) inspectNewState(ctx context.Context, page *browser.Page, event
 	// Let this newly reached state settle and (if it has content below the fold)
 	// scroll to trigger lazy loads BEFORE extracting its fragments/actions, so a
 	// deep SPA route contributes its lazy content and data fetches instead of just
-	// its above-the-fold shell. Bounded and skipped for short, quiescent states.
-	c.settleNewState(ctx, page)
+	// its above-the-fold shell. The pre-snapshot settle above already quiesced the
+	// page on a navigating action, so this skips its own wait in that case.
+	c.settleNewState(ctx, page, settled)
 
 	// Extract fragments
 	c.extractFragments(page, newState)
@@ -1777,6 +1864,12 @@ func (c *Crawler) inspectNewState(ctx context.Context, page *browser.Page, event
 	// category/filter/pagination links), deduped + per-shape capped across the crawl.
 	c.primeAnchorLinks(ctx, page)
 
+	// Scrape this state's own comments and inline script for URL-like strings. A
+	// route reached mid-crawl frequently injects its own config/endpoint block
+	// (a per-section API base, a feature-flagged admin path) that the landing
+	// page never carried.
+	c.harvestSpeculativeLinks(ctx, page)
+
 	return added
 }
 
@@ -1787,6 +1880,13 @@ func (c *Crawler) inspectNewState(ctx context.Context, page *browser.Page, event
 // 4. else: setCurrentState(clone), add clone to onURLSet if not index
 // 5. Always try to add reload edge (graph handles duplicate)
 func (c *Crawler) checkOnURLState(ctx context.Context, page *browser.Page, previousState *state.State, resetURL string) {
+	// Same reason as inspectNewState: this DOM read mints a state identity, so it
+	// must not be taken while the reloaded page is still rendering. This path
+	// always follows an explicit navigation, so there is no URL to compare
+	// against — passing none makes the busy probe the sole gate, which is what
+	// keeps a once-per-crawl-loop-iteration call from settling unconditionally.
+	c.settleBeforeCapture(ctx, page, "")
+
 	var combinedDOM string
 	var err error
 	if c.config.CrawlFrames {

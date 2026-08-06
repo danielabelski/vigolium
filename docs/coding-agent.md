@@ -89,6 +89,24 @@ Filters (shared with `traffic` / `db ls`): `--host --path --method --status
 --severity --min-severity --from/--to --search --scan-uuid --agentic-scan
 --module-type -n/--limit --offset --sort --asc`.
 
+`--from`/`--to` (also spelled `--since`/`--until`) take a relative offset as well
+as an absolute time, so recent work is reachable without computing a date:
+
+```bash
+vigolium finding --since today          # found since local midnight
+vigolium finding --since 2d             # the last 48 hours
+vigolium traffic --since 90m --until 30m
+vigolium finding --since yesterday --until yesterday   # just yesterday
+vigolium traffic --from 2026-08-05 --to 2026-08-05     # one whole day
+vigolium finding --since '2026-08-05 14:30'            # from a wall-clock time
+```
+
+Accepted: `30s`/`15m`/`2h`/`3d`/`1w` and compound Go durations (`1h30m`),
+`today`, `yesterday`, `now`, `YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS]`, and RFC3339.
+Bare dates and wall-clock times are **local**, and a bare date on the upper bound
+covers that whole day — `--from D --to D` is the full day D, not an empty range.
+An inverted range is rejected rather than silently returning nothing.
+
 `--search`/`--header`/`--body` now span the full request/response corpus (URL,
 path, headers, and body). Each has an inverse: `--exclude-search` (repeatable,
 AND-combined — a row is dropped if ANY term appears), `--exclude-header`, and

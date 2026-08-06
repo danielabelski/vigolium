@@ -6,10 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/cli/tui"
@@ -128,8 +126,11 @@ func init() {
 	pf.StringSliceVar(&findingMethods, "method", nil, "Filter by HTTP method (repeatable)")
 	pf.IntSliceVar(&findingStatus, "status", nil, "Filter by HTTP status code (repeatable)")
 	pf.StringVar(&findingPath, "path", "", "Filter by URL path pattern")
-	pf.StringVar(&findingFrom, "from", "", "Show findings after this date (YYYY-MM-DD or RFC3339)")
-	pf.StringVar(&findingTo, "to", "", "Show findings before this date (YYYY-MM-DD or RFC3339)")
+	pf.StringVar(&findingFrom, "from", "", fmt.Sprintf(
+		"Show findings at or after this time — %s (alias: --since)", clicommon.TimeFilterSyntax))
+	pf.StringVar(&findingTo, "to", "", fmt.Sprintf(
+		"Show findings at or before this time — %s; %s (alias: --until)",
+		clicommon.TimeFilterSyntax, clicommon.TimeFilterUpperBoundNote))
 	pf.StringArrayVar(&findingSearch, "search", nil, "Search across the finding's module metadata, matched location, and the linked request/response (headers + body); repeatable, AND-combined (each term further narrows)")
 	pf.StringVar(&findingHeader, "header", "", "Search within HTTP header names and values")
 	pf.StringVar(&findingBody, "body", "", "Search within HTTP request/response body content")
@@ -182,17 +183,9 @@ func init() {
 	registerAgentJSONFlags(f)
 	tui.AddFlags(findingCmd, &findingTUIFlag, &findingNoTUIFlag)
 
-	// Accept --sev as an alias for --severity. A normalize func routes the name
-	// to the same flag so both spellings share one value (registering a second
-	// flag bound to the same var would let one silently overwrite the other).
-	// Set globally so it reaches the merged parse-time set — --severity is a
-	// persistent flag, so a func on PersistentFlags() alone would not apply.
-	findingCmd.SetGlobalNormalizationFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
-		if name == "sev" {
-			name = "severity"
-		}
-		return pflag.NormalizedName(name)
-	})
+	// Alternate spellings that resolve to the same flag.
+	addFlagAliases(findingCmd, map[string]string{"sev": "severity"})
+	addFlagAliases(findingCmd, timeFilterAliases)
 }
 
 // findingNeedsRecords reports whether the selected output mode resolves a
@@ -449,20 +442,12 @@ func summarizeInts(nums []int, max int) string {
 }
 
 func buildFindingFilters(fuzzyTerm string) (database.QueryFilters, error) {
-	var dateFrom, dateTo *time.Time
-	if findingFrom != "" {
-		t, err := clicommon.ParseDate(findingFrom)
-		if err != nil {
-			return database.QueryFilters{}, fmt.Errorf("invalid --from date: %w", err)
-		}
-		dateFrom = &t
-	}
-	if findingTo != "" {
-		t, err := clicommon.ParseDate(findingTo)
-		if err != nil {
-			return database.QueryFilters{}, fmt.Errorf("invalid --to date: %w", err)
-		}
-		dateTo = &t
+	// The alias normalization erases which spelling the user typed, so the error
+	// names every accepted one.
+	dateFrom, dateTo, err := parseDateRangeFlags(findingFrom, findingTo,
+		timeFilterFromLabel, timeFilterToLabel)
+	if err != nil {
+		return database.QueryFilters{}, err
 	}
 
 	var severities []string
@@ -581,10 +566,10 @@ func printActiveFindingFilters(filters database.QueryFilters, fuzzyTerm string) 
 		s.add("id", strconv.Itoa(filters.FindingID))
 	}
 	if filters.DateFrom != nil {
-		s.add("from", filters.DateFrom.Format("2006-01-02"))
+		s.add("from", clicommon.FormatTimeFilter(*filters.DateFrom))
 	}
 	if filters.DateTo != nil {
-		s.add("to", filters.DateTo.Format("2006-01-02"))
+		s.add("to", clicommon.FormatTimeFilter(*filters.DateTo))
 	}
 	s.print()
 }

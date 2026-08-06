@@ -25,6 +25,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/input/formats/burpscope"
 	"github.com/vigolium/vigolium/pkg/input/formats/detect"
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
 	"github.com/vigolium/vigolium/pkg/input/source"
@@ -690,6 +691,9 @@ func detectInputFormat(input string) string {
 		}
 		if openapi.IsOpenAPISpec(data) {
 			return "openapi"
+		}
+		if burpscope.Sniff(data) {
+			return "burpscope"
 		}
 	}
 	return ""

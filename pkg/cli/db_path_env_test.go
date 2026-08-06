@@ -1,0 +1,245 @@
+package cli
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// resetDBPathEnvGlobals restores every global applyDBPathEnv touches, so a case
+// can't leak state into the next one (they are package-level CLI flag targets).
+func resetDBPathEnvGlobals(t *testing.T) {
+	t.Helper()
+	origDB, origStateless, origGlob := globalDB, globalStateless, globalGlobDB
+	origAuto, origSilent := dbPathEnvAutoStateless, globalSilent
+	globalDB, globalStateless, globalGlobDB, dbPathEnvAutoStateless = "", false, "", false
+	globalSilent = true // keep the notice out of the test log
+	t.Cleanup(func() {
+		globalDB, globalStateless, globalGlobDB = origDB, origStateless, origGlob
+		dbPathEnvAutoStateless, globalSilent = origAuto, origSilent
+	})
+}
+
+// statelessCmd builds a command carrying an -S/--stateless flag, matching how
+// the real commands register it: statelessWriteRequested reads the flag, not the
+// variable behind it, so the binding target is irrelevant here.
+func statelessCmd(name string) *cobra.Command {
+	cmd := &cobra.Command{Use: name}
+	var stateless bool
+	cmd.Flags().BoolVarP(&stateless, "stateless", "S", false, "")
+	return cmd
+}
+
+// seedDBFile creates an empty file standing in for an existing session DB.
+func seedDBFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session.sqlite")
+	require.NoError(t, os.WriteFile(path, []byte{}, 0o600))
+	return path
+}
+
+func TestApplyDBPathEnv(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  *cobra.Command
+		// pre is what the user typed explicitly, applied after the reset.
+		pre func(cmd *cobra.Command, envPath string)
+		// wantDB is the expected globalDB; empty string means "the env path",
+		// the "-" sentinel means "expected empty".
+		wantDB string
+		// wantStateless is the expected dbPathEnvAutoStateless. It is command-
+		// agnostic by design: it only takes effect through
+		// statelessReadRequested, which the write commands never consult.
+		wantStateless bool
+	}{
+		{
+			// The env var implies its read semantics through
+			// statelessReadRequested, so every reader is covered — including
+			// `fuzz`, which resolves records through effectiveProjectUUID
+			// without ever registering an -S flag.
+			name:          "read commands see the session DB unscoped",
+			cmd:           statelessCmd("finding"),
+			wantStateless: true,
+		},
+		{
+			name:          "commands with no stateless flag are covered too",
+			cmd:           &cobra.Command{Use: "fuzz"},
+			wantStateless: true,
+		},
+		{
+			// A scan writes to the session DB. The flag it consults is
+			// globalStateless (asserted untouched below for every case), which
+			// is what keeps it clear of "--stateless and --db are mutually
+			// exclusive"; it never reads statelessReadRequested.
+			name:          "scan writes to the session DB",
+			cmd:           statelessCmd("scan"),
+			wantStateless: true,
+		},
+		{
+			name:          "ingest -S is --scan-on-receive, unrelated to the DB",
+			cmd:           &cobra.Command{Use: "ingest"},
+			wantStateless: true,
+		},
+		{
+			name: "explicit --db wins",
+			cmd:  statelessCmd("finding"),
+			pre: func(_ *cobra.Command, _ string) {
+				globalDB = "/tmp/explicit.sqlite"
+			},
+			wantDB: "/tmp/explicit.sqlite",
+		},
+		{
+			// Applying the env var here would only surface "--stateless and
+			// --db are mutually exclusive" for a --db the user never typed.
+			name: "explicit -S on a scan ignores the env var",
+			cmd:  statelessCmd("scan"),
+			pre: func(cmd *cobra.Command, _ string) {
+				require.NoError(t, cmd.Flags().Set("stateless", "true"))
+			},
+			wantDB: "-", // sentinel: expect empty
+		},
+		{
+			// `audit -S` binds its own auditStateless, not globalStateless —
+			// reading the flag rather than the variable is what covers it.
+			name: "explicit -S on audit ignores the env var",
+			cmd:  statelessCmd("audit"),
+			pre: func(cmd *cobra.Command, _ string) {
+				require.NoError(t, cmd.Flags().Set("stateless", "true"))
+			},
+			wantDB: "-",
+		},
+		{
+			// --glob-db already drives a stateless read across a merged set.
+			name: "--glob-db keeps driving the merge",
+			cmd:  statelessCmd("finding"),
+			pre: func(_ *cobra.Command, _ string) {
+				globalGlobDB = "scans/*.sqlite"
+			},
+		},
+		{
+			// An explicit -S already answered the question; nothing to imply.
+			name: "explicit -S on a read command needs no implication",
+			cmd:  statelessCmd("traffic"),
+			pre: func(_ *cobra.Command, _ string) {
+				globalStateless = true
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetDBPathEnvGlobals(t)
+			path := seedDBFile(t)
+			t.Setenv(dbPathEnvVar, path)
+			if tc.pre != nil {
+				tc.pre(tc.cmd, path)
+			}
+			explicitStateless := globalStateless
+
+			applyDBPathEnv(tc.cmd)
+
+			// The invariant that keeps the scan family clear of its
+			// --stateless/--db mutual exclusion: this never writes the flag
+			// variable those commands actually branch on.
+			assert.Equal(t, explicitStateless, globalStateless, "globalStateless must be left alone")
+
+			wantDB := tc.wantDB
+			switch wantDB {
+			case "":
+				wantDB = path
+			case "-":
+				wantDB = ""
+			}
+			assert.Equal(t, wantDB, globalDB)
+			assert.Equal(t, tc.wantStateless, dbPathEnvAutoStateless)
+		})
+	}
+}
+
+// A session whose database hasn't been written yet should read as empty, not
+// fail: a stateless read stats its source and errors when it is missing.
+func TestDBPathEnvSkipsStatelessWhenFileMissing(t *testing.T) {
+	resetDBPathEnvGlobals(t)
+	path := filepath.Join(t.TempDir(), "not-yet.sqlite")
+	t.Setenv(dbPathEnvVar, path)
+
+	applyDBPathEnv(statelessCmd("traffic"))
+
+	assert.Equal(t, path, globalDB)
+	assert.False(t, dbPathEnvAutoStateless)
+	assert.False(t, statelessReadRequested())
+}
+
+// The implication reaches reads through the one predicate they all consult,
+// rather than through a list of command names.
+func TestDBPathEnvDrivesStatelessReadRequested(t *testing.T) {
+	resetDBPathEnvGlobals(t)
+	t.Setenv(dbPathEnvVar, seedDBFile(t))
+	require.False(t, statelessReadRequested())
+
+	applyDBPathEnv(statelessCmd("finding"))
+
+	assert.True(t, statelessReadRequested())
+}
+
+func TestDBPathEnvExpandsHome(t *testing.T) {
+	resetDBPathEnvGlobals(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(dbPathEnvVar, "~/session.sqlite")
+
+	applyDBPathEnv(statelessCmd("scan"))
+
+	assert.Equal(t, filepath.Join(home, "session.sqlite"), globalDB)
+}
+
+func TestDBPathEnvUnsetIsNoOp(t *testing.T) {
+	resetDBPathEnvGlobals(t)
+	t.Setenv(dbPathEnvVar, "")
+
+	applyDBPathEnv(statelessCmd("finding"))
+
+	assert.Empty(t, globalDB)
+	assert.False(t, dbPathEnvAutoStateless)
+}
+
+// The notice is the change's only user-visible signal, so the modes that promise
+// a clean stream have to stay clean.
+func TestDBPathEnvNoticeSuppression(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		quiet func()
+		want  bool
+	}{
+		{name: "default prints", quiet: func() {}, want: true},
+		{name: "--silent", quiet: func() { globalSilent = true }},
+		{name: "--json", quiet: func() { globalJSON = true }},
+		{name: "--ci-output-format", quiet: func() { globalCIOutput = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetDBPathEnvGlobals(t)
+			origJSON, origCI := globalJSON, globalCIOutput
+			globalSilent, globalJSON, globalCIOutput = false, false, false
+			t.Cleanup(func() { globalJSON, globalCIOutput = origJSON, origCI })
+			tc.quiet()
+
+			r, w, err := os.Pipe()
+			require.NoError(t, err)
+			origStderr := os.Stderr
+			os.Stderr = w
+			dbPathEnvNotice("notice-probe")
+			os.Stderr = origStderr
+			require.NoError(t, w.Close())
+
+			buf := make([]byte, 256)
+			n, _ := r.Read(buf)
+			require.NoError(t, r.Close())
+
+			assert.Equal(t, tc.want, n > 0, "notice printed")
+		})
+	}
+}

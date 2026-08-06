@@ -32,6 +32,7 @@ Higher-precedence sources override lower ones. Within the config file, environme
 | Variable | Purpose |
 |---|---|
 | `VIGOLIUM_API_KEY` | API key for the REST server and ingestor client authentication |
+| `VIGOLIUM_DB_PATH` | Default SQLite database path when `--db` is not set — pins a shell to one session database (see [Session database](#session-database)) |
 | `VIGOLIUM_PROJECT_UUID` | Active project UUID when no project flag is supplied |
 | `VIGOLIUM_PROJECT` | Legacy alias for `VIGOLIUM_PROJECT_UUID` |
 | `VIGOLIUM_PROXY` | HTTP/SOCKS proxy URL, used when `--proxy` is not set |
@@ -40,6 +41,30 @@ Higher-precedence sources override lower ones. Within the config file, environme
 | `VIGOLIUM_HOME` | Base directory for Vigolium data (used by the installer; defaults to `~/.vigolium`) |
 | `VIGOLIUM_DISABLE_UPDATE_CHECK` | Set truthy to disable the periodic "new version available" check entirely |
 | `VIGOLIUM_AUTO_UPDATE` | Set truthy to silently run `vigolium update` and re-exec the new binary when a newer release is detected |
+
+### Session database
+
+`VIGOLIUM_DB_PATH` supplies a default for the global `--db` flag, so a shell can be pinned to one database for a whole engagement instead of repeating `--db` on every command:
+
+```bash
+export VIGOLIUM_DB_PATH=~/engagements/acme.sqlite
+
+cat requests.txt | vigolium ingest      # writes into acme.sqlite
+vigolium scan -t https://acme.example   # scans into acme.sqlite
+vigolium finding                        # reads acme.sqlite
+```
+
+The value goes through the same expansion as the config file's `database.sqlite.path`, so `~` and nested `${VAR}` references resolve. Each command prints a one-line notice naming the resolved database (suppressed under `--silent`, `-j/--json`, and `--ci-output-format`).
+
+**Reads** additionally treat the file as a standalone source with project scoping off — the same thing `-S/--stateless` does — so every row in it is visible regardless of which project UUID wrote it. This applies to every command that reads through the shared query path (`finding`, `traffic`, `replay`, `export`, and record lookups like `fuzz -u <uuid>`), and is skipped until the file exists, so the first read on a fresh session prints an empty table instead of failing. **Writes are unaffected**: `scan` and `ingest` write to the pinned database normally, and the variable never sets the `--stateless` flag itself — on `scan`/`scan-url`/`scan-request`/`run` that flag means "scan into a throwaway temp database and discard it" (and is mutually exclusive with `--db`), while on `ingest` `-S` is `--scan-on-receive`.
+
+Because reads are unscoped, `--project` / `VIGOLIUM_PROJECT_UUID` become inert on `finding` and `traffic` while a session database is pinned — the file's own contents are the scope.
+
+Precedence and opt-outs:
+
+- An explicit `--db` always wins; the notice says so when the two paths differ.
+- An explicit `-S` on `scan`/`scan-url`/`scan-request`/`run`/`audit` — where it means a throwaway database — makes the variable a no-op for that run.
+- `--glob-db` keeps driving the merge; the variable does not displace it.
 
 ### Update check
 
@@ -251,8 +276,8 @@ Browser-based crawling.
 
 ```yaml
 spidering:
-  max_depth: 0               # 0 = unlimited
-  max_states: 0              # 0 = unlimited
+  max_depth: 6               # 0 = unlimited
+  max_states: 1500           # 0 = unlimited
   max_duration: 30m
   max_consecutive_fails: 100
   headless: true
@@ -262,7 +287,51 @@ spidering:
   browser_engine: chromium   # chromium | ungoogled | fingerprint
   no_cdp: false              # disable CDP event listener detection
   no_forms: false            # disable automatic form filling
+  self_register: false       # complete a signup form and crawl as that account
+  graph_output_dir: ""       # write the crawl graph here (one file per host)
 ```
+
+`max_depth` and `max_states` bound how the crawl spends its clock. With both
+unlimited, a link-dense site can sink the whole `max_duration` into one deep
+branch, and a template that mints a state per row (a paginated table, a
+calendar) can consume the budget on near-identical pages. Set either to `0` to
+lift the bound.
+
+**Reaching what nothing links to.** An interaction crawl can only find what a
+click leads to. Three sources run alongside it and are on by default:
+
+- **Route declarations.** `robots.txt` and `sitemap.xml` are fetched from the
+  seed page and everything they name in scope is recorded. `Disallow` entries
+  are the valuable half — they enumerate what the owner kept out of search
+  indexes, which is routinely the admin and internal-tooling surface. Up to 25
+  of the declared locations are also browsed into the crawl, chosen to spread
+  across distinct path shapes so a sitemap dominated by one template does not
+  consume the whole allowance.
+- **Speculative strings.** URL-like strings in HTML comments and inline script
+  are scraped from the *rendered* document and fetched. A single-page app writes
+  its API base paths and route table into inline script that only exists after
+  the framework runs, so these are invisible to anything reading the served HTML.
+- **Self-registration** (`self_register`, off by default). Completes a public
+  signup form and continues as the account it creates, turning the authenticated
+  surface from unreachable into ordinary crawlable content. Runs at most once
+  per host, only submits to an in-scope host, and reuses the identity it creates
+  at any later login form. It is a write, so it stays opt-in; `--intensity deep`
+  enables it, and setting the key forces it on at any intensity.
+
+**Extra sweeps.** After the action queue drains with budget left, the crawler
+re-visits known locations and re-extracts. Actions unlock state out of order — a
+menu that only appears once logged in, a section revealed by an earlier form —
+and every location captured before that point was extracted against the old
+view. A second sweep then re-attempts the actions that failed on transient page
+conditions (an overlay, a node detached mid-render) instead of dropping whatever
+they guarded. Both stop immediately if the crawl ended on its budget or on a
+failure streak.
+
+**`graph_output_dir`** writes the finished crawl graph as JSON, one file per
+host. Captured traffic records *what* was requested; the graph records *how* the
+crawler got there — the source and target state of every transition, the
+selector for the element that was actioned, and the form values it carried. That
+is the difference between a list of URLs and a reproducible route.
 
 ### `dynamic-assessment`
 

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/vigolium/vigolium/pkg/terminal"
 )
@@ -104,15 +103,6 @@ func ValueOrNone(s string) string {
 		return "(none)"
 	}
 	return s
-}
-
-// ParseDate parses a date in YYYY-MM-DD or RFC3339 form.
-func ParseDate(s string) (time.Time, error) {
-	t, err := time.Parse("2006-01-02", s)
-	if err == nil {
-		return t, nil
-	}
-	return time.Parse(time.RFC3339, s)
 }
 
 // FormatTokenCount renders a numeric token count with K/M suffixes.

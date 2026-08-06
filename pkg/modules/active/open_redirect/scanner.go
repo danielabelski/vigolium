@@ -345,12 +345,7 @@ func checkWithAllModules(rawRequest []byte, ip httpmsg.InsertionPoint, urlx *url
 func confirmAttackerControlledRedirect(ip httpmsg.InsertionPoint, httpService *httpmsg.Service, httpClient *http.Requester) (bool, error) {
 	return modkit.ConfirmReflection(2, func(canary string) (bool, error) {
 		redirectDomain := canary + ".com"
-		payloads := []string{
-			"https://" + redirectDomain,
-			"//" + redirectDomain,
-			redirectDomain,
-			`/\` + redirectDomain,
-		}
+		payloads := redirectBypassPayloads(redirectDomain)
 		re := getDomainRedirectRegex(redirectDomain)
 		for _, payload := range payloads {
 			fuzzedRaw := ip.BuildRequest([]byte(payload))
@@ -394,10 +389,7 @@ func checkRedirectSubdomain(rawRequest []byte, ip httpmsg.InsertionPoint, urlx *
 		return results, false, err
 	}
 	redirectDomain := fmt.Sprintf("xxx.%s", mainDomain)
-	var payloads []string
-	payloads = append(payloads, fmt.Sprintf("https://%s", redirectDomain))
-	payloads = append(payloads, fmt.Sprintf("//%s", redirectDomain))
-	payloads = append(payloads, redirectDomain)
+	payloads := redirectBypassPayloads(redirectDomain)
 
 scan:
 	for _, payload := range payloads {
@@ -442,12 +434,7 @@ func checkRedirectDifferentDomain(rawRequest []byte, ip httpmsg.InsertionPoint, 
 	match = false
 	results = []*output.ResultEvent{}
 	redirectDomain := "bttandfriends.com"
-	var payloads []string
-	payloads = append(payloads, fmt.Sprintf("https://%s", redirectDomain))
-	payloads = append(payloads, fmt.Sprintf("//%s", redirectDomain))
-	payloads = append(payloads, redirectDomain)
-	payloads = append(payloads, fmt.Sprintf(`/\%s`, redirectDomain))
-	payloads = append(payloads, fmt.Sprintf("///%s", redirectDomain))
+	payloads := redirectBypassPayloads(redirectDomain)
 
 scan:
 	for _, payload := range payloads {
@@ -702,5 +689,31 @@ func getLocationUrl(value string) string {
 }
 
 func getDomainRedirectRegex(domain string) *regexp.Regexp {
-	return regexp.MustCompile(fmt.Sprintf(`(?i)^(?:https?:\/\/|\/\/|\/\\\\|\/\\)?(?:[a-zA-Z0-9\-_\.@]*)%s\/?(\/|[^.].*)?$`, domain))
+	// Optional scheme, then any run of slashes/backslashes (covers //, /\, \\, ///,
+	// /\/\, and the backslash-scheme forms browsers normalise), then optional
+	// userinfo, then the attacker domain. The domain must be present, so accepting a
+	// wider set of leading separators catches blocklist-bypass redirect targets
+	// without loosening what counts as a redirect to that domain.
+	return regexp.MustCompile(fmt.Sprintf(`(?i)^(?:https?:)?[\\/]{0,4}(?:[a-zA-Z0-9\-_\.@]*)%s\/?(\/|[^.].*)?$`, domain))
+}
+
+// redirectBypassPayloads returns the redirect-target payloads for domain. Beyond an
+// explicit scheme, a scheme-less "//", and the bare host, it includes slash/backslash
+// and mixed-case scheme variants: an allow-list keyed on the literal "http://"/"https://"
+// prefix fails to block these, yet a browser still follows them as an absolute
+// cross-origin navigation. The same set drives both detection and confirmation, so a
+// redirect reachable only through a bypass form is still re-proven against a fresh
+// random domain rather than silently dropped.
+func redirectBypassPayloads(domain string) []string {
+	return []string{
+		"https://" + domain,
+		"//" + domain,
+		domain,
+		`/\` + domain,
+		`/\/\` + domain,
+		`\\` + domain,
+		"///" + domain,
+		"Https://" + domain, // mixed-case scheme defeats a case-sensitive prefix blocklist
+		`https:\\` + domain, // backslash scheme; browsers normalise the separators to //
+	}
 }

@@ -66,6 +66,24 @@ type SpiderConfig struct {
 	// versus the minimal set (balanced: admin:admin, admin:123456). Ignored when
 	// LoginCredentialAttempts is false.
 	LoginCredentialFullList bool
+
+	// SelfRegister lets the crawl complete a public signup form and continue as
+	// the account it created, so an app whose real surface sits behind open
+	// registration is crawled rather than bounced at the door. Creating an
+	// account is a write, so this stays off unless the caller asks; the runner
+	// enables it at deep intensity.
+	SelfRegister bool
+
+	// GraphOutputDir, when set, is the directory the finished crawl graph is
+	// written into — the states reached and the selector/inputs of every
+	// transition between them. Captured traffic records what was requested; this
+	// records how the crawler got there, which is what makes a run reproducible.
+	//
+	// A directory rather than a path so the file is named from the crawl's OWN
+	// target. A session reuses one base config across a host's seeds and only
+	// TargetURL is replaced per seed, so a precomputed path would be whatever the
+	// first target implied and every later seed would write to it.
+	GraphOutputDir string
 }
 
 // SpiderResult contains the results of a spidering run.
@@ -127,6 +145,29 @@ type SpiderResult struct {
 	// DOMXssFindings holds browser-confirmed DOM-based XSS on reflected client
 	// routes (SPA hash routes / query params) discovered during the crawl.
 	DOMXssFindings []DOMXssFinding
+
+	// SeedURLsDiscovered / SeedURLsCrawled report the frontier seeding from the
+	// host's robots.txt and sitemap: how many in-scope locations those files
+	// declared, and how many of them were additionally browsed into states (the
+	// remainder are requested and recorded only).
+	SeedURLsDiscovered int
+	SeedURLsCrawled    int
+
+	// SpeculativeLinksFetched counts URL-like strings scraped from the rendered
+	// document's comments and inline script that were fetched and recorded.
+	SpeculativeLinksFetched int
+
+	// SelfRegistered reports that a signup form was completed and accepted;
+	// SelfRegisterIdentity is the identity created, which later login attempts
+	// reuse.
+	SelfRegistered       bool
+	SelfRegisterIdentity string
+
+	// FollowUpPassesRun counts extra sweeps run after the first pass drained.
+	// ActionsRetried / ActionsRecovered report the end-of-crawl retry sweep.
+	FollowUpPassesRun int
+	ActionsRetried    int
+	ActionsRecovered  int
 }
 
 // DOMXssFinding is a browser-confirmed DOM-based XSS on a client route: an
@@ -178,6 +219,10 @@ func buildCrawlerConfig(cfg SpiderConfig) (*config.Config, error) {
 	crawlerCfg.SubmitPostForms = !cfg.NoForms
 	crawlerCfg.LoginCredentialAttempts = cfg.LoginCredentialAttempts
 	crawlerCfg.LoginCredentialFullList = cfg.LoginCredentialFullList
+	crawlerCfg.SelfRegister = cfg.SelfRegister
+	if cfg.GraphOutputDir != "" {
+		crawlerCfg.GraphOutputPath = crawler.GraphOutputPathFor(cfg.GraphOutputDir, crawlerCfg.URL.Hostname())
+	}
 	if cfg.ProxyURL != "" {
 		crawlerCfg.ProxyURL = cfg.ProxyURL
 	}
@@ -252,6 +297,15 @@ func spiderResultFromCrawl(result *crawler.Result, recordsSaved int) *SpiderResu
 		BrowserUserAgent:       result.BrowserUserAgent,
 		HarvestedAuthorization: result.HarvestedAuthorization,
 		DOMXssFindings:         mapDOMXssFindings(result.DOMXssFindings),
+
+		SeedURLsDiscovered:      result.Stats.SeedURLsDiscovered,
+		SeedURLsCrawled:         result.Stats.SeedURLsCrawled,
+		SpeculativeLinksFetched: result.Stats.SpeculativeLinksFetched,
+		SelfRegistered:          result.Stats.SelfRegistered,
+		SelfRegisterIdentity:    result.Stats.SelfRegisterIdentity,
+		FollowUpPassesRun:       result.Stats.FollowUpPassesRun,
+		ActionsRetried:          result.Stats.ActionsRetried,
+		ActionsRecovered:        result.Stats.ActionsRecovered,
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/vigolium/vigolium/pkg/database"
 )
@@ -31,7 +30,8 @@ func expandProjectRecordsFromQuery(ctx context.Context, repo *database.Repositor
 // Recognised keys: host, path, method, status, source, since, until.
 //   - status: comma-or-space-separated integer list (within the value, e.g. "status=200|302")
 //   - method: comma-or-space-separated method list (e.g. "method=GET|POST")
-//   - since/until: YYYY-MM-DD or RFC3339
+//   - since/until: the shared --from/--to grammar (relative offsets like "2d",
+//     today/yesterday, YYYY-MM-DD, or RFC3339); an inverted window is an error
 //
 // Unknown keys produce an error rather than silently being ignored — typos
 // shouldn't quietly degrade to a less-restrictive query.
@@ -41,6 +41,10 @@ func parseRecordsFromSpec(spec string, projectUUID string) (database.QueryFilter
 	if spec == "" {
 		return filters, nil
 	}
+	// Collected rather than resolved inline so both bounds go through the shared
+	// range helper below: a swarm that silently selects zero records reads as a
+	// clean run, so an inverted window has to fail loudly here too.
+	var since, until string
 	for _, part := range splitSpecParts(spec) {
 		key, value, ok := strings.Cut(part, "=")
 		if !ok {
@@ -72,21 +76,21 @@ func parseRecordsFromSpec(spec string, projectUUID string) (database.QueryFilter
 		case "source":
 			filters.Source = value
 		case "since":
-			t, err := parseSpecDate(value)
-			if err != nil {
-				return filters, fmt.Errorf("records-from since=%q: %w", value, err)
-			}
-			filters.DateFrom = &t
+			since = value
 		case "until":
-			t, err := parseSpecDate(value)
-			if err != nil {
-				return filters, fmt.Errorf("records-from until=%q: %w", value, err)
-			}
-			filters.DateTo = &t
+			until = value
 		default:
 			return filters, fmt.Errorf("records-from key %q is not recognised (use: host, path, method, status, source, since, until)", key)
 		}
 	}
+
+	// Labels are the spec keys, not flags — the caller already prefixes
+	// "--records-from:", so repeating it here would stutter.
+	dateFrom, dateTo, err := parseDateRangeFlags(since, until, "since=", "until=")
+	if err != nil {
+		return filters, err
+	}
+	filters.DateFrom, filters.DateTo = dateFrom, dateTo
 	return filters, nil
 }
 
@@ -116,16 +120,6 @@ func splitListValue(v string) []string {
 		}
 	}
 	return out
-}
-
-func parseSpecDate(v string) (time.Time, error) {
-	if t, err := time.Parse(time.RFC3339, v); err == nil {
-		return t, nil
-	}
-	if t, err := time.Parse("2006-01-02", v); err == nil {
-		return t, nil
-	}
-	return time.Time{}, fmt.Errorf("expected YYYY-MM-DD or RFC3339")
 }
 
 // dedupeStrings preserves order while removing duplicates.

@@ -126,9 +126,9 @@ func TestCSVEscape(t *testing.T) {
 	}
 }
 
-func TestParseDate(t *testing.T) {
+func TestParseSince(t *testing.T) {
 	t.Run("date only", func(t *testing.T) {
-		got, err := ParseDate("2024-01-15")
+		got, err := ParseSince("2024-01-15")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -137,12 +137,12 @@ func TestParseDate(t *testing.T) {
 		}
 	})
 	t.Run("rfc3339", func(t *testing.T) {
-		if _, err := ParseDate("2024-01-15T10:30:00Z"); err != nil {
+		if _, err := ParseSince("2024-01-15T10:30:00Z"); err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
 	t.Run("invalid", func(t *testing.T) {
-		if _, err := ParseDate("not-a-date"); err == nil {
+		if _, err := ParseSince("not-a-date"); err == nil {
 			t.Error("expected error for invalid date")
 		}
 	})

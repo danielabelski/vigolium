@@ -14,6 +14,7 @@ import (
 	corestats "github.com/vigolium/vigolium/pkg/core/stats"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/http"
+	"github.com/vigolium/vigolium/pkg/input/source"
 	"github.com/vigolium/vigolium/pkg/modules"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/terminal"
@@ -158,7 +159,7 @@ func (r *Runner) printPhaseDetail(detail string) {
 	fmt.Fprintf(os.Stderr, "  %s %s\n", terminal.Purple(terminal.SymbolInfo), detail)
 }
 
-// formatTargetCounts builds a standardized "Targets: N (M CLI | K HTTP Records)" string.
+// formatTargetCounts builds a standardized "Targets: N (M input | K HTTP Records)" string.
 // Only HTTP records whose hostname matches the CLI targets are counted.
 func (r *Runner) formatTargetCounts(ctx context.Context, cliCount int) string {
 	var dbCount int64
@@ -166,10 +167,18 @@ func (r *Runner) formatTargetCounts(ctx context.Context, cliCount int) string {
 		hosts := r.getInScopeDBHosts(ctx)
 		dbCount, _ = r.repository.CountRecordsAfterCursor(ctx, time.Time{}, "", hosts...)
 	}
-	total := int64(cliCount) + dbCount
-	return fmt.Sprintf("Targets: %s (%s CLI | %s HTTP Records)",
-		terminal.Orange(fmt.Sprintf("%d", total)),
-		terminal.Orange(fmt.Sprintf("%d", cliCount)),
+	// A -T/--target-file (or -i) run carries its targets in the input source, not
+	// in options.Targets, so counting the CLI slice alone printed "0 input" for a
+	// scan that was about to hit dozens of hosts. Take whichever is larger: the
+	// caller's count wins when it is a phase-local target list the source can't
+	// know about.
+	seeded := int64(cliCount)
+	if n := source.GetTotal(r.inputSource); n > seeded {
+		seeded = n
+	}
+	return fmt.Sprintf("Targets: %s (%s input | %s HTTP Records)",
+		terminal.Orange(fmt.Sprintf("%d", seeded+dbCount)),
+		terminal.Orange(fmt.Sprintf("%d", seeded)),
 		terminal.Orange(fmt.Sprintf("%d", dbCount)))
 }
 

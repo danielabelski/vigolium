@@ -87,6 +87,39 @@ func IsNextJS(host string) bool {
 	return fp != nil && fp.Framework == NextJS
 }
 
+// nodeXPoweredBy are X-Powered-By tokens that identify a server-side JavaScript
+// runtime or framework.
+var nodeXPoweredBy = []string{"express", "next", "nuxt", "node", "koa", "nestjs", "nest", "sails", "fastify", "hapi", "meteor"}
+
+// nodeBodyMarkers are response-body markers of a JS/Node front end beyond the Next.js
+// markers already covered by HasNextJSMarkers.
+var nodeBodyMarkers = []string{"__NUXT__", "/_nuxt/", "webpackJsonp", "__remixContext"}
+
+// LooksLikeServerSideJS reports whether the response signals — the X-Powered-By and
+// Server header values and the response body — indicate a server-side JavaScript
+// runtime (Node.js and its frameworks), or the host is fingerprinted as Next.js. It
+// is the shared tech-stack gate for Node-targeting active modules.
+func LooksLikeServerSideJS(host, xPoweredBy, server, body string) bool {
+	xpb := strings.ToLower(xPoweredBy)
+	for _, s := range nodeXPoweredBy {
+		if strings.Contains(xpb, s) {
+			return true
+		}
+	}
+	if strings.Contains(strings.ToLower(server), "node") {
+		return true
+	}
+	if HasNextJSMarkers(body) {
+		return true
+	}
+	for _, s := range nodeBodyMarkers {
+		if strings.Contains(body, s) {
+			return true
+		}
+	}
+	return IsNextJS(host)
+}
+
 // GetBuildID returns the build ID for a host, or "" if not available.
 func GetBuildID(host string) string {
 	fp := Get(host)

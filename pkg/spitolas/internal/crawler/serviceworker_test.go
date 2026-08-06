@@ -26,17 +26,17 @@ func TestServiceWorkerPrimeScriptFormats(t *testing.T) {
 	// The follow-only sources (read what the live app registers/declares, then
 	// parse the manifests it points at) must all be present.
 	for _, want := range []string{
-		"getRegistrations",        // installed worker (browser-native)
-		"location.origin",         //
-		"querySelectorAll",        // declared <link rel=manifest>
-		"serviceWorker",           // inline register('...') extraction
-		"reRegister",              //
+		"getRegistrations",         // installed worker (browser-native)
+		"location.origin",          //
+		"querySelectorAll",         // declared <link rel=manifest>
+		"serviceWorker",            // inline register('...') extraction
+		"reRegister",               //
 		"assetGroups", "hashTable", // Angular ngsw.json parsing
 		"entrypoints", "data.files", // React CRA asset-manifest parsing
-		"prerendered",     // Nuxt route parsing
-		"revision",        // Workbox precache parsing
-		"isJsonManifest",  // manifest reader
-		"isSW",            // service-worker reader
+		"prerendered",    // Nuxt route parsing
+		"revision",       // Workbox precache parsing
+		"isJsonManifest", // manifest reader
+		"isSW",           // service-worker reader
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing expected token %q", want)

@@ -339,21 +339,8 @@ func (c *Crawler) submitPostForms(ctx context.Context, page *browser.Page, alrea
 	}
 	script := fmt.Sprintf(submitPostFormsScript, string(payload))
 
-	done := make(chan struct{})
-	var submitted interface{}
-	var evalErr error
-	go func() {
-		defer close(done)
-		submitted, evalErr = page.EvalAwait(script, iframePrimeTimeout)
-	}()
-	select {
-	case <-ctx.Done():
-		zap.L().Debug("POST-form submission aborted by context")
-		return
-	case <-done:
-	}
-	if evalErr != nil {
-		zap.L().Debug("POST-form submission failed", zap.Error(evalErr))
+	submitted, ok := evalAwaitCtx(ctx, page, script, iframePrimeTimeout, "post-form-submit")
+	if !ok {
 		return
 	}
 	zap.L().Debug("POST forms submitted",

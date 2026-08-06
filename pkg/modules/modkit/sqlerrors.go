@@ -23,6 +23,7 @@ var sqlErrorPatterns = map[string][]*regexp.Regexp{
 		regexp.MustCompile("check the manual that (corresponds to|fits) your MariaDB server version"),
 		regexp.MustCompile("check the manual that (corresponds to|fits) your Drizzle server version"),
 		regexp.MustCompile("Unknown column '[^ ]+' in 'field list'"),
+		regexp.MustCompile("Column count doesn't match value count at row"),
 		regexp.MustCompile(`MySqlClient\.`),
 		regexp.MustCompile(`com\.mysql\.jdbc`),
 		regexp.MustCompile("Zend_Db_(Adapter|Statement)_Mysqli_Exception"),
@@ -43,6 +44,7 @@ var sqlErrorPatterns = map[string][]*regexp.Regexp{
 		regexp.MustCompile(`ERROR:\s\ssyntax error at or near`),
 		regexp.MustCompile("ERROR: parser: parse error at or near"),
 		regexp.MustCompile("PostgreSQL query failed"),
+		regexp.MustCompile(`unterminated quoted (string|identifier)`),
 		regexp.MustCompile(`org\.postgresql\.jdbc`),
 		regexp.MustCompile(`Pdo[./_\\]Pgsql`),
 		regexp.MustCompile("PSQLException"),
@@ -66,7 +68,9 @@ var sqlErrorPatterns = map[string][]*regexp.Regexp{
 		regexp.MustCompile(`com\.microsoft\.sqlserver\.jdbc`),
 		regexp.MustCompile(`Pdo[./_\\](Mssql|SqlSrv)`),
 		regexp.MustCompile("SQL(Srv|Server)Exception"),
-		regexp.MustCompile("Unclosed quotation mark after the character string"),
+		regexp.MustCompile("Unclosed quotation mark (after|before) the character string"),
+		regexp.MustCompile("Incorrect syntax near"),
+		regexp.MustCompile("Invalid object name '"),
 	},
 	"Microsoft Access": {
 		regexp.MustCompile(`Microsoft Access (\d+ )?Driver`),
@@ -77,6 +81,7 @@ var sqlErrorPatterns = map[string][]*regexp.Regexp{
 	},
 	"Oracle": {
 		regexp.MustCompile(`\bORA-\d{5}`),
+		regexp.MustCompile(`\bPLS-\d{5}`),
 		regexp.MustCompile("Oracle error"),
 		// "Oracle" and "Driver" are both common English words that occur
 		// independently in ordinary page content (analytics feature-flag

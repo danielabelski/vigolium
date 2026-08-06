@@ -8,7 +8,18 @@ import (
 	"github.com/vigolium/vigolium/pkg/graphqlx"
 )
 
-// graphqlPaths are common GraphQL endpoint locations to probe.
+// graphqlPaths are the endpoint names to probe. candidatePaths crosses this list
+// with the request path's ancestor prefixes, so a service mounted under /shop
+// reaches /shop/graphql without needing its own entry — which is also why the
+// list stays short. Every entry added here costs one request per ancestor of
+// every scanned request, so deeper cross-products (/v1/graphql/api and friends)
+// are deliberately omitted: the prefix walk already reaches them for any request
+// inside that tree, and probing them from the web root is close to guessing.
+//
+// The four api/version names below are the exception worth paying for. A gateway
+// routinely fronts the graph one level in from where the path suggests, and for
+// a request to the site root there is no ancestor prefix to walk, so those
+// spellings are otherwise unreachable.
 var graphqlPaths = []string{
 	"/graphql",
 	"/api/graphql",
@@ -18,6 +29,10 @@ var graphqlPaths = []string{
 	"/query",
 	"/api/query",
 	"/graphql/console",
+	"/api",
+	"/api/v1",
+	"/v1/api",
+	"/graphql/api",
 }
 
 // typenameQuery is a simple query to detect GraphQL endpoints.

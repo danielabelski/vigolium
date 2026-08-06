@@ -9,13 +9,13 @@ const (
 )
 
 var (
-	ModuleDesc = `**What it means:** The file upload endpoint accepts a dangerous file (PHP script, .htaccess, SVG, or HTML) and stores it where it can be retrieved over the web. This unrestricted upload flaw is severe, since the attacker controls the content and URL.
+	ModuleDesc = `**What it means:** The file upload endpoint accepts a dangerous file (PHP script, .htaccess, SVG, or HTML) and stores it where it can be retrieved. The attacker controls the content and URL.
 
-**How it's exploited:** An attacker uploads via a server-side extension or bypass (double extension, null byte, .phtml, .phar), then fetches it back served verbatim, yielding remote code execution, stored XSS, or XXE/SSRF.
+**How it's exploited:** An attacker uploads via an extension bypass (double extension, null byte, .phtml, .phar), then fetches it back. If the retrieved file returns a computed arithmetic value rather than its source, the server executed it — remote code execution; otherwise it is a stored, retrievable arbitrary file.
 
-**Fix:** Allowlist safe extensions and content types, store uploads outside the web root or on non-executing storage, and randomize filenames.`
+**Fix:** Allowlist safe extensions and content types, store uploads outside the web root, and randomize filenames.`
 
-	ModuleConfirmation = "Confirmed when an uploaded file is accessible and contains the unique scan marker, indicating arbitrary file upload and potential code execution"
+	ModuleConfirmation = "Confirmed when a retrieved upload returns the computed arithmetic execution signature (code execution) or is retrievable with the unique marker (arbitrary upload), or an uploaded file triggers an out-of-band interaction"
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Certain
 	ModuleTags         = []string{"rce", "injection", "heavy"}

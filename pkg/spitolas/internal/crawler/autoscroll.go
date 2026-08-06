@@ -95,16 +95,24 @@ const pageBelowFoldScript = `(function(){
 
 // settleNewState gives a newly discovered SPA state the same lazy-content
 // treatment the index page gets, but proportional to the work there is to do: it
-// lets the route change's bootstrap XHRs quiesce (an activity-driven network-idle
-// settle that returns immediately when the state is already quiet) and only pays
-// the scroll sweep when the state actually has content below the fold or lazy
-// markers. Without this, states reached mid-crawl captured only their above-the-
-// fold shell, missing lazy routes and infinite-scroll data deeper in the app.
-func (c *Crawler) settleNewState(ctx context.Context, page *browser.Page) {
+// lets the route change's bootstrap XHRs quiesce and only pays the scroll sweep
+// when the state actually has content below the fold or lazy markers. Without
+// this, states reached mid-crawl captured only their above-the-fold shell,
+// missing lazy routes and infinite-scroll data deeper in the app.
+//
+// alreadySettled skips the quiesce leg. The snapshot that admitted this state is
+// taken behind its own settle (settleBeforeCapture), and on a navigating action
+// that runs moments earlier — repeating it here would pay a second multi-second
+// wait over a page that has not been touched since. The scroll sweep is still
+// worth doing either way: it is what triggers the lazy loads, and no settle
+// implies it.
+func (c *Crawler) settleNewState(ctx context.Context, page *browser.Page, alreadySettled bool) {
 	if page == nil || c.config == nil || ctx.Err() != nil {
 		return
 	}
-	c.settleSPA(ctx, page)
+	if !alreadySettled {
+		c.settleSPA(ctx, page)
+	}
 	if !c.config.AutoScroll || ctx.Err() != nil {
 		return
 	}

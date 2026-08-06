@@ -189,26 +189,8 @@ func (c *Crawler) primeServiceWorkerAssets(ctx context.Context, page *browser.Pa
 	}
 	script := fmt.Sprintf(serviceWorkerPrimeScript, maxAssets)
 
-	// Run the eval on a goroutine so crawl-context cancellation can return
-	// promptly even if CDP is slow to respond; the eval itself is bounded by
-	// serviceWorkerPrimeTimeout.
-	done := make(chan struct{})
-	var primed interface{}
-	var evalErr error
-	go func() {
-		defer close(done)
-		primed, evalErr = page.EvalAwait(script, serviceWorkerPrimeTimeout)
-	}()
-
-	select {
-	case <-ctx.Done():
-		zap.L().Debug("Service-worker priming aborted by context")
-		return
-	case <-done:
-	}
-
-	if evalErr != nil {
-		zap.L().Debug("Service-worker priming failed", zap.Error(evalErr))
+	primed, ok := evalAwaitCtx(ctx, page, script, serviceWorkerPrimeTimeout, "service-worker-prime")
+	if !ok {
 		return
 	}
 	zap.L().Debug("Service-worker assets primed", zap.Any("fetched", primed))

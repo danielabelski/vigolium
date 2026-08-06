@@ -1020,12 +1020,17 @@ discovery:
 # Speed control (max_duration) is configured in scanning_pace.spidering.
 spidering:
   # Maximum crawl depth (0 = unlimited).
-  # Default: 0
-  max_depth: 0
+  # Bounds how far from the seed the crawl follows links. Without a bound, a
+  # link-dense site can spend the whole max_duration deep inside one branch and
+  # never come back to the breadth near the seed.
+  # Default: 6
+  max_depth: 6
 
   # Maximum number of unique states to discover (0 = unlimited).
-  # Default: 0
-  max_states: 0
+  # Stops a template that mints a fresh state per row (a paginated table, a
+  # calendar) from consuming the budget on near-identical pages.
+  # Default: 1500
+  max_states: 1500
 
   # Maximum duration for spidering per target.
   # Format: duration string (e.g., "30m", "1h")
@@ -1070,6 +1075,25 @@ spidering:
   # forms it encounters. Set to true to skip form interactions.
   # Default: false
   no_forms: false
+
+  # Complete a public signup form and continue the crawl as the account it
+  # creates. On an application with open registration, the entire authenticated
+  # surface is invisible to an unauthenticated crawl; one account converts that
+  # into ordinary crawlable content. Runs at most once per host, only submits to
+  # an in-scope host, and reuses the identity it creates at any later login form.
+  # Off by default because registering is a write; --intensity deep enables it,
+  # and setting this to true forces it on at any intensity.
+  # Default: false
+  self_register: false
+
+  # Directory to write the crawl graph into (one file per host).
+  # The captured traffic records what was requested; the graph records how the
+  # crawler got there — which action on which state, with which form values, and
+  # the selector to find that element again. That is what makes a run
+  # reproducible and lets a later pass re-reach a specific state.
+  # Empty disables.
+  # Default: "" (disabled)
+  graph_output_dir: ""
 
 # ============================================================================
 # Known Issue Scan

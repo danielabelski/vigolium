@@ -50,6 +50,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/csti_detection"
 	"github.com/vigolium/vigolium/pkg/modules/active/dashboard_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/default_credentials"
+	"github.com/vigolium/vigolium/pkg/modules/active/dependent_response"
 	"github.com/vigolium/vigolium/pkg/modules/active/django_admin_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/django_browsable_api_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/django_debug_exposure"
@@ -131,6 +132,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/open_redirect_confusion"
 	"github.com/vigolium/vigolium/pkg/modules/active/padding_oracle"
 	"github.com/vigolium/vigolium/pkg/modules/active/path_normalization"
+	"github.com/vigolium/vigolium/pkg/modules/active/path_relative_stylesheet"
 	"github.com/vigolium/vigolium/pkg/modules/active/pdf_generation_injection"
 	"github.com/vigolium/vigolium/pkg/modules/active/php_composer_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/php_debug_exposure"
@@ -147,6 +149,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/rails_admin_dashboard"
 	"github.com/vigolium/vigolium/pkg/modules/active/rails_info_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/rails_sensitive_files"
+	"github.com/vigolium/vigolium/pkg/modules/active/react_rsc_rce"
 	"github.com/vigolium/vigolium/pkg/modules/active/reflected_ssti"
 	"github.com/vigolium/vigolium/pkg/modules/active/response_header_injection"
 	"github.com/vigolium/vigolium/pkg/modules/active/reverse_proxy_path_confusion"
@@ -156,10 +159,12 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/salesforce_aura_record_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/salesforce_lightning_debug_mode"
 	"github.com/vigolium/vigolium/pkg/modules/active/sensitive_file_discovery"
+	"github.com/vigolium/vigolium/pkg/modules/active/server_side_js_injection"
 	"github.com/vigolium/vigolium/pkg/modules/active/servicenow_kb_widget_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/servicenow_widget_data_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/session_fixation"
 	"github.com/vigolium/vigolium/pkg/modules/active/smart_behavior_detection"
+	"github.com/vigolium/vigolium/pkg/modules/active/smtp_header_injection"
 	"github.com/vigolium/vigolium/pkg/modules/active/spring_actuator_misconfig"
 	"github.com/vigolium/vigolium/pkg/modules/active/spring_boot_admin_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/spring_cloud_config_exposure"
@@ -172,6 +177,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/sqli_error_based"
 	"github.com/vigolium/vigolium/pkg/modules/active/sqli_out_of_band"
 	"github.com/vigolium/vigolium/pkg/modules/active/sqli_time_blind"
+	"github.com/vigolium/vigolium/pkg/modules/active/ssi_injection"
 	"github.com/vigolium/vigolium/pkg/modules/active/ssrf_blind"
 	"github.com/vigolium/vigolium/pkg/modules/active/ssrf_detection"
 	"github.com/vigolium/vigolium/pkg/modules/active/ssrf_filter_bypass"
@@ -248,6 +254,15 @@ func registerActiveModules(r *Registry) {
 	r.RegisterActive(upgrade_routing_ssrf.New())
 	// Active modules - SSTI (Blind)
 	r.RegisterActive(ssti_blind.New())
+	// Active modules - SSI / server-side JavaScript / SMTP header injection
+	r.RegisterActive(ssi_injection.New())
+	r.RegisterActive(server_side_js_injection.New())
+	r.RegisterActive(smtp_header_injection.New())
+	// Active modules - React Server Components RCE
+	r.RegisterActive(react_rsc_rce.New())
+	// Active modules - spoofable-header dependent response / path-relative stylesheet
+	r.RegisterActive(dependent_response.New())
+	r.RegisterActive(path_relative_stylesheet.New())
 	// Active modules - OAST (Out-of-Band)
 	r.RegisterActive(oast_probe.New())
 	r.RegisterActive(proxy_pingback.New())

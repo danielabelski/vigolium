@@ -148,3 +148,89 @@ func TestScanPerRequest_Benign(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }
+
+// One representative value per family in knownSecretPatterns / the public lists.
+// Shared by the disjointness guard and the end-to-end tests so a value can never
+// be tightened in one place and left stale in the other.
+//
+// stripeRestrictedLiveKey is a Stripe RESTRICTED live key — a scoped SECRET key,
+// not a publishable one. Stripe's guidance is explicit that neither `sk_live_`
+// nor `rk_live_` may go into a variable a framework bundles into the client.
+const (
+	stripeRestrictedLiveKey  = "rk_live_" + "51H8xQ2mLp" + "7RtY4vNb3K" + "wZ6dJ9sFgA"
+	stripeSecretLiveKey      = "sk_live_" + "51H8xQ2mLp" + "7RtY4vNb3K" + "wZ6dJ9sFgA"
+	stripePublishableLiveKey = "pk_live_" + "51H8xQ2mLp" + "7RtY4vNb3K" + "wZ6dJ9sFgA"
+	stripePublishableTestKey = "pk_test_" + "51H8xQ2mLp" + "7RtY4vNb3K" + "wZ6dJ9sFgA"
+	githubPAT                = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+	slackBotToken            = "xoxb-24938" + "27450-2492" + "837401-Ff8" + "3jdkeExamp" + "le920Slack"
+	googleBrowserAPIKey      = "AIzaSyB1a2b3c4d5e6f7g8h9i0jklmnopqrstuv"
+	googleOAuthClientID      = "111111111111-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6.apps.googleusercontent.com"
+	firebaseWebAppID         = "1:111111111111:web:a1b2c3d4e5f6a7b8"
+	recaptchaSiteKey         = "6LfExampleSiteKeyValue0000000000000000AB"
+	branchLiveKey            = "key_live_hK4mZq8tRw2vNp6xLb3yFc9sJd5g"
+	branchTestKey            = "key_test_hK4mZq8tRw2vNp6xLb3yFc9sJd5g"
+	braintreeTokenizationKey = "production_qw83hs21_kd94mzp67vbx2r"
+	salesforceConsumerKey    = "3MVG9fTLmJ60pJ5KxSmtobJLmmeX3Yr9sJrDKgSb2xhl1znSnx8kH1.e7BbBcInj7bhGxZij011PyyEMAP23X"
+)
+
+// TestKnownValueListsAreDisjoint is the structural guard behind assessCredential's
+// ordering: no value may be classified as both a known secret and publishable. An
+// entry that lands in both used to be resolved in the public list's favour and
+// dropped outright, which is how a bundled Stripe restricted live key went
+// unreported.
+func TestKnownValueListsAreDisjoint(t *testing.T) {
+	t.Parallel()
+	for _, v := range []string{
+		stripeRestrictedLiveKey, stripeSecretLiveKey, githubPAT, slackBotToken,
+		stripePublishableLiveKey, stripePublishableTestKey, googleBrowserAPIKey,
+		googleOAuthClientID, firebaseWebAppID, recaptchaSiteKey,
+		branchLiveKey, branchTestKey, braintreeTokenizationKey, salesforceConsumerKey,
+	} {
+		var secretLabel string
+		for _, pattern := range knownSecretPatterns {
+			if pattern.re.MatchString(v) {
+				secretLabel = pattern.name
+				break
+			}
+		}
+		if secretLabel != "" && isKnownPublicValue(v) {
+			t.Errorf("%q is classified as both %q and publishable — assessCredential would have to pick one", v, secretLabel)
+		}
+	}
+}
+
+// TestScanPerRequest_StripeRestrictedKeyIsReported pins the regression: a
+// restricted live key bundled into a public framework variable is a leaked secret.
+func TestScanPerRequest_StripeRestrictedKeyIsReported(t *testing.T) {
+	t.Parallel()
+	body := `const cfg = {NEXT_PUBLIC_STRIPE_KEY: "` + stripeRestrictedLiveKey + `"};`
+	ctx := makeHTTPCtx("/_next/static/chunk.js", "application/javascript", body)
+	results, err := New().ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, results, "a bundled rk_live_ restricted key must be reported")
+	assert.Equal(t, severity.High, results[0].Info.Severity)
+	assert.Equal(t, "Stripe secret key", results[0].Metadata["credential_class"])
+}
+
+// TestScanPerRequest_PublicBrowserKeysAreNotCredentials covers the families that
+// a front end must ship. Each is long and high-entropy enough to reach the
+// "unrecognized high-entropy key" branch, so only the public list keeps them out.
+func TestScanPerRequest_PublicBrowserKeysAreNotCredentials(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, value string }{
+		{"recaptcha site key", recaptchaSiteKey},
+		{"branch.io key", branchLiveKey},
+		{"braintree tokenization key", braintreeTokenizationKey},
+		{"salesforce consumer key", salesforceConsumerKey},
+		{"stripe publishable key", stripePublishableLiveKey},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := `const cfg = {NEXT_PUBLIC_VENDOR_KEY: "` + tc.value + `"};`
+			ctx := makeHTTPCtx("/_next/static/chunk.js", "application/javascript", body)
+			results, err := New().ScanPerRequest(ctx, &modkit.ScanContext{})
+			require.NoError(t, err)
+			assert.Empty(t, results, "%s is public by design and must not be reported", tc.name)
+		})
+	}
+}

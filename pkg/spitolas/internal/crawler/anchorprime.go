@@ -78,8 +78,38 @@ func (c *Crawler) primeAnchorLinks(ctx context.Context, page *browser.Page) {
 // crawl, marking them primed. It enforces two caps: a per-shape cap (at most
 // perShape distinct value-variants of one path+param-name set — mirrors the
 // capture's variant cap so priming never fetches more than the capture keeps) and
-// a crawl-wide total cap (maxTotal, <=0 disables). Safe for concurrent use.
+// a crawl-wide total cap on the SIZE of the shared primed set (maxTotal, <=0
+// disables). Safe for concurrent use.
 func (c *Crawler) selectUnprimedLinks(in []string, maxTotal, perShape int) []string {
+	return c.selectUnprimed(in, perShape, func(taken int) bool {
+		return maxTotal > 0 && len(c.primedLinks) >= maxTotal
+	})
+}
+
+// selectUnprimedLinksBudgeted returns up to maxNew URLs from in that have not
+// been primed yet this crawl, marking them primed and honouring the same
+// per-shape variant cap.
+//
+// It differs from selectUnprimedLinks in what the cap counts. That one bounds the
+// size of the shared primed set, which is right for the anchor primer (its budget
+// is the crawl's total priming allowance) but wrong for any second source: the
+// two would then compete for one number, and whichever primer ran first would
+// silently consume the other's budget. This bounds how many NEW URLs this call
+// contributes, so a caller gets its own allowance while still sharing the dedup
+// set — a URL reachable both as a link and as a scraped string is fetched once.
+func (c *Crawler) selectUnprimedLinksBudgeted(in []string, maxNew, perShape int) []string {
+	out := c.selectUnprimed(in, perShape, func(taken int) bool {
+		return maxNew > 0 && taken >= maxNew
+	})
+	return out
+}
+
+// selectUnprimed is the shared body of the two selectors: dedup against the
+// crawl-wide primed set, cap distinct value-variants per endpoint shape, and stop
+// when atCap reports the caller's budget is spent. atCap is called with the
+// number taken so far and runs under primedLinksMu, so it may read the shared
+// maps. Safe for concurrent use.
+func (c *Crawler) selectUnprimed(in []string, perShape int, atCap func(taken int) bool) []string {
 	c.primedLinksMu.Lock()
 	defer c.primedLinksMu.Unlock()
 	if c.primedLinks == nil {
@@ -93,7 +123,7 @@ func (c *Crawler) selectUnprimedLinks(in []string, maxTotal, perShape int) []str
 	}
 	out := make([]string, 0, len(in))
 	for _, u := range in {
-		if maxTotal > 0 && len(c.primedLinks) >= maxTotal {
+		if atCap(len(out)) {
 			break
 		}
 		if c.primedLinks[u] {

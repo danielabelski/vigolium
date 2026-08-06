@@ -1,6 +1,10 @@
 package secret_detect
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/vigolium/vigolium/pkg/modules/modkit"
+)
 
 // IsValueShapeNoise reports whether a matched secret VALUE is a structural false
 // positive by its shape alone. The first three shapes are caught regardless of
@@ -63,7 +67,7 @@ func IsValueShapeNoise(ruleID, ruleName, secret string) bool {
 	if s == "" {
 		return false
 	}
-	if !IsReCaptchaSiteKey(ruleName) && isReCaptchaSiteKeyShape(s) {
+	if !IsReCaptchaSiteKey(ruleName) && modkit.IsReCaptchaSiteKeyShape(s) {
 		return true
 	}
 	if hasNonCredentialChar(s) {
@@ -363,22 +367,6 @@ func isUUID(s string) bool {
 		s[8] == '-' && s[13] == '-' && s[18] == '-' && s[23] == '-' &&
 		isHexRun(s[0:8]) && isHexRun(s[9:13]) && isHexRun(s[14:18]) &&
 		isHexRun(s[19:23]) && isHexRun(s[24:36])
-}
-
-// isReCaptchaSiteKeyShape reports whether s has the Google reCAPTCHA site-key
-// shape: the literal prefix "6L" followed by 38 URL-safe-base64 characters
-// (40 total). Both reCAPTCHA v2 and v3 site keys use this format.
-func isReCaptchaSiteKeyShape(s string) bool {
-	if len(s) != 40 || s[0] != '6' || s[1] != 'L' {
-		return false
-	}
-	for i := 2; i < len(s); i++ {
-		c := s[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '_' && c != '-' {
-			return false
-		}
-	}
-	return true
 }
 
 // hasNonCredentialChar reports whether s contains a character that never appears

@@ -55,6 +55,9 @@ scanning profile.
 # A file of targets, one URL per line
 vigolium scan -T targets.txt
 
+# A Burp Suite scope export (include rules become targets, auto-detected)
+vigolium scan -T scope.json
+
 # From an OpenAPI / Swagger spec
 vigolium scan -i api.yaml -I openapi -t https://api.example.com
 
@@ -66,8 +69,13 @@ echo "curl -X POST -d 'user=admin' https://example.com/login" | vigolium scan-re
 ```
 
 Supported input modes (`-I`): `urls`, `openapi`/`swagger`, `postman`, `curl`,
-`burpraw`, `burpxml`/`burp`, `nuclei-output`/`nuclei`, `har`, and `deparos`.
-Run `vigolium --list-input-mode` for aliases and examples.
+`burpraw`, `burpxml`/`burp`, `burpscope`, `nuclei-output`/`nuclei`, `har`, and
+`deparos`. Run `vigolium --list-input-mode` for aliases and examples.
+
+Note the two flags are not interchangeable: `-T/--target-file` reads its file as
+one target URL per line, so every other format goes through `-i/--input`. The
+exceptions are the two formats that are themselves target lists — `urls` and
+`burpscope` — which `-T` accepts directly.
 
 ## 4. Pick specific modules (optional)
 

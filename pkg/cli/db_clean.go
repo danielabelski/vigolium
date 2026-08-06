@@ -59,7 +59,7 @@ func init() {
 	dbCleanCmd.Flags().BoolVar(&cleanAll, "all", false, "Delete every row from all data tables (requires --force)")
 	dbCleanCmd.Flags().StringVar(&cleanHost, "host", "", "Delete records matching the specified hostname")
 	dbCleanCmd.Flags().StringVar(&cleanScanUUID, "scan-uuid", "", "Delete records belonging to the specified scan UUID")
-	dbCleanCmd.Flags().StringVar(&cleanBefore, "before", "", "Delete records created before this date (YYYY-MM-DD)")
+	dbCleanCmd.Flags().StringVar(&cleanBefore, "before", "", fmt.Sprintf("Delete records created strictly before this time — %s (the named day itself is kept)", clicommon.TimeFilterSyntax))
 	dbCleanCmd.Flags().IntSliceVar(&cleanStatus, "status", nil, "Delete records with matching HTTP status codes")
 	dbCleanCmd.Flags().StringVar(&cleanSeverity, "severity", "", "Delete findings matching the specified severity level")
 
@@ -132,10 +132,13 @@ func runDBClean(cmd *cobra.Command, args []string) error {
 		return cleanAllTables(ctx, db)
 	}
 
-	// Build filters
+	// Build filters. --before is deliberately resolved with ParseSince, not the
+	// upper-bound ParseUntil: "before 2026-08-01" excludes the 1st, and the
+	// end-of-day snap an upper bound applies would silently widen a DELETE by a
+	// full day.
 	var dateFrom *time.Time
 	if cleanBefore != "" {
-		t, err := clicommon.ParseDate(cleanBefore)
+		t, err := clicommon.ParseSince(cleanBefore)
 		if err != nil {
 			return fmt.Errorf("invalid --before date: %w", err)
 		}

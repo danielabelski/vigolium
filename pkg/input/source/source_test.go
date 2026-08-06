@@ -402,3 +402,49 @@ func TestFileSourceParseErrorSurfacedOnceThenEOF(t *testing.T) {
 		require.ErrorIs(t, err, io.EOF, "Next call %d after the error should be io.EOF", i+1)
 	}
 }
+
+// TestNewFileSourceDetectsBurpScope guards the -T/--target-file path for Burp
+// scope exports: the file arrives with the default "urls" format, and reading
+// its JSON line by line would feed the scanner brace and regex fragments as
+// targets. Content sniffing must swap in the burpscope parser instead.
+func TestNewFileSourceDetectsBurpScope(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scope.json")
+	content := `{"target":{"scope":{"advanced_mode":true,"include":[
+	  {"enabled":true,"file":"^/.*","host":"^www\\.example\\.com$","port":"^443$","protocol":"https"}
+	]}}}`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	fs, err := NewFileSource(FileSourceConfig{FilePath: path, Format: "urls"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = fs.Close() })
+	assert.Equal(t, "burpscope", fs.Format().Name())
+
+	item, err := fs.Next(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, item)
+}
+
+// TestNewFileSourceExplicitFormatWinsOverSniff verifies the sniff only ever
+// displaces the URL-list default, so an explicit -I is never second-guessed.
+func TestNewFileSourceExplicitFormatWinsOverSniff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scope.json")
+	content := `{"target":{"scope":{"include":[{"enabled":true,"host":"^www\\.example\\.com$"}]}}}`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	fs, err := NewFileSource(FileSourceConfig{FilePath: path, Format: "har"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = fs.Close() })
+	assert.Equal(t, "har", fs.Format().Name())
+}
+
+// TestNewFileSourceURLListUnaffected keeps a plain target list on the URL parser
+// — the sniff must not fire on ordinary input.
+func TestNewFileSourceURLListUnaffected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.txt")
+	require.NoError(t, os.WriteFile(path, []byte("https://example.com/\n"), 0o644))
+
+	fs, err := NewFileSource(FileSourceConfig{FilePath: path, Format: "urls"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = fs.Close() })
+	assert.Equal(t, "urls", fs.Format().Name())
+}

@@ -303,6 +303,47 @@ type Config struct {
 	// is off. The reused registered identity is always tried regardless.
 	LoginCredentialFullList bool
 
+	// Frontier seeding from the host's own route declarations — see seedFrontier
+	// for what each file contributes. Both default on.
+	SeedFromRobots  bool
+	SeedFromSitemap bool
+	// SeedMaxURLs caps how many declared locations are recorded; SeedMaxCrawlURLs
+	// how many are additionally browsed into states. The second is much smaller:
+	// a request is cheap, a navigation plus settle is not.
+	SeedMaxURLs      int
+	SeedMaxCrawlURLs int
+
+	// SpeculativeLinks makes the crawler scrape URL-like strings out of HTML
+	// comments and inline script in the LIVE document and fetch the same-origin
+	// ones — see harvestSpeculativeLinks. Default on.
+	SpeculativeLinks    bool
+	SpeculativeMaxLinks int
+
+	// SelfRegister makes the crawler look for a public signup form, complete it
+	// with a generated identity, and reuse that identity to log in. On an app
+	// with open registration the entire authenticated surface is otherwise
+	// invisible to an unauthenticated crawl. Off by default — creating an
+	// account is a write, so it stays an explicit opt-in; the runner enables it
+	// at deep intensity.
+	SelfRegister bool
+
+	// FollowUpPasses is how many extra sweeps to run after the action queue
+	// drains with budget left, re-walking for actions that only became available
+	// partway through the first pass — see runFollowUpPasses. 0 disables.
+	FollowUpPasses int
+
+	// RetryFailedActions re-attempts actions that failed mid-crawl once the queue
+	// drains, bounded by RetryMaxActions — see retryFailedActions. Default on.
+	RetryFailedActions bool
+	RetryMaxActions    int
+
+	// GraphOutputPath, when set, is a file path the finished state graph is
+	// serialized to (states, edges, and the selector each edge was taken by).
+	// The captured traffic says what was requested; the graph says how the
+	// crawler got there, which is what makes a run reproducible and lets a
+	// later pass re-walk to a specific state instead of rediscovering it.
+	GraphOutputPath string
+
 	CrawlScope CrawlScope // Custom URL scope filter (nil = default same-domain check)
 
 	// Crawl strategy - determines both state selection and action selection
@@ -463,6 +504,26 @@ func New(targetURL string) (*Config, error) {
 		LoginCTAPriming:   true,
 		AutoScroll:        true,
 
+		// Seed the frontier from the host's own route declarations, and scrape
+		// URL-like strings out of the rendered document. Both surface locations
+		// an interaction crawl cannot reach by clicking.
+		SeedFromRobots:      true,
+		SeedFromSitemap:     true,
+		SeedMaxURLs:         defaultSeedMaxURLs,
+		SeedMaxCrawlURLs:    defaultSeedMaxCrawlURLs,
+		SpeculativeLinks:    true,
+		SpeculativeMaxLinks: defaultSpeculativeMaxLinks,
+
+		// One extra sweep for states unlocked out of order, and a retry sweep for
+		// actions that failed for transient reasons.
+		FollowUpPasses:     1,
+		RetryFailedActions: true,
+		RetryMaxActions:    defaultRetryMaxActions,
+
+		// Registering an account is a write, so it stays opt-in; the runner turns
+		// it on at deep intensity.
+		SelfRegister: false,
+
 		// Common-credential login attempts are off by default; the runner turns
 		// them on at balanced (minimal list) and deep (full list). They only ever
 		// run against a confirmed local login form, so leaving this off for an
@@ -513,6 +574,29 @@ const defaultAnchorLinkMaxAssets = 300
 // harvesting. Kept short so it only absorbs the tail of a framework's
 // after-paint subframe loads rather than blocking on long-poll/XHR-heavy pages.
 const defaultNetworkIdleTimeout = 3 * time.Second
+
+// defaultSeedMaxURLs bounds how many robots/sitemap-declared locations are
+// recorded. Large enough to absorb an ordinary site's whole sitemap, small
+// enough that a catalogue exporting tens of thousands of product pages does not
+// turn one crawl into a bulk download.
+const defaultSeedMaxURLs = 1000
+
+// defaultSeedMaxCrawlURLs bounds how many of those locations get a real browser
+// visit. Two orders of magnitude below the record cap: the point is to reach a
+// few structurally distinct sections the seed page never linked, not to render
+// the sitemap.
+const defaultSeedMaxCrawlURLs = 25
+
+// defaultSpeculativeMaxLinks bounds how many URL-like strings scraped from
+// comments and inline script are fetched over the whole crawl. Inline script is
+// noisy — a bundle's string table can yield hundreds of path-shaped fragments —
+// so the cap is what keeps a speculative source from outweighing observed links.
+const defaultSpeculativeMaxLinks = 300
+
+// defaultRetryMaxActions bounds the end-of-crawl retry sweep. Transient failures
+// come in small numbers; a run failing more actions than this has a systemic
+// problem (the app is down, the browser is wedged) that retrying will not fix.
+const defaultRetryMaxActions = 50
 
 // defaultServiceWorkerMaxAssets bounds how many service-worker-listed assets the
 // priming step fetches. Angular ngsw.json manifests routinely list a few dozen

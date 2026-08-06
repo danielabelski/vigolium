@@ -9,11 +9,11 @@ const (
 )
 
 var (
-	ModuleDesc = `**What it means:** User-supplied input reaches a server-side template engine (Jinja2, Twig, Freemarker, ERB, EJS, Pebble) and is evaluated as template code, not data. The response shows no visible difference (a blind variant), but the attacker controls code inside the engine.
+	ModuleDesc = `**What it means:** User input reaches a server-side template engine (Jinja2, Twig, Freemarker, ERB, or a JVM engine — Spring EL, Thymeleaf, Velocity, OGNL/Struts) and is evaluated as template code, not data. The attacker controls code inside the engine; the blind response looks unchanged.
 
-**How it's exploited:** Confirmed two ways - a payload running nslookup to an out-of-band host yields a DNS callback (command execution), and paired heavy/trivial loops whose consistent delay flags a time-based signal. An attacker escalates this to remote code execution.
+**How it's exploited:** Confirmed via an out-of-band callback — a shell nslookup, or a pure-JVM DNS/URL resolution where process execution is sandboxed — or paired heavy/trivial loops whose delay flags a time-based signal. An attacker escalates to remote code execution.
 
-**Fix:** Never pass untrusted input into template source; render user data only through context-escaped variables.`
+**Fix:** Never pass untrusted input into template source; render user data only through escaped variables.`
 
 	ModuleConfirmation = "Confirmed via OAST DNS callback from template evaluation or consistent time-delay differential"
 	ModuleSeverity     = severity.Critical

@@ -125,7 +125,36 @@ func TestProbeChecks(t *testing.T) {
 }
 
 func TestProbeCount(t *testing.T) {
-	assert.Len(t, probes, 8, "expected exactly 8 CORS probes")
+	assert.Len(t, probes, 10, "expected exactly 10 CORS probes")
+}
+
+func TestOriginDotMutations(t *testing.T) {
+	cases := []struct {
+		host        string
+		replaceLast string
+		deleteFirst string
+	}{
+		{"sub.example.com", "sub.examplexcom", "subexample.com"},
+		{"example.com", "examplexcom", "examplecom"},
+		{"a.b.c.d.com", "a.b.c.dxcom", "ab.c.d.com"},
+		// not applicable -> ""
+		{"localhost", "", ""},
+		{"127.0.0.1", "", ""},
+		{"10.0.0.1", "", ""},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.replaceLast, replaceLastDot(c.host), "replaceLastDot(%q)", c.host)
+		assert.Equal(t, c.deleteFirst, deleteFirstDot(c.host), "deleteFirstDot(%q)", c.host)
+	}
+}
+
+func TestIsIPv4(t *testing.T) {
+	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "255.255.255.255", "1.2.3.4"} {
+		assert.True(t, isIPv4(ip), "%q should be IPv4", ip)
+	}
+	for _, notIP := range []string{"example.com", "sub.example.com", "1.2.3", "1.2.3.4.5", "a.b.c.d", "1.2.3.x"} {
+		assert.False(t, isIPv4(notIP), "%q should not be IPv4", notIP)
+	}
 }
 
 func TestProbeOrigins(t *testing.T) {

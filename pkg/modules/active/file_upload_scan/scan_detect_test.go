@@ -15,6 +15,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 // uploadCtx builds a multipart/form-data POST request (with a file part) aimed
@@ -90,4 +91,39 @@ func TestScanPerRequest_VerifiedUploadReported(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "retrievable upload echoing the marker must fire")
 	assert.Equal(t, "Arbitrary File Upload", res[0].Info.Name)
+	assert.Equal(t, severity.High, res[0].Info.Severity, "a stored-but-not-executed upload is High")
+}
+
+// TestScanPerRequest_ExecutedUploadIsRCE models a server that actually executes the
+// uploaded PHP: when serving the stored file it evaluates the arithmetic concat, so
+// the retrieved body carries the execution signature. The finding is upgraded to
+// Critical RCE rather than a plain arbitrary-upload High.
+func TestScanPerRequest_ExecutedUploadIsRCE(t *testing.T) {
+	t.Parallel()
+	var lastUpload string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			b, _ := io.ReadAll(r.Body)
+			lastUpload = string(b)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/uploads/") {
+			// Simulate the PHP interpreter evaluating "<marker>".(6*7)."<marker>"
+			// into "<marker>42<marker>".
+			executed := strings.ReplaceAll(lastUpload, `".(6*7)."`, "42")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(executed))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	res, err := New().ScanPerRequest(uploadCtx(t, srv.URL), modtest.Requester(t), &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "an executing upload must fire")
+	assert.Equal(t, "Arbitrary File Upload to Remote Code Execution", res[0].Info.Name)
+	assert.Equal(t, severity.Critical, res[0].Info.Severity)
 }

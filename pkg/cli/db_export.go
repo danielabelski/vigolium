@@ -59,8 +59,9 @@ func init() {
 	dbExportCmd.Flags().StringVar(&exportPath, "path", "", "Filter records by URL path pattern")
 	dbExportCmd.Flags().StringVar(&exportScanUUID, "scan-uuid", "", "Filter records by scan UUID")
 	dbExportCmd.Flags().StringVar(&exportSeverity, "severity", "", "Filter findings by severity level")
-	dbExportCmd.Flags().StringVar(&exportFrom, "from", "", "Export records created after this date (YYYY-MM-DD)")
-	dbExportCmd.Flags().StringVar(&exportTo, "to", "", "Export records created before this date (YYYY-MM-DD)")
+	dbExportCmd.Flags().StringVar(&exportFrom, "from", "", fmt.Sprintf("Export records at or after this time — %s (alias: --since)", clicommon.TimeFilterSyntax))
+	dbExportCmd.Flags().StringVar(&exportTo, "to", "", fmt.Sprintf("Export records at or before this time — %s; %s (alias: --until)", clicommon.TimeFilterSyntax, clicommon.TimeFilterUpperBoundNote))
+	addFlagAliases(dbExportCmd, timeFilterAliases)
 
 	dbExportCmd.Flags().IntVar(&exportLimit, "limit", 0, "Maximum number of records to export, 0 for unlimited")
 	dbExportCmd.Flags().IntVar(&exportOffset, "offset", 0, "Number of records to skip before exporting")
@@ -111,20 +112,10 @@ func runDBExport(cmd *cobra.Command, args []string) error {
 	}
 
 	return runWithWatch(func() error {
-		var dateFrom, dateTo *time.Time
-		if exportFrom != "" {
-			t, err := clicommon.ParseDate(exportFrom)
-			if err != nil {
-				return fmt.Errorf("invalid --from date: %w", err)
-			}
-			dateFrom = &t
-		}
-		if exportTo != "" {
-			t, err := clicommon.ParseDate(exportTo)
-			if err != nil {
-				return fmt.Errorf("invalid --to date: %w", err)
-			}
-			dateTo = &t
+		dateFrom, dateTo, err := parseDateRangeFlags(exportFrom, exportTo,
+			timeFilterFromLabel, timeFilterToLabel)
+		if err != nil {
+			return err
 		}
 
 		var severities []string
@@ -199,20 +190,10 @@ func runDBExport(cmd *cobra.Command, args []string) error {
 // db export formats, scoped to the active project; the base defaults to
 // "vigolium" in the cwd when no -o is given.
 func runDBExportFS(db *database.DB) error {
-	var dateFrom, dateTo *time.Time
-	if exportFrom != "" {
-		t, err := clicommon.ParseDate(exportFrom)
-		if err != nil {
-			return fmt.Errorf("invalid --from date: %w", err)
-		}
-		dateFrom = &t
-	}
-	if exportTo != "" {
-		t, err := clicommon.ParseDate(exportTo)
-		if err != nil {
-			return fmt.Errorf("invalid --to date: %w", err)
-		}
-		dateTo = &t
+	dateFrom, dateTo, err := parseDateRangeFlags(exportFrom, exportTo,
+			timeFilterFromLabel, timeFilterToLabel)
+	if err != nil {
+		return err
 	}
 
 	var severities []string

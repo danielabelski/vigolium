@@ -164,9 +164,48 @@ func TestGenerateMarker(t *testing.T) {
 	}
 }
 
+func TestPhpWebShellExecutionSignature(t *testing.T) {
+	marker := "test-marker-123"
+	sig := markerExecSignature(marker)
+	if sig != marker+"42"+marker {
+		t.Fatalf("unexpected exec signature: %q", sig)
+	}
+	// The raw source must NOT contain the execution signature (that only appears once
+	// the interpreter evaluates the arithmetic) — otherwise a stored file would be
+	// misreported as executed.
+	shell := phpWebShell(marker, "")
+	if strings.Contains(shell, sig) {
+		t.Errorf("raw PHP source must not contain the execution signature: %q", shell)
+	}
+	if !strings.Contains(shell, marker) {
+		t.Errorf("PHP shell should contain the marker: %q", shell)
+	}
+	// With a collaborator host, the shell carries out-of-band callbacks.
+	oastShell := phpWebShell(marker, "abc.oast.example")
+	for _, want := range []string{"fsockopen", "gethostbyname", "abc.oast.example"} {
+		if !strings.Contains(oastShell, want) {
+			t.Errorf("OAST PHP shell should contain %q: %q", want, oastShell)
+		}
+	}
+}
+
+func TestBuildProbesWithOAST(t *testing.T) {
+	probes := buildProbes("m", "cb.oast.example")
+	if len(probes) != 12 {
+		t.Fatalf("expected 12 probes with OAST, got %d", len(probes))
+	}
+	last := probes[len(probes)-1]
+	if last.name != "SVG OAST" || last.probeType != "oast" {
+		t.Errorf("last probe should be the SVG OAST probe, got %q/%q", last.name, last.probeType)
+	}
+	if !strings.Contains(last.body, "cb.oast.example") {
+		t.Errorf("SVG OAST probe should embed the collaborator host: %q", last.body)
+	}
+}
+
 func TestBuildProbes(t *testing.T) {
 	marker := "test-marker-123"
-	probes := buildProbes(marker)
+	probes := buildProbes(marker, "")
 
 	if len(probes) != 11 {
 		t.Fatalf("expected 11 probes, got %d", len(probes))
