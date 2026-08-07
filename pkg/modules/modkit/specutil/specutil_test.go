@@ -1,6 +1,7 @@
 package specutil
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
@@ -182,5 +183,80 @@ func TestParseSpec_Unknown(t *testing.T) {
 	}
 	if len(endpoints) != 0 {
 		t.Errorf("ParseSpec(unknown) returned %d endpoints, want 0", len(endpoints))
+	}
+}
+
+// minimalWSDL is a compact document/literal SOAP 1.1 service (host example.com)
+// used to exercise the WSDL branch of the spec auto-ingest path.
+const minimalWSDL = `<?xml version="1.0" encoding="utf-8"?>
+<wsdl:definitions xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:tns="http://tempuri.org/" xmlns:s="http://www.w3.org/2001/XMLSchema" targetNamespace="http://tempuri.org/" xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">
+  <wsdl:types>
+    <s:schema elementFormDefault="qualified" targetNamespace="http://tempuri.org/">
+      <s:element name="Echo"><s:complexType><s:sequence>
+        <s:element minOccurs="0" maxOccurs="1" name="msg" type="s:string"/>
+      </s:sequence></s:complexType></s:element>
+    </s:schema>
+  </wsdl:types>
+  <wsdl:message name="EchoIn"><wsdl:part name="parameters" element="tns:Echo"/></wsdl:message>
+  <wsdl:portType name="SvcSoap">
+    <wsdl:operation name="Echo"><wsdl:input message="tns:EchoIn"/></wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="SvcSoap" type="tns:SvcSoap">
+    <soap:binding transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Echo">
+      <soap:operation soapAction="http://tempuri.org/Echo" style="document"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="Svc">
+    <wsdl:port name="SvcSoap" binding="tns:SvcSoap">
+      <soap:address location="http://www.example.com/svc.asmx"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>`
+
+func TestDetectSpecType_WSDL(t *testing.T) {
+	if got := DetectSpecType([]byte(minimalWSDL)); got != WSDL {
+		t.Errorf("DetectSpecType(wsdl) = %d, want WSDL (%d)", got, WSDL)
+	}
+	// A non-WSDL XML response must not be misclassified as a spec.
+	if got := DetectSpecType([]byte(`<?xml version="1.0"?><urlset><url><loc>x</loc></url></urlset>`)); got != Unknown {
+		t.Errorf("DetectSpecType(sitemap xml) = %d, want Unknown", got)
+	}
+}
+
+func TestParseSpecTyped_WSDL_HostOverride(t *testing.T) {
+	svc, err := httpmsg.ParseService("https://target.internal")
+	if err != nil {
+		t.Fatalf("ParseService: %v", err)
+	}
+	// baseURL (discovered service host) overrides the WSDL's example.com address.
+	endpoints, err := ParseSpecTyped(WSDL, []byte(minimalWSDL), "https://target.internal", svc)
+	if err != nil {
+		t.Fatalf("ParseSpecTyped(WSDL): %v", err)
+	}
+	if len(endpoints) != 1 {
+		t.Fatalf("expected 1 generated SOAP request, got %d", len(endpoints))
+	}
+	raw := string(endpoints[0].Request().Raw())
+	if !strings.Contains(raw, "POST /svc.asmx ") {
+		t.Errorf("expected POST to WSDL path /svc.asmx, got: %q", raw)
+	}
+	if !strings.Contains(raw, "Host: target.internal") {
+		t.Errorf("host override not applied:\n%s", raw)
+	}
+	if !strings.Contains(raw, "<Echo") {
+		t.Errorf("SOAP body missing operation element:\n%s", raw)
+	}
+}
+
+func TestIsSpecContentType_XML(t *testing.T) {
+	for _, ct := range []string{"text/xml", "application/xml; charset=utf-8", "application/wsdl+xml", "application/soap+xml"} {
+		if !IsSpecContentType(ct) {
+			t.Errorf("IsSpecContentType(%q) = false, want true", ct)
+		}
+	}
+	if IsSpecContentType("image/png") {
+		t.Error("IsSpecContentType(image/png) = true, want false")
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
 	"github.com/vigolium/vigolium/pkg/input/formats/postman"
 	"github.com/vigolium/vigolium/pkg/input/formats/urls"
+	"github.com/vigolium/vigolium/pkg/input/formats/wsdl"
 	"github.com/vigolium/vigolium/pkg/work"
 	"go.uber.org/zap"
 )
@@ -65,6 +66,16 @@ func NewFileSource(cfg FileSourceConfig) (*FileSource, error) {
 		format = burpscope.New()
 	}
 
+	// A WSDL/SOAP service description arrives through the same slot as a plain
+	// URL list (-i with the default -I urls) and reading it line by line would
+	// hand the scanner XML fragments as targets. Content-sniff it — the file may
+	// carry a .wsdl, .xml, or no extension — and displace only the URL-list
+	// default, so an explicit -I always wins. Mirrors the burpscope sniff above.
+	if _, isURLList := format.(*urls.URLListFormat); isURLList && wsdl.SniffFile(cfg.FilePath) {
+		zap.L().Info("detected WSDL/SOAP service description, generating SOAP requests", zap.String("file", cfg.FilePath))
+		format = wsdl.New()
+	}
+
 	// Apply format options
 	format.SetOptions(cfg.FormatOptions)
 
@@ -98,6 +109,7 @@ var formatRegistry = []formatEntry{
 	{"urls", []string{"url", "list"}, func() formats.Format { return urls.New() }},
 	{"nuclei", []string{"nuclei-output"}, func() formats.Format { return nuclei.New() }},
 	{"openapi", []string{"swagger"}, func() formats.Format { return openapi.New() }},
+	{"wsdl", []string{"soap", "svc"}, func() formats.Format { return wsdl.New() }},
 	{"postman", nil, func() formats.Format { return postman.New() }},
 	{"curl", nil, func() formats.Format { return curl.New() }},
 	{"burpraw", []string{"burp-raw", "raw"}, func() formats.Format { return burpraw.New() }},
@@ -157,6 +169,26 @@ func ParseFileRecords(filePath, formatName string, max int) ([]*httpmsg.HttpRequ
 // This allows callers to configure format-specific options after creation.
 func (f *FileSource) Format() formats.Format {
 	return f.format
+}
+
+// FirstFileSource returns the first *FileSource reachable from src, unwrapping a
+// MultiSource (the shape NewInputSource produces when targets/-t and a file/-i
+// are combined). Returns nil when there is none. Callers use it to configure
+// format-specific options (OpenAPI BaseURL, WSDL endpoint) on the file parser
+// after the source is built — a bare `inputSource.(*FileSource)` misses the
+// parser whenever -t is also present, silently dropping the override.
+func FirstFileSource(src InputSource) *FileSource {
+	switch s := src.(type) {
+	case *FileSource:
+		return s
+	case *MultiSource:
+		for _, child := range s.sources {
+			if fs := FirstFileSource(child); fs != nil {
+				return fs
+			}
+		}
+	}
+	return nil
 }
 
 // Next returns the next item from the file.

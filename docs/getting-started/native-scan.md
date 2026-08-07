@@ -148,6 +148,10 @@ vigolium scan --stateless -T targets.txt --format jsonl -o results --split-by-ho
 vigolium scan --stateless -i api.yaml -I openapi \
   -t https://api.example.com --format jsonl -o results
 
+# WSDL / SOAP service description
+vigolium scan --stateless -i service.wsdl -I wsdl \
+  -t https://soap.example.com --format jsonl -o results
+
 # Postman collection
 vigolium scan --stateless -i collection.json -I postman \
   -t https://api.example.com --format jsonl -o results

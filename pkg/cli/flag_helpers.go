@@ -21,7 +21,7 @@ func registerInputSourceFlags(flags *pflag.FlagSet) {
 	flags.StringArrayVarP(&globalTargets, "target", "t", nil, "Target URL to scan (repeatable). Commas are literal so a URL query like ?ids=1,2,3 stays one target — repeat -t for multiple targets.")
 	flags.StringArrayVarP(&globalTargetFiles, "target-file", "T", nil, "File containing target URLs (one per line; repeatable for multiple files). Commas in the path are literal.")
 	flags.StringVarP(&globalInput, "input", "i", "-", "Input file path or spec (use - for stdin)")
-	flags.StringVarP(&globalInputMode, "input-mode", "I", "urls", "Input format: urls, openapi, swagger, burp, curl, nuclei, har (see --list-input-mode)")
+	flags.StringVarP(&globalInputMode, "input-mode", "I", "urls", "Input format: urls, openapi, swagger, wsdl, burp, curl, nuclei, har (see --list-input-mode)")
 	flags.DurationVar(&globalInputReadTimeout, "input-read-timeout", 3*time.Minute, "Timeout for reading input from stdin or file")
 }
 

@@ -42,12 +42,12 @@ Responses are fetched by default (source `ingest-cli`); disable with
 |------|-------------|
 | `-t <url>` | Base URL / target for the ingested data (required for specs that carry only paths) |
 | `-i <file>` | Input file path (`-` for stdin) |
-| `-I <format>` | Input format (`urls`, `openapi`, `swagger`, `burp`, `curl`, `har`, `postman`, `nuclei`, `burpscope`) |
+| `-I <format>` | Input format (`urls`, `openapi`, `swagger`, `wsdl`, `burp`, `curl`, `har`, `postman`, `nuclei`, `burpscope`) |
 | `-T <file>` | Target-file: one target URL per line (for `urls`/`burpscope` only — a spec goes through `-i`) |
 | `-S` | After ingesting, scan the records (local mode only) |
 | `--spec-url` | Use server URLs from the OpenAPI/Swagger spec |
-| `--spec-header` | HTTP header(s) for OpenAPI requests (repeatable) |
-| `--spec-var` | OpenAPI parameter values as `key=value` (repeatable) |
+| `--spec-header` | HTTP header(s) for OpenAPI/WSDL requests (repeatable) |
+| `--spec-var` | OpenAPI parameter / WSDL element values as `key=value` (repeatable) |
 | `--spec-default` | Default value for required parameters (default: `1`) |
 | `--disable-fetch-response` | Store request-only (don't fetch responses) |
 | `--scope-origin` | Origin scope mode for filtering |
@@ -68,8 +68,8 @@ Responses are fetched by default (source `ingest-cli`); disable with
 
 ## Input formats — one example each
 
-`-I` selects the parser. OpenAPI/Swagger auto-detect from file content, so `-I`
-is optional for those.
+`-I` selects the parser. OpenAPI/Swagger and WSDL auto-detect from file content,
+so `-I` is optional for those.
 
 ```bash
 # urls (default) — a single target, or a file of targets.
@@ -81,6 +81,11 @@ vigolium ingest -I openapi -i openapi.yaml -t https://api.target.example
 
 # Swagger 2.0.
 vigolium ingest -I swagger -i swagger.json -t https://api.target.example
+
+# WSDL 1.1 / SOAP — expand every bound operation into a SOAP POST. `-I` is
+# optional (a .wsdl is content-sniffed); a .svc/.asmx URL auto-fetches its WSDL.
+vigolium ingest -I wsdl -i service.wsdl -t https://api.target.example
+vigolium ingest -i https://api.target.example/Service.svc
 
 # Burp Suite XML export.
 vigolium ingest -I burp -i burp-export.xml
@@ -123,6 +128,31 @@ vigolium ingest -I openapi -i spec.yaml -t https://api.target.example \
 vigolium ingest -I openapi -i spec.yaml -t https://api.target.example \
   --spec-var userId=42 --spec-var status=active --spec-default 1
 ```
+
+### WSDL / SOAP
+
+A WSDL becomes one SOAP POST per bound operation (SOAP 1.1 with a `SOAPAction`
+header, or SOAP 1.2 with `action=` in the content type; document/literal and rpc
+styles). The XML body is synthesized from the WSDL's inline XSD types and is
+fuzzable by the normal active modules. `--spec-header` and `--spec-var` apply
+here too — `--spec-var` overrides a leaf element's placeholder value by its local
+name.
+
+```bash
+# Endpoint comes from the WSDL's <soap:address>; -t overrides only the host
+# (scheme+host from -t, service path from the WSDL) to keep traffic in scope.
+vigolium ingest -I wsdl -i service.wsdl -t https://soap.target.example \
+  --spec-header "Authorization: Bearer $TOKEN" \
+  --spec-var userName=admin
+
+# A live WCF (.svc) or ASMX (.asmx) endpoint — the WSDL is fetched automatically
+# (?singleWsdl / ?WSDL), so no local file is needed.
+vigolium ingest -i https://soap.target.example/Service.svc
+```
+
+WSDL 2.0 and unresolved multi-file `<import>` are not supported — point at a
+`.svc` `?singleWsdl` (which inlines schemas) when a WSDL splits its types across
+files.
 
 ## Combined examples
 

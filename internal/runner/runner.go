@@ -21,6 +21,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
+	"github.com/vigolium/vigolium/pkg/input/formats/wsdl"
 	"github.com/vigolium/vigolium/pkg/input/source"
 	"github.com/vigolium/vigolium/pkg/jsext"
 	"github.com/vigolium/vigolium/pkg/notify"
@@ -266,25 +267,31 @@ func New(options *types.Options) (*Runner, error) {
 		return nil, errors.Wrap(err, "could not create input source")
 	}
 
-	// Configure OpenAPI options if using OpenAPI/Swagger format
-	if options.InputFileMode == "openapi" || options.InputFileMode == "swagger" {
-		if fs, ok := inputSource.(*source.FileSource); ok {
-			if openapiFormat, ok := fs.Format().(*openapi.Format); ok {
-				oaOpts := openapi.Options{
-					BaseURL:              options.OpenAPIBaseURL,
-					UseSpecServers:       options.OpenAPIUseSpecServers,
-					Headers:              parseHeaders(options.SpecHeaders),
-					Variables:            parseVariables(options.OpenAPIVariables),
-					DefaultFallbackValue: options.OpenAPIDefaultParam,
-				}
-
-				// Load field type defaults from config
-				if cfg, err := config.LoadSettings(options.ConfigPath); err == nil {
-					oaOpts.FieldTypeDefaults = cfg.MutationStrategy.FieldTypeDefaults.ToMap()
-				}
-
-				openapiFormat.SetOpenAPIOptions(oaOpts)
+	// Configure spec-format options on the file parser. FirstFileSource unwraps a
+	// MultiSource so the override lands when targets/-t are combined with a file,
+	// and covers a content-sniffed .wsdl (resolved parser type, not the format
+	// string). The -t target is the OpenAPI BaseURL / WSDL endpoint host override.
+	if fs := source.FirstFileSource(inputSource); fs != nil {
+		switch parser := fs.Format().(type) {
+		case *openapi.Format:
+			oaOpts := openapi.Options{
+				BaseURL:              options.OpenAPIBaseURL,
+				UseSpecServers:       options.OpenAPIUseSpecServers,
+				Headers:              parseHeaders(options.SpecHeaders),
+				Variables:            parseVariables(options.OpenAPIVariables),
+				DefaultFallbackValue: options.OpenAPIDefaultParam,
 			}
+			// Load field type defaults from config
+			if cfg, err := config.LoadSettings(options.ConfigPath); err == nil {
+				oaOpts.FieldTypeDefaults = cfg.MutationStrategy.FieldTypeDefaults.ToMap()
+			}
+			parser.SetOpenAPIOptions(oaOpts)
+		case *wsdl.Format:
+			parser.SetWSDLOptions(wsdl.Options{
+				EndpointURL: options.OpenAPIBaseURL,
+				Headers:     parseHeaders(options.SpecHeaders),
+				Variables:   parseVariables(options.OpenAPIVariables),
+			})
 		}
 	}
 

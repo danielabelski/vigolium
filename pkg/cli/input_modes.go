@@ -40,6 +40,12 @@ var inputModes = []inputModeEntry{
 		Example:     "vigolium scan -i spec.yaml -I openapi -t https://api.example.com",
 	},
 	{
+		Name:        "wsdl",
+		Aliases:     []string{"soap", "svc"},
+		Description: "WSDL 1.1 / SOAP service description (.wsdl file or .svc/.asmx URL)",
+		Example:     "vigolium scan -i service.wsdl -I wsdl -t https://api.example.com",
+	},
+	{
 		Name:        "postman",
 		Aliases:     nil,
 		Description: "Postman Collection v2.1 JSON file",

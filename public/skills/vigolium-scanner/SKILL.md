@@ -268,13 +268,14 @@ Run one directly: `vigolium run discover -t <url>`.
 
 ## Input formats
 
-`-I <format>` selects the input type; OpenAPI specs auto-detect.
+`-I <format>` selects the input type; OpenAPI and WSDL auto-detect from content.
 
 | Format | Flag | Example |
 |--------|------|---------|
 | URLs *(default)* | `-I urls` | `-t https://target.example` or `-T targets.txt` |
 | OpenAPI 3.x | `-I openapi` | `-I openapi -i spec.yaml -t https://api.target.example` |
 | Swagger 2.0 | `-I swagger` | `-I swagger -i swagger.json` |
+| WSDL / SOAP | `-I wsdl` | `-I wsdl -i service.wsdl -t https://soap.target.example` — one SOAP POST per operation; a `.svc`/`.asmx` URL auto-fetches its WSDL |
 | Burp XML | `-I burp` | `-I burp -i burp-export.xml` |
 | cURL commands | `-I curl` | `-I curl -i requests.txt` |
 | Nuclei templates | `-I nuclei` | `-I nuclei -i templates/` |
@@ -285,6 +286,8 @@ Run one directly: `vigolium run discover -t <url>`.
 
 OpenAPI extras: `--spec-url` (use servers from the spec), `--spec-header`
 (auth), `--spec-var` (parameter values), `--spec-default` (fallback).
+WSDL reuses `--spec-header` (auth) and `--spec-var` (override a body element by
+its local name); `-t` overrides only the endpoint host, keeping the WSDL path.
 
 ## Output formats
 

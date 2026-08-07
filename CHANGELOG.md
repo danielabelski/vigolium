@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.10] - 2026-08-08
+
+A **WSDL / SOAP input-format** release: scan a SOAP service the way you scan an OpenAPI spec. No module changes (registry stays at 207 active + 116 passive).
+
+### Added
+
+- **`-I wsdl` (aliases `soap`/`svc`)** — parses a WSDL 1.1 / SOAP description into one SOAP POST per bound operation.
+- **SOAP 1.1 and 1.2 envelopes** — `SOAPAction` + `text/xml` for 1.1, `action=` in `application/soap+xml` for 1.2; document/literal and rpc styles.
+- **XSD-synthesized request bodies** — fuzzable by the active modules through the existing XML insertion points.
+- **Content-sniff auto-detection** — a `.wsdl` file is recognized without an explicit `-I`.
+- **`.svc`/`.asmx` URL support** — a live endpoint auto-fetches its WSDL (`?singleWsdl` / `?WSDL`).
+- **`-t` host-override + spec flags** — `-t` overrides only the endpoint host (WSDL path preserved); `--spec-header`/`--spec-var` apply to WSDL.
+- **Response-time auto-ingest** — a WSDL discovered mid-crawl is expanded into scan traffic, like a discovered OpenAPI spec.
+
+### Fixed
+
+- **`-t` combined with `-i` silently dropped the spec endpoint/base-URL override** — the MultiSource is now unwrapped; also fixes the same gap for OpenAPI.
+
+### Docs
+
+- Documented WSDL/SOAP scanning across the API guide, getting-started pages, and the `vigolium-scanner` skill.
+
 ## [v0.3.9] - 2026-08-07
 
 An **output and agent-ergonomics** release: multi-format exports, throwaway autopilot runs, and a profile-overlay fix that had been silently disabling discovery.

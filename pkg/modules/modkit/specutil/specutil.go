@@ -7,6 +7,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
 	"github.com/vigolium/vigolium/pkg/input/formats/postman"
+	"github.com/vigolium/vigolium/pkg/input/formats/wsdl"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 )
 
@@ -24,10 +25,32 @@ const (
 	Unknown SpecType = iota
 	OpenAPI
 	Postman
+	WSDL
 )
 
-// DetectSpecType determines whether data is an OpenAPI/Swagger or Postman spec.
+// Label returns a human-readable name for the spec type, used in the "discovered
+// a spec" progress notices so a WSDL isn't announced as an OpenAPI spec.
+func (t SpecType) Label() string {
+	switch t {
+	case OpenAPI:
+		return "OpenAPI/Swagger spec"
+	case Postman:
+		return "Postman collection"
+	case WSDL:
+		return "WSDL/SOAP service"
+	default:
+		return "API spec"
+	}
+}
+
+// DetectSpecType determines whether data is an OpenAPI/Swagger, Postman, or
+// WSDL/SOAP service description. WSDL is checked first: it is XML, disjoint from
+// the JSON/YAML specs, and its marker gate is strict (definitions + WSDL + SOAP
+// namespaces), so it cannot be confused with the others.
 func DetectSpecType(data []byte) SpecType {
+	if wsdl.IsWSDL(data) {
+		return WSDL
+	}
 	if openapi.IsOpenAPISpec(data) {
 		return OpenAPI
 	}
@@ -77,6 +100,14 @@ func ParseSpecTyped(specType SpecType, data []byte, baseURL string, service *htt
 		if err := f.ParseFromData(data, collect); err != nil {
 			return results, err
 		}
+
+	case WSDL:
+		// baseURL (the discovered service scheme+host) overrides the WSDL's own
+		// <soap:address> host so generated SOAP traffic stays in scope, while the
+		// address path is preserved (resolveEndpoint semantics).
+		if err := wsdl.ParseData(data, wsdl.Options{EndpointURL: baseURL}, collect); err != nil {
+			return results, err
+		}
 	}
 
 	return results, nil
@@ -120,12 +151,21 @@ func ParseAndFeed(data []byte, baseURL string, service *httpmsg.Service, feeder 
 		if err := f.ParseFromData(data, collect); err != nil {
 			return count, err
 		}
+
+	case WSDL:
+		if err := wsdl.ParseData(data, wsdl.Options{EndpointURL: baseURL}, collect); err != nil {
+			return count, err
+		}
 	}
 
 	return count, nil
 }
 
-// IsSpecContentType returns true if the content-type header suggests API spec content.
+// IsSpecContentType returns true if the content-type header suggests API spec
+// content. XML types are included for WSDL/SOAP descriptions; they are broad, so
+// the actual gate is DetectSpecType's strict WSDL marker check — a plain XML
+// response (SVG, RSS, sitemap) passes this pre-filter but resolves to Unknown
+// and is dropped.
 func IsSpecContentType(ct string) bool {
 	ct = strings.ToLower(ct)
 	for _, allowed := range []string{
@@ -134,6 +174,10 @@ func IsSpecContentType(ct string) bool {
 		"text/yaml",
 		"application/x-yaml",
 		"text/json",
+		"text/xml",
+		"application/xml",
+		"application/wsdl+xml",
+		"application/soap+xml",
 	} {
 		if strings.HasPrefix(ct, allowed) {
 			return true

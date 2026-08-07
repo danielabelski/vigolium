@@ -61,6 +61,9 @@ vigolium scan -T scope.json
 # From an OpenAPI / Swagger spec
 vigolium scan -i api.yaml -I openapi -t https://api.example.com
 
+# From a WSDL / SOAP service (or a live .svc/.asmx URL)
+vigolium scan -i service.wsdl -I wsdl -t https://soap.example.com
+
 # Pipe URLs from stdin
 cat urls.txt | vigolium scan
 

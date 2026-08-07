@@ -152,7 +152,7 @@ func (w *RepositoryWriter) flushLoop() {
 			w.count += len(ids)
 			w.mu.Unlock()
 		}
-		// Detect and parse API specs (OpenAPI/Swagger/Postman) from spidered
+		// Detect and parse API specs (OpenAPI/Swagger/Postman/WSDL) from spidered
 		// responses after the batch is persisted. Cheap to reject for non-specs.
 		for _, it := range pending {
 			w.ingestSpecEndpoints(it.entry, it.rr)

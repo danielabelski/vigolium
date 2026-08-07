@@ -27,6 +27,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/input/formats/burpscope"
 	"github.com/vigolium/vigolium/pkg/input/formats/detect"
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
+	"github.com/vigolium/vigolium/pkg/input/formats/wsdl"
 	"github.com/vigolium/vigolium/pkg/input/source"
 	"github.com/vigolium/vigolium/pkg/modules"
 	"github.com/vigolium/vigolium/pkg/output"
@@ -1087,22 +1088,31 @@ func runScanWithIngest(settings *config.Settings, db *database.DB, repo *databas
 		return fmt.Errorf("failed to create input source: %w", err)
 	}
 
-	// Configure OpenAPI options if applicable
-	if inputFormat == "openapi" || inputFormat == "swagger" {
-		if fs, ok := inputSource.(*source.FileSource); ok {
-			if openapiFormat, ok := fs.Format().(*openapi.Format); ok {
-				var targetURL string
-				if len(globalTargets) > 0 {
-					targetURL = globalTargets[0]
-				}
-				openapiFormat.SetOpenAPIOptions(openapi.Options{
-					BaseURL:              targetURL,
-					UseSpecServers:       useSpecServers,
-					Headers:              ingestParseHeaders(globalSpecHeader),
-					Variables:            ingestParseVariables(globalSpecVar),
-					DefaultFallbackValue: globalSpecDefault,
-				})
-			}
+	// Configure spec-format options on the file parser. FirstFileSource unwraps a
+	// MultiSource so the override still lands when -t is combined with -i (a bare
+	// *FileSource assertion would miss it). The -t target is the OpenAPI BaseURL /
+	// WSDL endpoint host override; the shared --spec-header / --spec-var flags
+	// carry headers and field values.
+	if fs := source.FirstFileSource(inputSource); fs != nil {
+		var targetURL string
+		if len(globalTargets) > 0 {
+			targetURL = globalTargets[0]
+		}
+		switch parser := fs.Format().(type) {
+		case *openapi.Format:
+			parser.SetOpenAPIOptions(openapi.Options{
+				BaseURL:              targetURL,
+				UseSpecServers:       useSpecServers,
+				Headers:              ingestParseHeaders(globalSpecHeader),
+				Variables:            ingestParseVariables(globalSpecVar),
+				DefaultFallbackValue: globalSpecDefault,
+			})
+		case *wsdl.Format:
+			parser.SetWSDLOptions(wsdl.Options{
+				EndpointURL: targetURL,
+				Headers:     ingestParseHeaders(globalSpecHeader),
+				Variables:   ingestParseVariables(globalSpecVar),
+			})
 		}
 	}
 

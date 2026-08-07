@@ -104,6 +104,15 @@ Import endpoints from an OpenAPI/Swagger definition:
 vigolium scan --input api.yaml -I openapi -t https://api.example.com
 ```
 
+### From a WSDL / SOAP Service
+
+Expand a SOAP service into one request per operation (a `.svc`/`.asmx` URL fetches
+its WSDL automatically):
+
+```bash
+vigolium scan --input service.wsdl -I wsdl -t https://soap.example.com
+```
+
 ### From a curl Command
 
 Pipe a curl command directly into Vigolium:

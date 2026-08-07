@@ -28,6 +28,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/input/formats/burpscope"
 	"github.com/vigolium/vigolium/pkg/input/formats/detect"
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
+	"github.com/vigolium/vigolium/pkg/input/formats/wsdl"
 	"github.com/vigolium/vigolium/pkg/input/source"
 	"github.com/vigolium/vigolium/pkg/notify/webhook"
 	"github.com/vigolium/vigolium/pkg/storagesig"
@@ -253,18 +254,25 @@ func runLocalIngest(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = inputSource.Close() }()
 
-	// Configure OpenAPI options if applicable (same pattern as runner.go)
-	if inputFormat == "openapi" || inputFormat == "swagger" {
-		if fs, ok := inputSource.(*source.FileSource); ok {
-			if openapiFormat, ok := fs.Format().(*openapi.Format); ok {
-				openapiFormat.SetOpenAPIOptions(openapi.Options{
-					BaseURL:              ingestOpts.TargetURL,
-					UseSpecServers:       ingestOpts.UseSpecServers,
-					Headers:              ingestParseHeaders(ingestOpts.Headers),
-					Variables:            ingestParseVariables(ingestOpts.Variables),
-					DefaultFallbackValue: ingestOpts.DefaultParam,
-				})
-			}
+	// Configure spec-format options on the file parser (same pattern as
+	// runner.go). FirstFileSource unwraps a MultiSource so the override lands even
+	// when -t/-T is combined with -i, and covers a content-sniffed .wsdl too.
+	if fs := source.FirstFileSource(inputSource); fs != nil {
+		switch parser := fs.Format().(type) {
+		case *openapi.Format:
+			parser.SetOpenAPIOptions(openapi.Options{
+				BaseURL:              ingestOpts.TargetURL,
+				UseSpecServers:       ingestOpts.UseSpecServers,
+				Headers:              ingestParseHeaders(ingestOpts.Headers),
+				Variables:            ingestParseVariables(ingestOpts.Variables),
+				DefaultFallbackValue: ingestOpts.DefaultParam,
+			})
+		case *wsdl.Format:
+			parser.SetWSDLOptions(wsdl.Options{
+				EndpointURL: ingestOpts.TargetURL,
+				Headers:     ingestParseHeaders(ingestOpts.Headers),
+				Variables:   ingestParseVariables(ingestOpts.Variables),
+			})
 		}
 	}
 
@@ -683,6 +691,23 @@ func formatIngestPreviewLine(idx int, rr *httpmsg.HttpRequestResponse) string {
 
 // detectInputFormat auto-detects the input format from the file extension and content.
 func detectInputFormat(input string) string {
+	// URL convenience: a bare WCF/ASMX service endpoint (or an explicit ?wsdl
+	// URL) is a WSDL source. The wsdl loader fetches ?singleWsdl / ?WSDL for the
+	// bare .svc/.asmx forms. A remote input can't be os.ReadFile'd for the
+	// content sniff below, so decide by URL shape here.
+	if strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
+		lower := strings.ToLower(input)
+		pathPart := lower
+		if i := strings.IndexByte(pathPart, '?'); i >= 0 {
+			pathPart = pathPart[:i]
+		}
+		if strings.HasSuffix(pathPart, ".svc") || strings.HasSuffix(pathPart, ".asmx") ||
+			strings.Contains(lower, "?wsdl") || strings.Contains(lower, "?singlewsdl") {
+			return "wsdl"
+		}
+		return ""
+	}
+
 	ext := strings.ToLower(filepath.Ext(input))
 	if ext == ".json" || ext == ".yaml" || ext == ".yml" {
 		data, err := os.ReadFile(input)
@@ -694,6 +719,18 @@ func detectInputFormat(input string) string {
 		}
 		if burpscope.Sniff(data) {
 			return "burpscope"
+		}
+		return ""
+	}
+	// A .wsdl or .xml file may be a SOAP service description — content-sniff it so
+	// `vigolium scan -i service.wsdl` works without an explicit -I wsdl.
+	if ext == ".wsdl" || ext == ".xml" {
+		data, err := os.ReadFile(input)
+		if err != nil {
+			return ""
+		}
+		if wsdl.IsWSDL(data) {
+			return "wsdl"
 		}
 	}
 	return ""

@@ -938,7 +938,7 @@ func (d *DeparosDiscoverySource) discoverTarget(parentCtx context.Context, targe
 	kept = append(kept, referenced...)
 	sourceOrder, bySource, crawled := groupCollectedBySource(kept)
 
-	// Parse API specs (OpenAPI/Swagger/Postman) found among the crawled responses
+	// Parse API specs (OpenAPI/Swagger/Postman/WSDL) found among the crawled responses
 	// and queue their documented endpoints. They are persisted separately under
 	// specRecordSource so the deparos dedup/status passes don't drop or collapse
 	// them once each carries a real (often uniform 401) baseline response.
@@ -1170,7 +1170,7 @@ func (d *DeparosDiscoverySource) persistJSTangleSourceArtifacts(
 	}
 }
 
-// extractSpecEndpoints scans discovered records for API specs (OpenAPI/Swagger/Postman)
+// extractSpecEndpoints scans discovered records for API specs (OpenAPI/Swagger/Postman/WSDL)
 // and returns parsed endpoints as additional HttpRequestResponse items.
 func extractSpecEndpoints(records []*httpmsg.HttpRequestResponse) []*httpmsg.HttpRequestResponse {
 	specSeen := make(map[string]struct{})
@@ -1224,8 +1224,8 @@ func extractSpecEndpoints(records []*httpmsg.HttpRequestResponse) []*httpmsg.Htt
 			continue
 		}
 		terminal.Notice("api-spec", fmt.Sprintf(
-			"Discovered OpenAPI/Swagger spec %s — parsed %d endpoints for ingestion",
-			rr.Target(), len(endpoints)))
+			"Discovered %s %s — parsed %d endpoints for ingestion",
+			st.Label(), rr.Target(), len(endpoints)))
 		allEndpoints = append(allEndpoints, endpoints...)
 	}
 

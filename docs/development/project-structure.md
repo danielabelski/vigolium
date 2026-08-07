@@ -40,7 +40,7 @@ Makefile             Build & test workflows (always build via make — see build
 | `pkg/httpmsg/` | HTTP request/response model, insertion points, parsing/serialization |
 | `pkg/http/` | HTTP requester with a middleware pipeline |
 | `pkg/dedup/` | Disk-backed dedup sets and per-scan dedup manager |
-| `pkg/input/` | Input source adapters (OpenAPI, Swagger, Postman, Burp, cURL, Nuclei, HAR) |
+| `pkg/input/` | Input source adapters (OpenAPI, Swagger, WSDL/SOAP, Postman, Burp, cURL, Nuclei, HAR) |
 | `pkg/work/` | Work-item types flowing through the executor |
 | `pkg/queue/` | Hybrid queue (in-memory + disk/Redis spillover) |
 | `pkg/output/` | Result formatting, output handlers, HTML report generation |
