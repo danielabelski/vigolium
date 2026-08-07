@@ -458,6 +458,13 @@ func TestDiscoveryConfig_Validate(t *testing.T) {
 		{"bad jstangle replay mode", func(c *DiscoveryConfig) { c.JSTangle.ReplayMode = "mutation" }, true},
 		{"too few AST nodes", func(c *DiscoveryConfig) { c.JSTangle.MaxASTNodes = 10 }, true},
 		{"too many jstangle workers", func(c *DiscoveryConfig) { c.JSTangle.WorkerCount = 99 }, true},
+		{"jstangle memory below deparos floor", func(c *DiscoveryConfig) { c.JSTangle.MemoryBudgetMB = 64 }, true},
+		{"jstangle memory zero (the clobbered value)", func(c *DiscoveryConfig) { c.JSTangle.MemoryBudgetMB = 0 }, true},
+		{"low jstangle memory ok when jstangle disabled", func(c *DiscoveryConfig) {
+			off := false
+			c.JSTangle.Enabled = &off
+			c.JSTangle.MemoryBudgetMB = 0
+		}, false},
 		{"valid in-range timeout", func(c *DiscoveryConfig) { c.Engine.Timeout = "30s" }, false},
 	}
 	for _, tt := range cases {

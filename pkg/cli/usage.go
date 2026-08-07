@@ -252,17 +252,17 @@ var agentQueryFlagGroups = []flagGroup{
 
 // agentAutopilotFlagGroups categorizes `vigolium agent autopilot`.
 var agentAutopilotFlagGroups = []flagGroup{
-	{"Target & Input", []string{"prompt", "target", "input", "record-uuid", "burp-bridge-url", "prior-context", "knowledge-base", "knowledge-base-raw", "knowledge-base-no-traffic", "plan-file"}},
+	{"Target & Input", []string{"prompt", "prompt-file", "target", "input", "record-uuid", "burp-bridge-url", "prior-context", "knowledge-base", "knowledge-base-raw", "knowledge-base-no-traffic", "plan-file"}},
 	{"Source & Audit", []string{"source", "files", "audit", "piolium", "diff", "last-commits"}},
 	{"AI Provider", []string{"provider", "model", "oauth-cred", "oauth-token", "llm-api-key"}},
 	{"Scan Behavior", []string{"intensity", "skill", "skill-tag", "no-skill-filter", "no-prescan", "no-preflight-discovery", "no-post-halt-verify", "post-halt-gap-threshold", "triage", "disable-guardrail", "max-duration"}},
 	{"Execution", []string{"dry-run", "show-prompt", "system-prompt", "system-prompt-file", "resume", "headed"}},
-	{"Output", []string{"verbose", "upload-results", "session-dir", "transcript", "db-isolate"}},
+	{"Output", []string{"stateless", "output", "verbose", "upload-results", "session-dir", "transcript", "db-isolate"}},
 }
 
 // agentSwarmFlagGroups categorizes `vigolium agent swarm`.
 var agentSwarmFlagGroups = []flagGroup{
-	{"Target & Input", []string{"prompt", "target", "input", "record-uuid", "all-records", "records-from", "plan-file"}},
+	{"Target & Input", []string{"prompt", "prompt-file", "target", "input", "record-uuid", "all-records", "records-from", "plan-file"}},
 	{"Source & Audit", []string{"source", "files", "audit", "piolium", "diff", "last-commits", "code-audit", "source-analysis-only"}},
 	{"AI Provider", []string{"provider", "model", "oauth-cred", "oauth-token", "llm-api-key", "gcp-project", "gcp-location", "base-url"}},
 	{"Module & Phase Selection", []string{"modules", "vuln-type", "skill", "skill-tag", "no-skill-filter", "only", "skip", "start-from", "profile", "discover", "with-extensions"}},

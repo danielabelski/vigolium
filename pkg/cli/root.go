@@ -330,7 +330,16 @@ func applyScanMemLimit(cmd *cobra.Command) {
 }
 
 func Execute() {
-	err := rootCmd.Execute()
+	// ExecuteC (not Execute) so we get the command that actually ran back —
+	// the agent-family setup hint below needs to know which one failed.
+	cmd, err := rootCmd.ExecuteC()
+
+	// A failed agent run is nearly always a provider/credential problem, and
+	// the fix always lives on one docs page. Printed before the update notice
+	// so the version banner stays last.
+	if err != nil && isAgentSetupCommand(cmd) {
+		printAgentSetupHint(os.Stderr)
+	}
 
 	// Print any pending "new version available" notice last, so it lands at the
 	// bottom of the output instead of scrolling away. Runs on both the success

@@ -44,17 +44,17 @@ type bundleFilters struct {
 	Limit        int      `json:"limit,omitempty"`
 }
 
-func runExportBundle() error {
-	db, err := openExportDB()
+// exportBundle writes the .tar.gz bundle (export.jsonl + report.html +
+// manifest.json + any requested agent session dirs) from the run's shared item set.
+func (r *exportRun) exportBundle(ctx context.Context, outputPath string) ([]exportedFile, error) {
+	db, err := r.openDB()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer closeDatabaseOnExit()
 
-	ctx := context.Background()
-	items, err := queryExportData(ctx, db, topExportOmitResponse, "")
+	items, err := r.loadItems(ctx, db)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	settings, err := config.LoadSettings(globalConfig)
@@ -62,13 +62,13 @@ func runExportBundle() error {
 		settings = config.DefaultSettings()
 	}
 
-	meta := resolveBundleReportMeta(ctx, db)
+	meta := r.resolveBundleReportMeta(ctx, db)
 
-	root := bundleRootName(topExportOutput)
+	root := bundleRootName(outputPath)
 
-	out, err := os.Create(topExportOutput)
+	out, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("failed to create bundle file: %w", err)
+		return nil, fmt.Errorf("failed to create bundle file: %w", err)
 	}
 	defer func() { _ = out.Close() }()
 
@@ -80,15 +80,15 @@ func runExportBundle() error {
 	now := time.Now().UTC()
 
 	if err := writeTarDir(tw, root+"/", now); err != nil {
-		return err
+		return nil, err
 	}
 
 	jsonlBytes, err := encodeItemsAsJSONL(items)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := writeTarBytes(tw, root+"/export.jsonl", jsonlBytes, now); err != nil {
-		return err
+		return nil, err
 	}
 
 	htmlBytes, err := renderHTMLToBytes(items, meta)
@@ -96,13 +96,13 @@ func runExportBundle() error {
 		fmt.Fprintf(os.Stderr, "%s Failed to render HTML for bundle: %v\n", terminal.WarningSymbol(), err)
 	} else {
 		if err := writeTarBytes(tw, root+"/report.html", htmlBytes, now); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	includedSessions, err := writeSessionsToTar(tw, root, settings.Agent.EffectiveSessionsDir(), topExportScanUUIDs, now)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	manifest := bundleManifest{
@@ -128,25 +128,32 @@ func runExportBundle() error {
 
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to encode manifest: %w", err)
+		return nil, fmt.Errorf("failed to encode manifest: %w", err)
 	}
 	manifestBytes = append(manifestBytes, '\n')
 	if err := writeTarBytes(tw, root+"/manifest.json", manifestBytes, now); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := tw.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := gz.Close(); err != nil {
-		return err
+		return nil, err
 	}
 
-	printExportStats("bundle", topExportOutput, items)
+	// The session count is a line under the per-format stats block on a
+	// single-format run, and the bundle row's detail in the unified summary
+	// otherwise — where the stats block is suppressed and it would be a stray.
+	entry := exportedFile{label: "bundle", path: outputPath}
 	if len(includedSessions) > 0 {
+		entry.detail = fmt.Sprintf("%d sessions", len(includedSessions))
+	}
+	r.printStats("bundle", outputPath, items)
+	if entry.detail != "" && !r.multi {
 		fmt.Fprintf(os.Stderr, "  Sessions:           %d included\n", len(includedSessions))
 	}
-	return nil
+	return []exportedFile{entry}, nil
 }
 
 // bundleRootName returns the top-level directory inside the tarball, derived
@@ -166,15 +173,15 @@ func bundleRootName(outputPath string) string {
 }
 
 // resolveBundleReportMeta picks report metadata, preferring a single matching
-// agentic_scan when --scan-uuid resolves to exactly one row. Falls back to
-// computeReportMeta and CLI overrides.
-func resolveBundleReportMeta(ctx context.Context, db *database.DB) output.HTMLReportMeta {
+// agentic_scan when --scan-uuid resolves to exactly one row. Falls back to the
+// run's shared auto-detected meta and CLI overrides.
+func (r *exportRun) resolveBundleReportMeta(ctx context.Context, db *database.DB) output.HTMLReportMeta {
 	title := "Vigolium Scan Report"
 	if topExportTitle != "" {
 		title = topExportTitle
 	}
 
-	autoTarget, autoDuration := computeReportMeta(ctx, db)
+	autoTarget, autoDuration := r.reportMeta(ctx, db)
 
 	if len(topExportScanUUIDs) == 1 {
 		var scan database.AgenticScan

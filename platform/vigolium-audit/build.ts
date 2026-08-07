@@ -91,7 +91,10 @@ function main(): void {
       `--define`,
       `process.env.VIGOLIUM_AUDIT_COMMIT="${commit}"`,
     ]);
-    if (target === hostTarget) hostBinary = out;
+    if (target === hostTarget) {
+      smokeTest(out, { buildDate, commit });
+      hostBinary = out;
+    }
   }
 
   if (hostBinary && process.env.VIGOLIUM_AUDIT_BUILD_NO_INSTALL !== "1") {
@@ -101,6 +104,41 @@ function main(): void {
       `[build] note: no host-platform binary built (host=${hostTarget ?? "?"}); skipping local install.`,
     );
   }
+}
+
+/**
+ * Execute the freshly compiled host binary before anything installs or ships it.
+ * A binary can compile cleanly and still be dead on arrival — `bun build` bundles
+ * whatever is in node_modules, so source written against a newer dependency API
+ * than the one installed throws at module load, before any command dispatches.
+ *
+ * `version` covers the happy path and proves the `--define` build metadata
+ * actually reached the binary; the bogus subcommand covers the unknown-command
+ * listener, which is registered at module top level.
+ *
+ * Only the host target can run here; cross-compiled binaries are left unchecked.
+ */
+function smokeTest(binary: string, meta: { buildDate: string; commit: string }): void {
+  console.log(`[build] smoke ${binary}`);
+  const fail = (what: string, r: ReturnType<typeof spawnSync>): never => {
+    throw new Error(
+      `smoke test failed: ${what} (exit ${r.status})\n${String(r.stdout ?? "")}${String(r.stderr ?? "")}`,
+    );
+  };
+
+  const version = spawnSync(binary, ["version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  if (version.status !== 0) fail("`version` did not exit 0", version);
+  for (const expected of [`Build: ${meta.buildDate}`, `Commit: ${meta.commit}`]) {
+    if (!version.stdout.includes(expected)) {
+      fail(`\`version\` output is missing "${expected}" — --define did not reach the binary`, version);
+    }
+  }
+
+  const unknown = spawnSync(binary, ["__build_smoke_unknown_command__"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (unknown.status !== 1) fail("an unknown subcommand did not exit 1", unknown);
 }
 
 function installToLocalBin(hostBinary: string): void {

@@ -205,6 +205,7 @@ func RunTUI(opts Options) error {
 		Version:       opts.Version,
 		Skills:        skills,
 		InitialPrompt: opts.InitialPrompt,
+		SetupDocsURL:  SetupDocsURL,
 	})
 }
 

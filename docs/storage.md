@@ -152,6 +152,15 @@ vigolium export --format bundle   -o gs://{project-uuid}/exports/bundle-{ts}.tar
 
 Vigolium writes to a temp file locally, then uploads on success. If the upload fails, the export is reported as failed (the temp file is cleaned up regardless).
 
+Several formats can share one `gs://` base, each uploaded under its own key. `{ts}` is expanded once for the whole run, so the objects group together instead of scattering across timestamps:
+
+```bash
+vigolium export --format html,markdown,bundle -o gs://{project-uuid}/exports/scan-{ts}
+# → gs://<project>/exports/scan-<ts>.html
+#   gs://<project>/exports/scan-<ts>.md
+#   gs://<project>/exports/scan-<ts>.tar.gz
+```
+
 ### Bundle export
 
 The `bundle` format (alias `gz`) emits a single `.tar.gz` containing JSONL data, an HTML report, a manifest, and any agent session directories named with `--scan-uuid`:

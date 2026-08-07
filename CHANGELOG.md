@@ -4,9 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.9] - 2026-08-07
+
+An **output and agent-ergonomics** release: multi-format exports, throwaway autopilot runs, and a profile-overlay fix that had been silently disabling discovery.
+
 ### Added
 
-- **`VIGOLIUM_DB_PATH`** — env-var default for the global `--db` flag, so a shell can be pinned to one session database. Writes (`scan`, `ingest`, …) go to it normally; reads additionally treat it as a standalone source with project scoping off, via `statelessReadRequested` — so every command that reads through the shared query path is covered, including `fuzz -u <uuid>`, which registers no `-S` flag. The implication is skipped until the file exists, and never sets the `--stateless` flag itself (on the scan family that flag means a throwaway temp DB and is mutually exclusive with `--db`). An explicit `--db` wins, and an explicit `-S` on a command where it means "throwaway database" makes the variable a no-op. Each run prints a one-line notice naming the resolved database, suppressed under `--silent`/`-j`/`--ci-output-format`.
+- **`export --format` takes a comma-separated list** (`html,markdown,bundle`) — the database is read once, `-o` becomes a shared base path, and a failing format no longer discards its siblings.
+- **`agent autopilot -S/--stateless`** runs the whole autopilot into a throwaway database and materializes `--format` outputs from it, mirroring `vigolium scan -S`.
+- **`--prompt-file`** on `agent autopilot`/`swarm` — task guidance from a file, same channel as `--prompt`, so a long prompt needn't be shell-escaped.
+- **`VIGOLIUM_DB_PATH`** — env-var default for `--db` that pins a shell to one session database; reads additionally treat it as a stateless source, writes do not.
+- **Agent setup-guide pointer** — surfaced in `agent`/`olium` help, under `--list-agents`, and on any agent command failure, including credential errors raised inside the olium TUI.
+
+### Changed
+
+- **`scan -S` and `agent autopilot -S` share one `--format` list**, so a format accepted by either is accepted by both.
+- **The `vigolium-scanner` skill splits its server/ingest reference** into `server.md` and `ingest.md`, with an expanded data/query reference.
+
+### Fixed
+
+- **A scanning profile zeroed every config key it did not set** — `--intensity quick|balanced|deep` wiped `discovery.jstangle.memory_budget_mb` and no-op'd the entire discovery phase; profile overlays are now key-preserving.
+- **An invalid jstangle memory budget** is now a clear config error at scan start rather than a silently aborted discovery phase.
 
 ## [v0.3.8] - 2026-08-06
 

@@ -399,14 +399,24 @@ func autopilotRunStatus(result *autopilot.Result) string {
 // and inherits the full session ctx, so a wedged browser spider (the class
 // runSpiderWatchdog catches, but whose budget is minutes) consumes the entire
 // wall and starves the operator agent with "context deadline exceeded". Capping
-// at clamp(wall/3, 30s, 4m) guarantees the agent gets the majority of the wall
-// even when the pre-scan stalls, while never exceeding the wall itself.
-func prescanBudget(wall time.Duration) time.Duration {
+// at clamp(wall/3, 30s, mult*4m) guarantees the agent gets the majority of the
+// wall even when the pre-scan stalls, while never exceeding the wall itself.
+//
+// mult scales the ceiling by scan intensity (see prescanBudgetMultiplier):
+// balanced doubles the base 4m ceiling and deep quadruples it, so a heavier
+// scan gets a proportionally larger native pre-scan. On the default walls
+// (balanced 6h, deep 12h) wall/3 always exceeds the ceiling, so the scaled
+// ceiling is what the operator actually sees as the pre-scan budget.
+func prescanBudget(wall time.Duration, mult int) time.Duration {
 	// NB: pkg/cli shadows the builtin min/max with an int-only min (db_list.go),
 	// so an explicit clamp is used rather than min/max on time.Duration.
+	if mult < 1 {
+		mult = 1
+	}
 	budget := wall / 3
-	if budget > 4*time.Minute {
-		budget = 4 * time.Minute
+	ceiling := time.Duration(mult) * 4 * time.Minute
+	if budget > ceiling {
+		budget = ceiling
 	}
 	if budget < 30*time.Second {
 		budget = 30 * time.Second
@@ -415,6 +425,21 @@ func prescanBudget(wall time.Duration) time.Duration {
 		budget = wall
 	}
 	return budget
+}
+
+// prescanBudgetMultiplier scales the pre-scan budget ceiling by scan intensity:
+// balanced x2 and deep x4 of the base 4m ceiling; quick (and any unrecognized
+// intensity) keeps x1. Heavier intensities warrant a proportionally larger
+// native pre-scan before the operator agent takes over.
+func prescanBudgetMultiplier(intensity agenttypes.Intensity) int {
+	switch intensity {
+	case agenttypes.IntensityBalanced:
+		return 2
+	case agenttypes.IntensityDeep:
+		return 4
+	default:
+		return 1
+	}
 }
 
 // isWallTimeout reports whether a finished autopilot run stopped because it hit
@@ -478,7 +503,7 @@ func buildPrescanInstruction(ctx context.Context, repo *database.Repository, pro
 		return ""
 	}
 
-	preScanBudget := prescanBudget(autopilotMaxDuration)
+	preScanBudget := prescanBudget(autopilotMaxDuration, prescanBudgetMultiplier(intensity))
 
 	fmt.Fprintf(os.Stderr, "%s Pre-scan: %s strategy against %s (native scan: discover + dynamic-assessment; budget %s)\n",
 		terminal.InfoSymbol(),

@@ -7,11 +7,17 @@ import { spawnSync } from "child_process";
  * via Bun's `--define` flag. In dev mode the env vars are absent — fall back
  * to the current ISO timestamp for the date and a runtime `git rev-parse`
  * for the commit.
+ *
+ * Dot access is load-bearing: `--define process.env.FOO=…` substitutes
+ * `process.env.FOO` but leaves `process.env["FOO"]` alone, so the bracket form
+ * silently drops the injected value and every binary reports dev fallbacks
+ * (a live timestamp, and whatever repo the user happens to be standing in).
+ * `build.ts` asserts both values reach the compiled binary.
  */
 export const BUILD_DATE: string =
-  process.env["VIGOLIUM_AUDIT_BUILD_DATE"] ?? new Date().toISOString().replace(/\.\d+Z$/, "Z");
+  process.env.VIGOLIUM_AUDIT_BUILD_DATE ?? new Date().toISOString().replace(/\.\d+Z$/, "Z");
 
-export const COMMIT_HASH: string = process.env["VIGOLIUM_AUDIT_COMMIT"] ?? devGitShort();
+export const COMMIT_HASH: string = process.env.VIGOLIUM_AUDIT_COMMIT ?? devGitShort();
 
 export const AUTHOR = "@j3ssie";
 export const LICENSE = "self-hosted";

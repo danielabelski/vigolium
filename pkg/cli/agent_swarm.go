@@ -35,6 +35,7 @@ var (
 	swarmFiles               []string
 	swarmVulnType            string
 	swarmPrompt              string // --prompt: free-text task guidance (same slot as the positional [prompt])
+	swarmPromptFile          string // --prompt-file: read task guidance from a file (same channel as --prompt)
 	swarmFocus               string // internal: populated by the NL intent parser (no --focus flag)
 	swarmSkills              []string
 	swarmSkillTags           []string
@@ -150,6 +151,7 @@ func init() {
 	f.StringSliceVar(&swarmFiles, "files", nil, "Specific source files to include (relative to --source)")
 	f.StringVar(&swarmVulnType, "vuln-type", "", "Vulnerability type focus (e.g. sqli, xss, ssrf)")
 	f.StringVar(&swarmPrompt, "prompt", "", "Free-text task guidance for the agent (same as the positional [prompt]; use --plan-file for a whole plan with seed HTTP requests)")
+	f.StringVar(&swarmPromptFile, "prompt-file", "", "Read task guidance from a file (same channel as --prompt). Convenient for long/complex prompts; mutually exclusive with --prompt, the positional [prompt], and --plan-file")
 	f.StringSliceVar(&swarmSkills, "skill", nil, "Force-load these skills by name into triage, bypassing planner selection (repeatable or comma-separated)")
 	f.StringSliceVar(&swarmSkillTags, "skill-tag", nil, "Force-load every skill carrying one of these tags into triage (e.g. xss,idor)")
 	f.BoolVar(&swarmNoSkillFilter, "no-skill-filter", false, "Load the full skill set into triage; ignore planner selection")
@@ -226,7 +228,7 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 	// structured flags present, the prompt is preserved verbatim as instruction
 	// context rather than silently discarded; explicit flags still win for
 	// structured fields.
-	rawPrompt, err := resolveRawPrompt(args, swarmPrompt, swarmPlanFile)
+	rawPrompt, err := resolveRawPrompt(args, swarmPrompt, swarmPromptFile, swarmPlanFile)
 	if err != nil {
 		return err
 	}

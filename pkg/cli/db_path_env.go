@@ -28,9 +28,15 @@ var dbPathEnvAutoStateless bool
 // statelessWriteCommands are the commands whose -S/--stateless means "work in a
 // throwaway temporary database and discard it", the opposite of pinning a shell
 // to a session database. `scan`/`scan-url`/`scan-request`/`run` reject --db
-// outright alongside it (runScan, runRunnerScan), and `audit` repoints the
-// database at a scratch file mid-run — so for these, an explicit -S makes the
+// outright alongside it (runScan, runRunnerScan), and `audit`/`autopilot` repoint
+// the database at a scratch file mid-run — so for these, an explicit -S makes the
 // env var a no-op rather than a --db the user never typed.
+//
+// `autopilot` is here for a second reason too: beginAgentStateless SETS this env
+// var to the scratch path so the operator's bash tool pins its `vigolium`
+// subprocesses to the same throwaway DB. Without this entry, a re-read of the
+// env var would look like an operator-pinned session database and flip reads to
+// project-scoping-off (dbPathEnvAutoStateless) mid-run.
 //
 // Read commands need no such list: they express the same intent by asking
 // statelessReadRequested, and both `vigolium audit` and `vigolium agent audit`
@@ -41,6 +47,7 @@ var statelessWriteCommands = map[string]bool{
 	"scan-request": true,
 	"run":          true,
 	"audit":        true,
+	"autopilot":    true,
 }
 
 // statelessWriteRequested reports whether the user explicitly asked cmd for the

@@ -71,6 +71,7 @@ Use a subcommand to select the agentic scan mode:
   olium      Interactive olium agent (TUI or headless prompt)
   audit      Unified security audit (vigolium-audit and/or piolium)
 
+` + agentSetupHelpLine + `
 Docs: https://docs.vigolium.com`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer syncLogger()
@@ -374,6 +375,10 @@ func printAgentList(settings *config.Settings) error {
 		tbl.AddRow(terminal.Cyan(p.Name), p.Model, p.Auth, p.Description, active)
 	}
 	tbl.Print()
+	// The AUTH column names *what* each provider needs; the guide explains how
+	// to obtain and wire it. Printed only on the human table (the JSON branch
+	// above returns early) so machine consumers stay unaffected.
+	fmt.Printf("\n%s Setup guide: %s\n", terminal.InfoSymbol(), terminal.Cyan(olium.SetupDocsURL))
 	return nil
 }
 

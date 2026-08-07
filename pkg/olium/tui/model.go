@@ -44,6 +44,12 @@ type Config struct {
 	// InitialPrompt, when non-empty, is auto-sent as the first message on
 	// startup — same as if the user typed it and pressed enter.
 	InitialPrompt string
+	// SetupDocsURL is the provider-setup guide, appended under a run error
+	// that looks credential- or endpoint-shaped. The TUI owns the whole
+	// session, so an auth failure never returns to the CLI where the
+	// equivalent hint is printed — this is the only place a user in an
+	// interactive session sees it. Empty hides the pointer.
+	SetupDocsURL string
 	// quit is wired by Run() to the external context cancel passed via
 	// tea.WithContext. When called, Bubble Tea's shutdown flips to "killed"
 	// mode, which skips its 500 ms waitForReadLoop timeout on the TTY input

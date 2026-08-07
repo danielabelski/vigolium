@@ -337,15 +337,32 @@ func (options *Options) OutputPathForFormat(format string) string {
 	return FormatOutputPath(options.OutputBasePath(), format)
 }
 
-// StripFormatExtension removes known format extensions (.jsonl, .html, .json)
-// from a path, returning the base suitable for appending a new extension.
+// multiPartFormatExtensions lists extensions filepath.Ext cannot recover on its
+// own: it sees only ".gz" of ".tar.gz", so stripping through it would leave a
+// dangling ".tar" on the base and derive sibling paths like "out.tar.html".
+// Checked before the single-part list below.
+//
+// ".report.html" is deliberately absent: StripFormatExtension strips only the
+// last extension by contract (TestStripFormatExtension), so a base that already
+// ends in ".report" keeps it.
+var multiPartFormatExtensions = []string{".tar.gz", ".tgz"}
+
+// StripFormatExtension removes a known format extension (.jsonl, .html, .json,
+// .md, .tar.gz, …) from a path, returning the base suitable for appending a new
+// extension.
 func StripFormatExtension(path string) string {
 	if path == "" {
 		return ""
 	}
+	lower := strings.ToLower(path)
+	for _, ext := range multiPartFormatExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return path[:len(path)-len(ext)]
+		}
+	}
 	ext := filepath.Ext(path)
 	switch strings.ToLower(ext) {
-	case ".jsonl", ".html", ".json", ".pdf", ".sqlite", ".sqlite3", ".db":
+	case ".jsonl", ".html", ".json", ".pdf", ".sqlite", ".sqlite3", ".db", ".md", ".markdown":
 		return strings.TrimSuffix(path, ext)
 	default:
 		return path
@@ -353,6 +370,10 @@ func StripFormatExtension(path string) string {
 }
 
 // FormatOutputPath appends the appropriate file extension for the given format.
+// It is the single source of truth for format→extension naming, shared by the
+// scan commands and `vigolium export`; markdown, bundle, and fs are export-only
+// formats. fs falls through to the default because it names a directory base
+// (<base>-traffic/, <base>-findings/) rather than a file.
 func FormatOutputPath(basePath, format string) string {
 	if basePath == "" {
 		return ""
@@ -368,6 +389,10 @@ func FormatOutputPath(basePath, format string) string {
 		return basePath + ".pdf"
 	case "sqlite":
 		return basePath + ".sqlite"
+	case "markdown", "md":
+		return basePath + ".md"
+	case "bundle", "gz":
+		return basePath + ".tar.gz"
 	default:
 		return basePath
 	}

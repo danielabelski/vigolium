@@ -48,6 +48,13 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// MinJSTangleMemoryBudgetMB is the floor for an enabled jstangle memory budget.
+// Below it the engine cannot construct. It is the single source of truth for the
+// rule: JSTangleConfig.Validate enforces it here, and the vigolium config layer
+// mirrors it (internal/config DiscoveryConfig.Validate) so an invalid budget is a
+// clear config error at scan start rather than a silent engine-construction failure.
+const MinJSTangleMemoryBudgetMB = 128
+
 func (c *JSTangleConfig) Validate() error {
 	if !c.Enabled {
 		return nil
@@ -62,7 +69,7 @@ func (c *JSTangleConfig) Validate() error {
 	default:
 		return fmt.Errorf("replay_safety must be metadata-only, read-only, safe-baseline, or state-changing")
 	}
-	if c.WorkerCount < 0 || c.WorkerCount > 16 || c.MemoryBudgetMB < 128 || c.CacheMB < 0 {
+	if c.WorkerCount < 0 || c.WorkerCount > 16 || c.MemoryBudgetMB < MinJSTangleMemoryBudgetMB || c.CacheMB < 0 {
 		return fmt.Errorf("invalid worker_count/memory_budget_mb/cache_mb")
 	}
 	if c.JobTimeout < time.Second || c.JobTimeout > 5*time.Minute {

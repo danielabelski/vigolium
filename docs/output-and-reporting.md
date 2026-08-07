@@ -102,6 +102,30 @@ vigolium export --format bundle --scan-uuid <agentic-scan-uuid> \
 A bundle contains `export.jsonl`, `report.html`, a manifest, and requested
 agent session directories.
 
+### Several formats in one run
+
+`--format` takes a comma-separated list. The database is read once and every
+format renders from that one result set, so three formats cost one query rather
+than three:
+
+```bash
+vigolium export --format html,markdown,bundle -o agentic-authenticated-scan
+# → agentic-authenticated-scan.html
+#   agentic-authenticated-scan.md
+#   agentic-authenticated-scan.tar.gz
+```
+
+With more than one format, `-o/--output` is a shared **base path** and each
+format appends its own extension (an extension already on the base is replaced,
+not stacked). Because one `-o` cannot name several files, it is required as soon
+as you pass a second format. A single format still uses `-o` verbatim:
+`--format html -o report` writes exactly `report`.
+
+`{ts}` and `{project-uuid}` are expanded once for the whole run, so every file
+carries the same timestamp even when a slow renderer (`pdf`) finishes seconds
+after its siblings. If one format fails, the others are still written and the
+command exits non-zero naming the format that failed.
+
 ## Query Stored Results
 
 Use the noun directly; `finding list` and `traffic list` are not subcommands.

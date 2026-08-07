@@ -242,11 +242,7 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 		}
 		statelessDBPath := tmpFile.Name()
 		_ = tmpFile.Close()
-		defer func() {
-			_ = os.Remove(statelessDBPath)
-			_ = os.Remove(statelessDBPath + "-wal")
-			_ = os.Remove(statelessDBPath + "-shm")
-		}()
+		defer removeAgentStatelessDB(statelessDBPath)
 		globalDB = statelessDBPath
 	}
 

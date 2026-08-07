@@ -50,7 +50,9 @@ Providers (vendor-first; the prefix tells you which credentials to provide):
                        Default model: gemini-2.5-pro.
   openai-compatible  — any OpenAI Chat Completions-compatible endpoint (Ollama, OpenRouter, LM Studio, vLLM,
                        Together, Groq, LocalAI, custom proxies). Uses --base-url / agent.olium.custom_provider.base_url,
-                       --llm-api-key / custom_provider.api_key (optional), and --model / custom_provider.model_id.`,
+                       --llm-api-key / custom_provider.api_key (optional), and --model / custom_provider.model_id.
+
+` + agentSetupHelpLine,
 	DisableFlagsInUseLine: true,
 	RunE:                  runAgentOlium,
 }

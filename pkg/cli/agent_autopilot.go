@@ -33,6 +33,7 @@ var (
 	autopilotSource        string
 	autopilotFiles         []string
 	autopilotPrompt        string // --prompt: free-text task guidance (same slot as the positional [prompt])
+	autopilotPromptFile    string // --prompt-file: read task guidance from a file (same channel as --prompt)
 	autopilotFocus         string // internal: populated by the NL intent parser (no --focus flag)
 	autopilotSkills        []string
 	autopilotSkillTags     []string
@@ -79,6 +80,15 @@ var (
 	autopilotKnowledgeBase          string
 	autopilotKnowledgeBaseRaw       bool
 	autopilotKnowledgeBaseNoTraffic bool
+	autopilotStateless              bool
+	autopilotOutput                 string
+
+	// autopilotStatelessPlan carries the resolved -S/--format state for this
+	// invocation. It is package-level (not a local) because the natural-language
+	// path re-enters runAgentAutopilot(nil, nil): the outer call resolves the plan
+	// and mints the throwaway DB, the inner call runs the operator and emits the
+	// export.
+	autopilotStatelessPlan agentStatelessPlan
 
 	// autopilotInstructionPrefix holds the verbatim task-guidance prompt when
 	// autopilot was invoked with a positional `<prompt>` argument or --prompt. It
@@ -153,6 +163,7 @@ func init() {
 	f.StringVar(&autopilotSource, "source", "", "Path to application source code for source-aware scanning")
 	f.StringSliceVar(&autopilotFiles, "files", nil, "Specific files to include (relative to --source)")
 	f.StringVar(&autopilotPrompt, "prompt", "", "Free-text task guidance for the agent (same as the positional [prompt]; use --plan-file for a whole plan with seed HTTP requests)")
+	f.StringVar(&autopilotPromptFile, "prompt-file", "", "Read task guidance from a file (same channel as --prompt — its contents flow through credential extraction, so role-tagged accounts become primary/compare sessions). Convenient for long/complex prompts; mutually exclusive with --prompt, the positional [prompt], and --plan-file")
 	f.StringSliceVar(&autopilotSkills, "skill", nil, "Force-load these skills by name, bypassing the pre-flight selection (repeatable or comma-separated)")
 	f.StringSliceVar(&autopilotSkillTags, "skill-tag", nil, "Force-load every skill carrying one of these tags (e.g. xss,idor)")
 	f.BoolVar(&autopilotNoSkillFilter, "no-skill-filter", false, "Load the full skill set; skip the pre-flight skill selection")
@@ -183,12 +194,45 @@ func init() {
 	f.StringVar(&autopilotResume, "resume", "", "Resume a previous durable-autopilot run by its agentic-scan UUID: reuses its session dir, project, target, and durable scratchpad/candidates; skips pre-scan and audit re-prep (requires agent.olium.autopilot_mode != legacy)")
 	f.StringVar(&autopilotSessionDir, "session-dir", "", "Explicit session directory for this run's debug artifacts (transcript.jsonl, runtime.log, scratchpad, tool-results). Default: <agent.sessions_dir>/<run-uuid>. Pin it to know exactly where to look when debugging (e.g. alongside -S/--stateless scans).")
 	f.StringVar(&autopilotTranscript, "transcript", "", "After the run, also copy the session's transcript.jsonl to this path. The in-session copy is always kept; this is a convenience for debugging (e.g. keep the transcript when the DB is throwaway).")
+	f.BoolVarP(&autopilotStateless, "stateless", "S", false, "Run the whole autopilot into a throwaway temporary database (your project DB is left untouched), then materialize --format outputs from it. Mirrors 'vigolium scan -S'. Not valid with --db, --db-isolate, or --resume.")
+	f.StringVarP(&autopilotOutput, "output", "o", "", "Output base path for the --stateless export; each --format appends its own extension (report.html, report.sqlite). Defaults to "+agentStatelessDefaultBase+". Only applies with -S/--stateless.")
 	f.StringVar(&autopilotKnowledgeBase, "knowledge-base", "", "Path to a file or directory describing the app. Prose docs (markdown/txt/rst/…) are LLM-distilled into a compact brief + document index front-loaded into the operator (full docs stay on disk, read on demand). HTTP-traffic exports in the same path (HAR, Burp XML, curl, OpenAPI/Swagger, Postman, URL lists, raw HTTP) are auto-detected, parsed, and ingested into the project DB as normal traffic (source=knowledge-base) with a sample folded into the brief — disable with --knowledge-base-no-traffic. Works blackbox and whitebox.")
 	f.BoolVar(&autopilotKnowledgeBaseRaw, "knowledge-base-raw", false, "Skip the LLM distillation of --knowledge-base: front-load a deterministic document index only (offline / reproducible). No-op without --knowledge-base.")
 	f.BoolVar(&autopilotKnowledgeBaseNoTraffic, "knowledge-base-no-traffic", false, "Do not parse HTTP-traffic-format files (HAR, Burp XML, curl, OpenAPI/Swagger, Postman, URL lists, raw HTTP) found in --knowledge-base into normal traffic; treat every file as prose docs instead. By default such files are parsed and ingested into the project DB (source=knowledge-base). No-op without --knowledge-base.")
 }
 
 func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
+	// -S/--stateless: validate the --format/-o combination and mint the throwaway
+	// database before anything opens a DB handle. Two orderings matter here.
+	// First, the temp-file removal defer is registered BEFORE the
+	// closeDatabaseOnExit defer below, so LIFO deletes the file only after the
+	// connection is closed. Second, this runs before the natural-language
+	// re-entry (runAutopilotFromPrompt → runAgentAutopilot(nil, nil)) — that
+	// re-entry is the only caller passing a nil cmd, so gating on it makes the
+	// inner call reuse this DB rather than mint a second one and export an empty
+	// database over the real results.
+	if cmd != nil {
+		// Reject the --resume conflict before planAgentStateless, so a doomed
+		// combination never prints the plan's default-base notice on its way to
+		// the error.
+		if autopilotStateless && autopilotResume != "" {
+			return fmt.Errorf("--stateless/-S cannot be combined with --resume: a resumed run restores its target, scratchpad, and prior findings from the project database, which a throwaway one does not have")
+		}
+		plan, planErr := planAgentStateless(cmd, "agent autopilot", autopilotStateless, autopilotOutput)
+		if planErr != nil {
+			return planErr
+		}
+		if plan.active {
+			dbPath, sErr := beginAgentStateless("vigolium-autopilot-stateless-")
+			if sErr != nil {
+				return sErr
+			}
+			plan.dbPath = dbPath
+			defer removeAgentStatelessDB(dbPath)
+		}
+		autopilotStatelessPlan = plan
+	}
+
 	defer syncLogger()
 	defer closeDatabaseOnExit()
 
@@ -198,7 +242,7 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 	// target/source/focus). With structured flags present, the prompt is NOT
 	// discarded — it is preserved verbatim as instruction context (scope rules,
 	// exploitation hints), while explicit flags still win for structured fields.
-	rawPrompt, err := resolveRawPrompt(args, autopilotPrompt, autopilotPlanFile)
+	rawPrompt, err := resolveRawPrompt(args, autopilotPrompt, autopilotPromptFile, autopilotPlanFile)
 	if err != nil {
 		return err
 	}
@@ -276,6 +320,12 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 	// Layer the global --ext / --ext-dir flags so user-supplied extensions
 	// run alongside anything the autopilot produces.
 	applyGlobalExtFlagsToSettings(settings)
+
+	// -S: the native scan paths the operator launches (runner.LaunchScan, the
+	// pre-scan) read settings.Database rather than the --db global, so the
+	// throwaway DB has to be reflected here too or their findings would land in
+	// the real project database.
+	applyAgentStatelessSettings(settings, autopilotStatelessPlan.dbPath)
 
 	if autopilotHeaded {
 		_ = os.Setenv(spitolas.EnvBrowserHeaded, "1")
@@ -487,7 +537,24 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 	if cmd != nil {
 		ctx = cmd.Context()
 	}
-	return runAutopilotOlium(ctx, settings, repo, instruction)
+	runErr := runAutopilotOlium(ctx, settings, repo, instruction)
+	// Materialize the -S export here rather than in a defer: the DB handle must
+	// still be open, and this is the invocation that actually ran the operator
+	// (on the natural-language path the outer call returns long before this).
+	// Runs even when the operator errored — a partial run's findings are still
+	// worth keeping, and the throwaway DB is about to be deleted.
+	emitAutopilotStatelessExport()
+	return runErr
+}
+
+// emitAutopilotStatelessExport writes the --stateless outputs and then disarms
+// the plan. Two mutually-exclusive paths reach it — this invocation's tail and
+// runMultiAppAutopilot's defer (a natural-language prompt naming several apps
+// runs them sequentially into one throwaway DB, then exports the combined result
+// once) — and disarming keeps that exclusivity from being load-bearing.
+func emitAutopilotStatelessExport() {
+	emitAgentStatelessExport(autopilotStatelessPlan)
+	autopilotStatelessPlan.output = ""
 }
 
 // runAutopilotFromPrompt parses a natural language prompt and runs autopilot for each extracted app.
@@ -633,6 +700,10 @@ func runMultiAppAutopilot(ctx context.Context, _ *agent.Engine, settings *config
 		zap.L().Info("Signal received, shutting down multi-app autopilot")
 		cancel()
 	}()
+
+	// Every app runs into the same throwaway DB under -S, so the export is one
+	// combined pass after the last app rather than one per app fighting over -o.
+	defer emitAutopilotStatelessExport()
 
 	return runMultiAppSequential(ctx, intent, func(ctx context.Context, idx int, app agent.AppIntent) error {
 		fmt.Fprintf(os.Stderr, "%s [%d/%d] Starting autopilot: target=%s source=%s\n",

@@ -401,15 +401,22 @@ func prependVerbatimPrompt(instruction, verbatim string) string {
 }
 
 // resolveRawPrompt returns the single free-text task-guidance string shared by
-// `agent autopilot` and `agent swarm`. The guidance can come from either the
-// positional [prompt] argument or the --prompt flag (two spellings of the same
-// input); supplying both is an error. It rejects combining a prompt with
-// --plan-file, which owns the instruction channel. Returns the trimmed prompt
-// ("" when none). The caller decides — from its own hasExplicitFlags — whether
-// the prompt drives the run through the natural-language intent parser or is
-// preserved verbatim as instruction context (a non-empty planFile always
-// implies explicit flags, so the guard fires only in the explicit-flags branch).
-func resolveRawPrompt(args []string, promptFlag, planFile string) (string, error) {
+// `agent autopilot` and `agent swarm`. The guidance can come from the positional
+// [prompt] argument, the --prompt flag, or the --prompt-file flag (three
+// spellings of the same input — --prompt-file just reads the file for you so a
+// long/complex prompt needn't be shell-escaped); supplying more than one is an
+// error. It rejects combining a prompt with --plan-file, which owns the
+// instruction channel. Returns the trimmed prompt ("" when none). The caller
+// decides — from its own hasExplicitFlags — whether the prompt drives the run
+// through the natural-language intent parser or is preserved verbatim as
+// instruction context (a non-empty planFile always implies explicit flags, so
+// the guard fires only in the explicit-flags branch).
+//
+// --prompt-file is deliberately the SAME channel as --prompt, not a --plan-file
+// alias: its contents flow through the intent parser + credential extraction, so
+// role-tagged accounts in the file are stood up as primary/compare sessions.
+// --plan-file skips that extraction (it owns a different, seed-request channel).
+func resolveRawPrompt(args []string, promptFlag, promptFile, planFile string) (string, error) {
 	prompt := strings.TrimSpace(promptFlag)
 	if len(args) > 0 {
 		if pos := strings.TrimSpace(args[0]); pos != "" {
@@ -419,8 +426,21 @@ func resolveRawPrompt(args []string, promptFlag, planFile string) (string, error
 			prompt = pos
 		}
 	}
+	if pf := strings.TrimSpace(promptFile); pf != "" {
+		if prompt != "" {
+			return "", fmt.Errorf("pass the task guidance once: use --prompt-file or the positional [prompt]/--prompt, not both")
+		}
+		data, rerr := os.ReadFile(config.ExpandPath(pf))
+		if rerr != nil {
+			return "", fmt.Errorf("--prompt-file %q: %w", pf, rerr)
+		}
+		prompt = strings.TrimSpace(string(data))
+		if prompt == "" {
+			return "", fmt.Errorf("--prompt-file %q is empty", pf)
+		}
+	}
 	if prompt != "" && planFile != "" {
-		return "", fmt.Errorf("--plan-file cannot be combined with a prompt (--prompt / positional): the plan file owns the instruction channel; fold the guidance into the plan file instead")
+		return "", fmt.Errorf("--plan-file cannot be combined with a prompt (--prompt / --prompt-file / positional): the plan file owns the instruction channel; fold the guidance into the plan file instead")
 	}
 	return prompt, nil
 }

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/vigolium/vigolium/pkg/agent/agenttypes"
 )
 
 // TestIsWallTimeout locks in wall-hit detection: a max-duration timeout is a
@@ -54,27 +56,54 @@ func TestPrescanBudget(t *testing.T) {
 	cases := []struct {
 		name string
 		wall time.Duration
+		mult int
 		want time.Duration
 	}{
-		{"typical 15m wall caps at 4m", 15 * time.Minute, 4 * time.Minute},
-		{"8m wall -> wall/3", 8 * time.Minute, 8 * time.Minute / 3},
-		{"6m wall -> 2m", 6 * time.Minute, 2 * time.Minute},
-		{"huge 6h wall still caps at 4m", 6 * time.Hour, 4 * time.Minute},
-		{"tiny 45s wall floors at 30s", 45 * time.Second, 30 * time.Second},
-		{"sub-floor wall never exceeds the wall itself", 20 * time.Second, 20 * time.Second},
-		{"zero wall floors at 30s (defensive)", 0, 30 * time.Second},
+		{"typical 15m wall caps at 4m", 15 * time.Minute, 1, 4 * time.Minute},
+		{"8m wall -> wall/3", 8 * time.Minute, 1, 8 * time.Minute / 3},
+		{"6m wall -> 2m", 6 * time.Minute, 1, 2 * time.Minute},
+		{"huge 6h wall still caps at 4m", 6 * time.Hour, 1, 4 * time.Minute},
+		{"tiny 45s wall floors at 30s", 45 * time.Second, 1, 30 * time.Second},
+		{"sub-floor wall never exceeds the wall itself", 20 * time.Second, 1, 20 * time.Second},
+		{"zero wall floors at 30s (defensive)", 0, 1, 30 * time.Second},
+		// Intensity scaling: balanced x2 and deep x4 raise the ceiling on the
+		// default walls where wall/3 dominates the base 4m cap.
+		{"balanced x2 6h wall caps at 8m", 6 * time.Hour, 2, 8 * time.Minute},
+		{"deep x4 12h wall caps at 16m", 12 * time.Hour, 4, 16 * time.Minute},
+		{"x0 clamps to x1 (defensive)", 6 * time.Hour, 0, 4 * time.Minute},
+		{"scaled ceiling still bounded by wall/3 on short wall", 6 * time.Minute, 4, 2 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := prescanBudget(tc.wall)
+			got := prescanBudget(tc.wall, tc.mult)
 			if got != tc.want {
-				t.Fatalf("prescanBudget(%s) = %s, want %s", tc.wall, got, tc.want)
+				t.Fatalf("prescanBudget(%s, %d) = %s, want %s", tc.wall, tc.mult, got, tc.want)
 			}
 			// Invariant: the pre-scan may never eat the whole wall when the wall
 			// is large enough to leave the agent time.
 			if tc.wall >= 90*time.Second && got >= tc.wall {
-				t.Fatalf("prescanBudget(%s) = %s did not leave the agent any wall", tc.wall, got)
+				t.Fatalf("prescanBudget(%s, %d) = %s did not leave the agent any wall", tc.wall, tc.mult, got)
 			}
 		})
+	}
+}
+
+// TestPrescanBudgetMultiplier locks in the intensity → ceiling-multiplier map:
+// balanced doubles and deep quadruples the base pre-scan ceiling; quick and
+// anything unrecognized stay at x1.
+func TestPrescanBudgetMultiplier(t *testing.T) {
+	cases := []struct {
+		intensity agenttypes.Intensity
+		want      int
+	}{
+		{agenttypes.IntensityQuick, 1},
+		{agenttypes.IntensityBalanced, 2},
+		{agenttypes.IntensityDeep, 4},
+		{agenttypes.Intensity("bogus"), 1},
+	}
+	for _, tc := range cases {
+		if got := prescanBudgetMultiplier(tc.intensity); got != tc.want {
+			t.Fatalf("prescanBudgetMultiplier(%q) = %d, want %d", tc.intensity, got, tc.want)
+		}
 	}
 }

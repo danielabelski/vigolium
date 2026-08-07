@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	deparosconfig "github.com/vigolium/vigolium/pkg/deparos/config"
 )
 
 // TestKnownIssueScanSeveritiesByIntensity pins the per-intensity known-issue-scan
@@ -194,5 +196,99 @@ func TestApplyProfile_HeuristicsCheckOverride(t *testing.T) {
 
 	if settings.ScanningStrategy.HeuristicsCheck != "advanced" {
 		t.Errorf("HeuristicsCheck = %q, want %q", settings.ScanningStrategy.HeuristicsCheck, "advanced")
+	}
+}
+
+// TestApplyProfile_PreservesDiscoveryJSTangleBudget guards the regression where
+// applying a bundled scanning profile (quick/standard/full — i.e. --intensity
+// quick/balanced/deep) zero-clobbered discovery.jstangle.memory_budget_mb. Those
+// profiles set a top-level `discovery:` block but omit `jstangle:`; the old typed
+// YAML round-trip in ApplyProfile therefore reset memory_budget_mb (and every
+// other omitted field) to 0, and the deparos engine then rejected the config
+// (memory_budget_mb < 128) and ran no content discovery at all. The key-preserving
+// overlay must leave the omitted jstangle budget at its global/default value.
+func TestApplyProfile_PreservesDiscoveryJSTangleBudget(t *testing.T) {
+	defaults := DefaultDiscoveryConfig()
+	for _, name := range []string{"quick", "standard", "full"} {
+		t.Run(name, func(t *testing.T) {
+			settings := DefaultSettings()
+			profile, err := LoadProfile(filepath.Join("..", "..", "public", "presets", "profiles", name+".yaml"))
+			if err != nil {
+				t.Fatalf("LoadProfile(%s): %v", name, err)
+			}
+			if err := ApplyProfile(settings, profile); err != nil {
+				t.Fatalf("ApplyProfile(%s): %v", name, err)
+			}
+
+			js := settings.Discovery.JSTangle
+			if js.MemoryBudgetMB < deparosconfig.MinJSTangleMemoryBudgetMB {
+				t.Errorf("MemoryBudgetMB = %d, want >= %d (deparos would reject and skip all discovery)",
+					js.MemoryBudgetMB, deparosconfig.MinJSTangleMemoryBudgetMB)
+			}
+			if js.MemoryBudgetMB != defaults.JSTangle.MemoryBudgetMB {
+				t.Errorf("MemoryBudgetMB = %d, want %d (profile omits jstangle; default must survive)",
+					js.MemoryBudgetMB, defaults.JSTangle.MemoryBudgetMB)
+			}
+			// A second omitted jstangle field and an omitted engine field, to prove
+			// this is a general key-preservation fix and not a one-field special case.
+			if js.WorkerMaxRSSMB != defaults.JSTangle.WorkerMaxRSSMB {
+				t.Errorf("WorkerMaxRSSMB = %d, want %d (preserved)", js.WorkerMaxRSSMB, defaults.JSTangle.WorkerMaxRSSMB)
+			}
+			if js.MaxASTNodes != defaults.JSTangle.MaxASTNodes {
+				t.Errorf("MaxASTNodes = %d, want %d (preserved)", js.MaxASTNodes, defaults.JSTangle.MaxASTNodes)
+			}
+
+			// The effective discovery config must pass its own validation — the same
+			// check the scan path runs before launching the phase.
+			if err := settings.Discovery.Validate(); err != nil {
+				t.Errorf("effective discovery config invalid after profile %q: %v", name, err)
+			}
+		})
+	}
+}
+
+// TestApplyProfile_KeyPreservingOverlayFromFile pins the mechanism: a profile that
+// sets only a couple of discovery keys must apply exactly those and leave every
+// omitted key (including nested ones) at its default. This is the property that
+// prevents the jstangle-budget class of regression for ANY future field.
+func TestApplyProfile_KeyPreservingOverlayFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "partial.yaml")
+	// Sets discovery.mode and a nested discovery.engine.timeout; omits everything
+	// else under discovery (notably jstangle and engine.observed_max_items).
+	content := "" +
+		"discovery:\n" +
+		"  mode: files_only\n" +
+		"  engine:\n" +
+		"    timeout: 20s\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write temp profile: %v", err)
+	}
+
+	settings := DefaultSettings()
+	defaults := DefaultDiscoveryConfig()
+	profile, err := LoadProfile(path)
+	if err != nil {
+		t.Fatalf("LoadProfile: %v", err)
+	}
+	if err := ApplyProfile(settings, profile); err != nil {
+		t.Fatalf("ApplyProfile: %v", err)
+	}
+
+	// Keys the profile set are applied…
+	if settings.Discovery.Mode != "files_only" {
+		t.Errorf("Mode = %q, want files_only", settings.Discovery.Mode)
+	}
+	if settings.Discovery.Engine.Timeout != "20s" {
+		t.Errorf("Engine.Timeout = %q, want 20s", settings.Discovery.Engine.Timeout)
+	}
+	// …and keys it omitted keep their defaults, at both the top and nested levels.
+	if settings.Discovery.JSTangle.MemoryBudgetMB != defaults.JSTangle.MemoryBudgetMB {
+		t.Errorf("JSTangle.MemoryBudgetMB = %d, want %d (omitted; must survive)",
+			settings.Discovery.JSTangle.MemoryBudgetMB, defaults.JSTangle.MemoryBudgetMB)
+	}
+	if settings.Discovery.Engine.ObservedMaxItems != defaults.Engine.ObservedMaxItems {
+		t.Errorf("Engine.ObservedMaxItems = %d, want %d (omitted nested; must survive)",
+			settings.Discovery.Engine.ObservedMaxItems, defaults.Engine.ObservedMaxItems)
 	}
 }

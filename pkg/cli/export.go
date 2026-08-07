@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/terminal"
+	"github.com/vigolium/vigolium/pkg/types"
 )
 
 var (
@@ -42,14 +44,16 @@ var exportCmd = &cobra.Command{
 
 Use --only to choose which tables to include, --omit-response to drop raw HTTP request/response bytes (keeps metadata, smaller files), and --search to fuzzy-filter rows before export. HTML and bundle output require -o/--output.
 
+Multiple formats can be combined in one run (--format html,markdown,bundle). The database is read once and every format is rendered from that one result set (fs is the exception — it streams its own record and finding cursors). With more than one format, -o/--output is the shared base path and each format appends its own extension (report.html, report.md, report.tar.gz); a single format still uses -o verbatim.
+
 The --format bundle (alias gz) emits a .tar.gz archive containing export.jsonl, report.html, manifest.json, and any agent session directories matching --scan-uuid <uuid> (repeatable).`,
 	RunE: runExportCmd,
 }
 
 func init() {
 	rootCmd.AddCommand(exportCmd)
-	exportCmd.Flags().StringVar(&topExportFormat, "format", "jsonl", "Export format: html, report, pdf, jsonl, markdown (alias: md), bundle (alias: gz), fs (flat request/response + finding tree)")
-	exportCmd.Flags().StringVarP(&topExportOutput, "output", "o", "", "Output file path or gs://<project>/<key> URL (required for html); supports {ts} and {project-uuid} placeholders")
+	exportCmd.Flags().StringVar(&topExportFormat, "format", "jsonl", "Export format(s), comma-separated: html, report, pdf, jsonl, markdown (alias: md), bundle (alias: gz), fs (flat request/response + finding tree)")
+	exportCmd.Flags().StringVarP(&topExportOutput, "output", "o", "", "Output file path or gs://<project>/<key> URL (required for html; base path when multiple formats are given); supports {ts} and {project-uuid} placeholders")
 	exportCmd.Flags().StringSliceVar(&topExportOnly, "only", nil,
 		"Export only these tables (repeatable: http, findings, scans, modules, oast, source-repos, scopes)")
 	exportCmd.Flags().BoolVar(&topExportOmitResponse, "omit-response", false,
@@ -111,83 +115,336 @@ func scopeProjectBun(q *bun.SelectQuery, projectUUID string) *bun.SelectQuery {
 	return q
 }
 
+// validExportFormats lists the canonical --format values `vigolium export`
+// accepts. Aliases are normalized onto these by parseExportFormats.
+var validExportFormats = []string{"html", "report", "pdf", "jsonl", "markdown", "bundle", "fs"}
+
+// exportFormatAliases maps accepted alias spellings onto their canonical format,
+// so only canonical names reach the dispatcher.
+var exportFormatAliases = map[string]string{
+	"md": "markdown",
+	"gz": "bundle",
+}
+
+// exportFormatSpec is one requested format after alias normalization: the
+// canonical name, the token the user actually typed (so errors quote their
+// spelling), and the output path assigned to it.
+type exportFormatSpec struct {
+	format string
+	raw    string
+	path   string
+}
+
+// parseExportFormats splits a comma-separated --format value into canonical
+// format specs, rejecting unknown names and collapsing duplicates (`html,html`
+// renders once). Order is preserved so formats materialize in the order asked
+// for.
+func parseExportFormats(raw string) ([]exportFormatSpec, error) {
+	parts := strings.Split(raw, ",")
+	specs := make([]exportFormatSpec, 0, len(parts))
+	seen := make(map[string]bool, len(parts))
+	for _, p := range parts {
+		token := strings.TrimSpace(p)
+		if token == "" {
+			continue
+		}
+		canonical := strings.ToLower(token)
+		if alias, ok := exportFormatAliases[canonical]; ok {
+			canonical = alias
+		}
+		if !slices.Contains(validExportFormats, canonical) {
+			return nil, fmt.Errorf("unsupported format %q; valid formats: %s", token, strings.Join(validExportFormats, ", "))
+		}
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		specs = append(specs, exportFormatSpec{format: canonical, raw: token})
+	}
+	if len(specs) == 0 {
+		return nil, fmt.Errorf("--format requires at least one format; valid formats: %s", strings.Join(validExportFormats, ", "))
+	}
+	return specs, nil
+}
+
+// exportFormatNames lists the canonical format names of a spec set, for messages.
+func exportFormatNames(specs []exportFormatSpec) []string {
+	names := make([]string, 0, len(specs))
+	for _, s := range specs {
+		names = append(names, s.format)
+	}
+	return names
+}
+
+// assignExportPaths gives every format its output path. A single format keeps the
+// -o value verbatim, so `--format html -o report` still writes exactly "report".
+// Multiple formats derive one path each off the shared base — extension stripped,
+// then re-appended per format — because one -o cannot name them all.
+func assignExportPaths(specs []exportFormatSpec, base string) {
+	if len(specs) == 1 {
+		specs[0].path = base
+		return
+	}
+	stem := types.StripFormatExtension(base)
+	for i := range specs {
+		specs[i].path = types.FormatOutputPath(stem, specs[i].format)
+	}
+}
+
+// exportFormatNeedsOutput reports whether a format cannot run without -o. jsonl
+// streams to stdout when unset and fs defaults its base to the cwd; every other
+// format writes a file this command cannot name on its own.
+func exportFormatNeedsOutput(format string) bool {
+	switch format {
+	case "jsonl", "fs":
+		return false
+	}
+	return true
+}
+
+// validateExportFormatPath enforces the per-format output requirements against
+// the path the format actually resolved to.
+func validateExportFormatPath(s exportFormatSpec) error {
+	if exportFormatNeedsOutput(s.format) && s.path == "" {
+		return fmt.Errorf("--format %s requires -o/--output to specify the report file path", s.raw)
+	}
+	if s.format == "bundle" && !strings.HasSuffix(s.path, ".tar.gz") && !strings.HasSuffix(s.path, ".tgz") {
+		return fmt.Errorf("--format %s requires -o ending in .tar.gz or .tgz (got %q)", s.raw, s.path)
+	}
+	return nil
+}
+
+// validateExportOnly rejects unknown --only table names.
+func validateExportOnly() error {
+	if len(topExportOnly) == 0 {
+		return nil
+	}
+	valid := make(map[string]bool, len(validExportTypes))
+	for _, v := range validExportTypes {
+		valid[v] = true
+	}
+	for _, t := range topExportOnly {
+		if !valid[strings.ToLower(t)] {
+			return fmt.Errorf("invalid --only value %q; valid values: %s", t, strings.Join(validExportTypes, ", "))
+		}
+	}
+	return nil
+}
+
+// exportNeedsDB reports whether any requested table lives in the database.
+// Modules come from the in-memory registry, so a modules-only export needs none.
+func exportNeedsDB() bool {
+	return shouldExport("http") || shouldExport("findings") || shouldExport("scans") ||
+		shouldExport("oast") || shouldExport("source-repos") || shouldExport("scopes")
+}
+
 func runExportCmd(cmd *cobra.Command, args []string) error {
 	defer syncLogger()
 
-	// Validate --only values
-	if len(topExportOnly) > 0 {
-		valid := make(map[string]bool, len(validExportTypes))
-		for _, v := range validExportTypes {
-			valid[v] = true
-		}
-		for _, t := range topExportOnly {
-			if !valid[strings.ToLower(t)] {
-				return fmt.Errorf("invalid --only value %q; valid values: %s", t, strings.Join(validExportTypes, ", "))
-			}
+	if err := validateExportOnly(); err != nil {
+		return err
+	}
+
+	specs, err := parseExportFormats(topExportFormat)
+	if err != nil {
+		return err
+	}
+
+	// One -o cannot name three files, so a multi-format run needs a base to
+	// derive them from.
+	if len(specs) > 1 && topExportOutput == "" {
+		return fmt.Errorf("multiple --format values (%s) require -o/--output to specify the base output path",
+			strings.Join(exportFormatNames(specs), ", "))
+	}
+
+	// Expand {ts}/{project-uuid} ONCE on the base, before deriving per-format
+	// paths: {ts} is stamped at expansion time, so resolving it per format would
+	// let a slow renderer (pdf shells out to headless Chrome) land on a later
+	// second than its siblings and scatter one run across several timestamps.
+	base, err := expandOutputPlaceholders(topExportOutput)
+	if err != nil {
+		return err
+	}
+	assignExportPaths(specs, base)
+
+	for _, s := range specs {
+		if err := validateExportFormatPath(s); err != nil {
+			return err
 		}
 	}
 
-	// fs writes a directory tree (not a single file), defaults its base to the
-	// cwd when no -o is given, and isn't a gs:// upload target — so it bypasses
-	// the file-oriented output resolution below.
-	if topExportFormat == "fs" {
-		return runExportFS()
-	}
-
-	needsOutput := topExportFormat == "html" || topExportFormat == "report" || topExportFormat == "pdf" ||
-		topExportFormat == "markdown" || topExportFormat == "md" ||
-		topExportFormat == "bundle" || topExportFormat == "gz"
-	if needsOutput && topExportOutput == "" {
-		return fmt.Errorf("--format %s requires -o/--output to specify the report file path", topExportFormat)
-	}
-	if topExportFormat == "bundle" || topExportFormat == "gz" {
-		if !strings.HasSuffix(topExportOutput, ".tar.gz") && !strings.HasSuffix(topExportOutput, ".tgz") {
-			return fmt.Errorf("--format %s requires -o ending in .tar.gz or .tgz (got %q)", topExportFormat, topExportOutput)
-		}
-	}
-
-	// Resolve gs:// outputs to a temp file + uploader, and expand {ts}.
 	ctx := context.Background()
-	localOutput, finalize, err := resolveExportOutput(ctx, topExportOutput)
-	if err != nil {
-		return err
-	}
-	topExportOutput = localOutput
-
-	var dispatchErr error
-	switch topExportFormat {
-	case "html":
-		dispatchErr = runExportHTML()
-	case "report":
-		dispatchErr = runExportReport()
-	case "pdf":
-		dispatchErr = runExportPDF()
-	case "jsonl":
-		dispatchErr = runExportJSONL()
-	case "markdown", "md":
-		dispatchErr = runExportMarkdown()
-	case "bundle", "gz":
-		dispatchErr = runExportBundle()
-	default:
-		return fmt.Errorf("unsupported format %q; valid formats: html, report, pdf, jsonl, markdown, bundle, fs", topExportFormat)
-	}
-	if dispatchErr != nil {
-		return dispatchErr
-	}
-	return finalize()
-}
-
-func runExportWithGenerator(formatLabel, defaultTitle string, generate func([]any, string, output.HTMLReportMeta) error) error {
-	db, err := openExportDB()
-	if err != nil {
-		return err
-	}
+	run := &exportRun{multi: len(specs) > 1}
+	// Nil-safe when no format ever opened the DB (a modules-only jsonl export).
 	defer closeDatabaseOnExit()
 
-	ctx := context.Background()
+	var (
+		outputs []exportedFile
+		failed  []string
+	)
+	for _, s := range specs {
+		outs, err := run.runFormat(ctx, s)
+		if err != nil {
+			// A single format keeps the bare error (and the exact message it
+			// always had). In a multi-format run one format that cannot render
+			// must not discard the siblings that already succeeded, so the
+			// failure is reported here and the run continues.
+			if !run.multi {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "%s Failed to export %s: %v\n", terminal.ErrorPrefix(), s.format, err)
+			failed = append(failed, s.format)
+			continue
+		}
+		outputs = append(outputs, outs...)
+	}
+
+	if run.multi {
+		printMultiExportSummary(exportFormatNames(specs), run.items, outputs)
+	}
+	if len(failed) > 0 {
+		// Each failure printed its own reason above; this only carries the
+		// non-zero exit and names which formats to look for.
+		return fmt.Errorf("%d of %d formats failed: %s", len(failed), len(specs), strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+// exportRun carries the state shared by every format in one `vigolium export`
+// invocation: the database handle, the materialized envelope set, and the
+// auto-detected report metadata. Each is built at most once, so exporting three
+// formats reads the database once instead of three times. fs is the one format
+// that does not render from the shared set — writeFSExport streams its own
+// record and finding cursors, because queryExportData dedupes and re-sorts rows
+// the fs tree is meant to carry verbatim.
+//
+// Sharing one item slice across renderers is safe because they treat it as
+// read-only — the HTML/bundle body trimming rewrites each item's marshaled JSON
+// rather than the structs behind it.
+type exportRun struct {
+	db *database.DB
+
+	// itemsSet and metaSet are needed because both memos have legitimate empty
+	// values — an empty database yields no items, and computeReportMeta returns
+	// ("","") when it finds no scan row — so the zero value cannot stand in for
+	// "not loaded yet". The db handle needs no such flag: openExportDB never
+	// returns (nil, nil).
+	items    []any
+	itemsSet bool
+
+	metaTarget   string
+	metaDuration string
+	metaSet      bool
+
+	// multi records that more than one format was requested, which switches the
+	// per-format count blocks off in favor of one unified summary at the end.
+	multi bool
+}
+
+// openDB opens the export database once per run.
+func (r *exportRun) openDB() (*database.DB, error) {
+	if r.db != nil {
+		return r.db, nil
+	}
+	db, err := openExportDB()
+	if err != nil {
+		return nil, err
+	}
+	r.db = db
+	return db, nil
+}
+
+// loadItems materializes the export envelopes once and reuses them for every
+// later format. db may be nil (a modules-only export needs no database).
+func (r *exportRun) loadItems(ctx context.Context, db *database.DB) ([]any, error) {
+	if r.itemsSet {
+		return r.items, nil
+	}
 	items, err := queryExportData(ctx, db, topExportOmitResponse, "")
 	if err != nil {
-		return err
+		return nil, err
+	}
+	r.items, r.itemsSet = items, true
+	return items, nil
+}
+
+// reportMeta auto-detects the report target and duration once per run.
+func (r *exportRun) reportMeta(ctx context.Context, db *database.DB) (target, duration string) {
+	if !r.metaSet {
+		r.metaTarget, r.metaDuration = computeReportMeta(ctx, db)
+		r.metaSet = true
+	}
+	return r.metaTarget, r.metaDuration
+}
+
+// printStats prints the per-format count block. Suppressed in a multi-format run,
+// where every format renders the same result set and the counts are reported once
+// by printMultiExportSummary instead.
+func (r *exportRun) printStats(format, outputPath string, items []any) {
+	if r.multi {
+		return
+	}
+	printExportStats(format, outputPath, items)
+}
+
+// runFormat materializes one requested format at its resolved path, returning the
+// files it wrote for the multi-format summary.
+func (r *exportRun) runFormat(ctx context.Context, s exportFormatSpec) ([]exportedFile, error) {
+	// fs writes a directory tree rather than a single file, so it is not a gs://
+	// upload target and skips the file-oriented output resolution below.
+	if s.format == "fs" {
+		return r.exportFS(ctx, s.path)
+	}
+
+	// Resolve gs:// outputs to a temp file plus an uploader.
+	localPath, finalize, err := resolveExportOutput(ctx, s.path)
+	if err != nil {
+		return nil, err
+	}
+
+	var outs []exportedFile
+	switch s.format {
+	case "jsonl":
+		outs, err = r.exportJSONL(ctx, localPath)
+	case "bundle":
+		outs, err = r.exportBundle(ctx, localPath)
+	default:
+		outs, err = r.exportReport(ctx, s.format, localPath)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := finalize(); err != nil {
+		return nil, err
+	}
+	// A gs:// destination wrote through a temp file; report where the user asked
+	// for it, not the scratch path finalize() has already uploaded and removed.
+	if localPath != s.path {
+		for i := range outs {
+			outs[i].path = s.path
+		}
+	}
+	return outs, nil
+}
+
+// exportReport renders one of the document formats (html, report, pdf, markdown)
+// from the run's shared item set.
+func (r *exportRun) exportReport(ctx context.Context, format, outputPath string) ([]exportedFile, error) {
+	generate, defaultTitle, ok := reportGenerator(format)
+	if !ok {
+		return nil, fmt.Errorf("unsupported format %q; valid formats: %s", format, strings.Join(validExportFormats, ", "))
+	}
+	if format == "pdf" {
+		fmt.Fprintf(os.Stderr, "%s Generating PDF report (headless Chrome)...\n", terminal.InfoSymbol())
+	}
+
+	db, err := r.openDB()
+	if err != nil {
+		return nil, err
+	}
+	items, err := r.loadItems(ctx, db)
+	if err != nil {
+		return nil, err
 	}
 
 	title := defaultTitle
@@ -195,7 +452,7 @@ func runExportWithGenerator(formatLabel, defaultTitle string, generate func([]an
 		title = topExportTitle
 	}
 
-	autoTarget, autoDuration := computeReportMeta(ctx, db)
+	autoTarget, autoDuration := r.reportMeta(ctx, db)
 
 	duration := autoDuration
 	if topExportDuration != "" {
@@ -214,11 +471,11 @@ func runExportWithGenerator(formatLabel, defaultTitle string, generate func([]an
 		GeneratedAt:     topExportGeneratedAt,
 		ReportSharedURL: topExportReportURL,
 	}
-	if err := generate(items, topExportOutput, meta); err != nil {
-		return err
+	if err := generate(items, outputPath, meta); err != nil {
+		return nil, err
 	}
-	printExportStats(formatLabel, topExportOutput, items)
-	return nil
+	r.printStats(format, outputPath, items)
+	return []exportedFile{{label: format, path: outputPath}}, nil
 }
 
 // reportGenerator maps a document/report format to its generator and default
@@ -237,22 +494,6 @@ func reportGenerator(format string) (gen func([]any, string, output.HTMLReportMe
 		return output.GenerateMarkdownReport, "Vigolium Scan Report", true
 	}
 	return nil, "", false
-}
-
-func runExportHTML() error {
-	gen, title, _ := reportGenerator("html")
-	return runExportWithGenerator("html", title, gen)
-}
-
-func runExportReport() error {
-	gen, title, _ := reportGenerator("report")
-	return runExportWithGenerator("report", title, gen)
-}
-
-func runExportPDF() error {
-	fmt.Fprintf(os.Stderr, "%s Generating PDF report (headless Chrome)...\n", terminal.InfoSymbol())
-	gen, title, _ := reportGenerator("pdf")
-	return runExportWithGenerator("pdf", title, gen)
 }
 
 // computeReportMeta auto-detects scanTarget and scanDuration from the database.
@@ -306,33 +547,28 @@ func computeReportMeta(ctx context.Context, db *database.DB) (target, duration s
 	return
 }
 
-func runExportJSONL() error {
+// exportJSONL writes the run's shared item set as JSONL, to outputPath or stdout.
+func (r *exportRun) exportJSONL(ctx context.Context, outputPath string) ([]exportedFile, error) {
 	// Modules don't need DB access, so handle the modules-only case without opening DB.
-	needsDB := shouldExport("http") || shouldExport("findings") || shouldExport("scans") ||
-		shouldExport("oast") || shouldExport("source-repos") || shouldExport("scopes")
-
 	var db *database.DB
-	if needsDB {
+	if exportNeedsDB() {
 		var err error
-		db, err = openExportDB()
-		if err != nil {
-			return err
+		if db, err = r.openDB(); err != nil {
+			return nil, err
 		}
-		defer closeDatabaseOnExit()
 	}
 
-	ctx := context.Background()
-	items, err := queryExportData(ctx, db, topExportOmitResponse, "")
+	items, err := r.loadItems(ctx, db)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Open output writer
 	var w *os.File
-	if topExportOutput != "" {
-		f, err := os.Create(topExportOutput)
+	if outputPath != "" {
+		f, err := os.Create(outputPath)
 		if err != nil {
-			return fmt.Errorf("failed to create output file: %w", err)
+			return nil, fmt.Errorf("failed to create output file: %w", err)
 		}
 		defer func() { _ = f.Close() }()
 		w = f
@@ -341,14 +577,28 @@ func runExportJSONL() error {
 	}
 
 	if _, err := encodeJSONL(w, items); err != nil {
-		return fmt.Errorf("failed to encode record: %w", err)
+		return nil, fmt.Errorf("failed to encode record: %w", err)
 	}
 
-	printExportStats("jsonl", topExportOutput, items)
-	return nil
+	r.printStats("jsonl", outputPath, items)
+	if outputPath == "" {
+		return nil, nil // streamed to stdout; nothing to list
+	}
+	return []exportedFile{{label: "jsonl", path: outputPath}}, nil
 }
 
 func printExportStats(format, outputPath string, items []any) {
+	fmt.Fprintf(os.Stderr, "\n%s Export summary (format: %s)\n", terminal.InfoSymbol(), terminal.Cyan(format))
+	if outputPath != "" {
+		fmt.Fprintf(os.Stderr, "  Output: %s\n", terminal.Cyan(outputPath))
+	}
+	printExportCounts(items)
+}
+
+// printExportCounts prints the per-type item tally in a stable order, followed by
+// the total. Shared by the single-format block and the multi-format summary, which
+// report the same counts because every format renders one result set.
+func printExportCounts(items []any) {
 	counts := make(map[string]int)
 	for _, item := range items {
 		if env, ok := item.(exportEnvelope); ok {
@@ -356,12 +606,6 @@ func printExportStats(format, outputPath string, items []any) {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "\n%s Export summary (format: %s)\n", terminal.InfoSymbol(), terminal.Cyan(format))
-	if outputPath != "" {
-		fmt.Fprintf(os.Stderr, "  Output: %s\n", terminal.Cyan(outputPath))
-	}
-
-	// Print counts in a stable order
 	typeOrder := []struct{ key, label string }{
 		{"http_record", "HTTP records"},
 		{"finding", "Findings"},
@@ -379,20 +623,26 @@ func printExportStats(format, outputPath string, items []any) {
 	fmt.Fprintf(os.Stderr, "  %-20s %d\n", "Total", len(items))
 }
 
-func runExportMarkdown() error {
-	gen, title, _ := reportGenerator("markdown")
-	return runExportWithGenerator("markdown", title, gen)
+// printMultiExportSummary reports a multi-format run once: the shared item counts,
+// then every file written listed under one "Exports" header (reusing the scan
+// commands' summary renderer).
+func printMultiExportSummary(formats []string, items []any, outputs []exportedFile) {
+	if len(outputs) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n%s Export summary (formats: %s)\n", terminal.InfoSymbol(), terminal.Cyan(strings.Join(formats, ", ")))
+	printExportCounts(items)
+	printExportSummary(outputs)
 }
 
-// runExportFS writes the whole DB to a flat <base>-traffic/ + <base>-findings/
+// exportFS writes the whole DB to a flat <base>-traffic/ + <base>-findings/
 // filesystem tree (the `fs` format). Honors --search, --severity, --limit, and
 // --omit-response; defaults the base to "vigolium" in the cwd when no -o is set.
-func runExportFS() error {
-	db, err := openExportDB()
+func (r *exportRun) exportFS(ctx context.Context, outputPath string) ([]exportedFile, error) {
+	db, err := r.openDB()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer closeDatabaseOnExit()
 
 	var severities []string
 	if topExportSeverity != "" {
@@ -403,12 +653,14 @@ func runExportFS() error {
 		Severity:  severities,
 		Limit:     topExportLimit,
 	}
-	stats, err := writeFSExport(context.Background(), db, filters, topExportOutput, fsExportOptions{omitResponse: topExportOmitResponse})
+	stats, err := writeFSExport(ctx, db, filters, outputPath, fsExportOptions{omitResponse: topExportOmitResponse})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	fsPrintSummary(stats)
-	return nil
+	if !r.multi {
+		fsPrintSummary(stats)
+	}
+	return fsExportOutputs(stats), nil
 }
 
 // queryExportData queries all enabled tables and returns a slice of exportEnvelope

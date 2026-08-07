@@ -64,10 +64,38 @@ Important flags include:
   `--knowledge-base-raw`, `--prior-context`, `--diff`, `--last-commits`;
 - audit: `--audit`, `--piolium`;
 - control: `--intensity`, `--max-duration`, `--dry-run`, `--resume`;
+- output: `-S/--stateless`, `--format`, `-o/--output`;
 - debugging: `--session-dir`, `--transcript`, `--verbose`.
 
 There is no public `--max-commands` or `--timeout` flag. Intensity selects the
 internal turn budget; use `--max-duration` for the wall-clock cap.
+
+### Throwaway runs and reports (`-S/--stateless`)
+
+`-S/--stateless` runs the whole autopilot into a throwaway temporary database —
+your project DB is left untouched — then materializes `--format` outputs from it,
+mirroring `vigolium scan -S`. The operator's own `vigolium` subprocesses inherit
+the throwaway DB (via `VIGOLIUM_DB_PATH`), so its findings never leak into the
+project database.
+
+```bash
+vigolium agent autopilot --stateless \
+  --format sqlite,html,console \
+  -t http://app.example.com \
+  --intensity deep --prompt-file prompt.md
+```
+
+`--format` accepts a comma-separated list of `console`, `jsonl`, `html`,
+`report`, `pdf`, `sqlite`, `fs`. With more than one, `-o/--output` is a shared
+**base path** and each format appends its own extension (`.sqlite`, `.html`, …).
+With no `-o`, the base defaults to `vigolium-result/vigolium-autopilot`. The
+exported `.sqlite` reopens directly with `vigolium finding/traffic -S --db
+<file>.sqlite`.
+
+A file-producing `--format` (anything but `console`) is a **hard error without
+`-S`**: a persisted run has no live output writer, so export it afterwards with
+`vigolium export --format … -o <path>` instead. `-S` cannot be combined with
+`--db`, `--db-isolate`, or `--resume`.
 
 Durable resume is available when `agent.olium.autopilot_mode` is `shadow` or
 `enforced`:

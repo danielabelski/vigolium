@@ -535,14 +535,14 @@ var AutopilotPresets = map[Intensity]AutopilotIntensityPreset{
 		NativeScanStrategy: ScanStrategyLite,
 	},
 	IntensityBalanced: {
-		MaxCommands:        500,
+		MaxCommands:        750,
 		Timeout:            6 * time.Hour,
 		AuditDriverMode:    "balanced",
 		Browser:            true,
 		NativeScanStrategy: ScanStrategyBalanced,
 	},
 	IntensityDeep: {
-		MaxCommands:        1500,
+		MaxCommands:        3000,
 		Timeout:            12 * time.Hour,
 		AuditDriverMode:    "deep",
 		Browser:            true,

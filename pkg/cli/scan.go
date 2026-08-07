@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1216,6 +1217,29 @@ func parseFormats(raw string) []string {
 	return formats
 }
 
+// scanOutputFormats is the canonical set of --format values the scan commands
+// and the agentic-scan -S export accept — one list, because both materialize
+// their output through the same exporter (finishStatelessExport).
+var scanOutputFormats = []string{"console", "jsonl", "html", "report", "pdf", "sqlite", "fs"}
+
+// normalizeScanFormats canonicalizes the sqlite aliases (sqlite3, db) in place —
+// so the downstream switches and path helpers only ever see one spelling — and
+// rejects anything outside scanOutputFormats. Shared by reconcileOutputFormats
+// and planAgentStateless so a format accepted by `scan -S` is accepted by
+// `agent autopilot -S` too.
+func normalizeScanFormats(formats []string) error {
+	for i, f := range formats {
+		switch strings.ToLower(f) {
+		case "sqlite", "sqlite3", "db":
+			formats[i] = "sqlite"
+		}
+		if !slices.Contains(scanOutputFormats, formats[i]) {
+			return fmt.Errorf("invalid --format value %q; valid formats: %s", f, strings.Join(scanOutputFormats, ", "))
+		}
+	}
+	return nil
+}
+
 // reconcileOutputFormats applies --json and --ci-output-format overrides to
 // OutputFormats and validates the result. Shared by scan and scan-url commands.
 func reconcileOutputFormats(opts *types.Options) error {
@@ -1231,20 +1255,8 @@ func reconcileOutputFormats(opts *types.Options) error {
 		opts.JSONOutput = true
 		opts.Silent = true
 	}
-	// Normalize the sqlite aliases (sqlite3, db) to the canonical "sqlite" so the
-	// downstream switch / path helpers only deal with one spelling.
-	for i, f := range opts.OutputFormats {
-		switch strings.ToLower(f) {
-		case "sqlite", "sqlite3", "db":
-			opts.OutputFormats[i] = "sqlite"
-		}
-	}
-	for _, f := range opts.OutputFormats {
-		switch f {
-		case "console", "jsonl", "html", "report", "pdf", "sqlite", "fs":
-		default:
-			return fmt.Errorf("invalid --format value %q; valid formats: console, jsonl, html, report, pdf, sqlite, fs", f)
-		}
+	if err := normalizeScanFormats(opts.OutputFormats); err != nil {
+		return err
 	}
 	// The sqlite format dumps this run's database to a standalone file, which is
 	// only well-defined in stateless mode (a per-run temp DB). A persisted run

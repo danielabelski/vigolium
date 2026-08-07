@@ -34,6 +34,8 @@ func TestPromptFlagRegistered(t *testing.T) {
 	} {
 		assert.NotNil(t, cmd.flags.Lookup("prompt"),
 			"--prompt must be registered on `vigolium agent %s`", cmd.name)
+		assert.NotNil(t, cmd.flags.Lookup("prompt-file"),
+			"--prompt-file must be registered on `vigolium agent %s`", cmd.name)
 		for _, gone := range []string{"instruction", "instruction-file", "focus"} {
 			assert.Nil(t, cmd.flags.Lookup(gone),
 				"--%s must be removed from `vigolium agent %s` (folded into --prompt/--plan-file)", gone, cmd.name)
@@ -61,11 +63,11 @@ func TestResolvePlanFile_RejectsInputConflict(t *testing.T) {
 // positional) can't be combined with --plan-file — the plan file owns the
 // instruction channel.
 func TestResolveRawPrompt_RejectsPlanFileConflict(t *testing.T) {
-	if _, err := resolveRawPrompt([]string{"hunt IDOR"}, "", "/tmp/plan.md"); err == nil ||
+	if _, err := resolveRawPrompt([]string{"hunt IDOR"}, "", "", "/tmp/plan.md"); err == nil ||
 		!strings.Contains(err.Error(), "--plan-file") {
 		t.Fatalf("expected --plan-file conflict for positional prompt, got %v", err)
 	}
-	if _, err := resolveRawPrompt(nil, "hunt IDOR", "/tmp/plan.md"); err == nil ||
+	if _, err := resolveRawPrompt(nil, "hunt IDOR", "", "/tmp/plan.md"); err == nil ||
 		!strings.Contains(err.Error(), "--plan-file") {
 		t.Fatalf("expected --plan-file conflict for --prompt, got %v", err)
 	}
@@ -74,7 +76,7 @@ func TestResolveRawPrompt_RejectsPlanFileConflict(t *testing.T) {
 // TestResolveRawPrompt_RejectsBothSpellings guards that the positional [prompt]
 // and --prompt can't both be supplied.
 func TestResolveRawPrompt_RejectsBothSpellings(t *testing.T) {
-	if _, err := resolveRawPrompt([]string{"do X"}, "do Y", ""); err == nil ||
+	if _, err := resolveRawPrompt([]string{"do X"}, "do Y", "", ""); err == nil ||
 		!strings.Contains(err.Error(), "not both") {
 		t.Fatalf("expected both-spellings error, got %v", err)
 	}
@@ -83,12 +85,46 @@ func TestResolveRawPrompt_RejectsBothSpellings(t *testing.T) {
 // TestResolveRawPrompt_EitherSpelling confirms positional and --prompt resolve
 // to the same trimmed value.
 func TestResolveRawPrompt_EitherSpelling(t *testing.T) {
-	fromPos, err := resolveRawPrompt([]string{"  hunt IDOR  "}, "", "")
+	fromPos, err := resolveRawPrompt([]string{"  hunt IDOR  "}, "", "", "")
 	require.NoError(t, err)
-	fromFlag, err := resolveRawPrompt(nil, "hunt IDOR", "")
+	fromFlag, err := resolveRawPrompt(nil, "hunt IDOR", "", "")
 	require.NoError(t, err)
 	assert.Equal(t, "hunt IDOR", fromPos)
 	assert.Equal(t, "hunt IDOR", fromFlag)
+}
+
+// TestResolveRawPrompt_PromptFile confirms --prompt-file reads the file as the
+// prompt, and that it conflicts with the other spellings + --plan-file.
+func TestResolveRawPrompt_PromptFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "prompt.md")
+	require.NoError(t, os.WriteFile(path, []byte("  scan deeply as admin/user  \n"), 0o600))
+
+	got, err := resolveRawPrompt(nil, "", path, "")
+	require.NoError(t, err)
+	assert.Equal(t, "scan deeply as admin/user", got)
+
+	// --prompt-file + --prompt is "pass it once".
+	if _, err := resolveRawPrompt(nil, "inline", path, ""); err == nil ||
+		!strings.Contains(err.Error(), "not both") {
+		t.Fatalf("expected both-spellings error for --prompt-file + --prompt, got %v", err)
+	}
+	// --prompt-file + --plan-file is a plan-file conflict.
+	if _, err := resolveRawPrompt(nil, "", path, "/tmp/plan.md"); err == nil ||
+		!strings.Contains(err.Error(), "--plan-file") {
+		t.Fatalf("expected --plan-file conflict for --prompt-file, got %v", err)
+	}
+	// Missing file is a hard error.
+	if _, err := resolveRawPrompt(nil, "", filepath.Join(dir, "nope.md"), ""); err == nil {
+		t.Fatal("expected error for missing --prompt-file")
+	}
+	// Empty file is a hard error.
+	empty := filepath.Join(dir, "empty.md")
+	require.NoError(t, os.WriteFile(empty, []byte("   \n"), 0o600))
+	if _, err := resolveRawPrompt(nil, "", empty, ""); err == nil ||
+		!strings.Contains(err.Error(), "empty") {
+		t.Fatalf("expected empty-file error, got %v", err)
+	}
 }
 
 func TestResolvePlanFile_MissingFile(t *testing.T) {

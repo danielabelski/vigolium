@@ -30,15 +30,15 @@ type Settings struct {
 	Storage           StorageConfig           `yaml:"storage"`
 }
 
-// ProfileScanningStrategy is the subset of ScanningStrategyConfig that a
-// profile is permitted to override. It deliberately excludes the per-strategy
-// phase tables (Lite/Balanced/Deep), session, and scan_logs — those are
-// global-config concerns, and exposing them here would let a profile silently
-// zero-clobber strategy phase definitions during the YAML round-trip used by
-// ApplyProfile (every field without omitempty round-trips as its zero value).
-//
-// A profile selects WHICH strategy applies (DefaultStrategy) and tunes the
-// heuristics check; it does not redefine WHAT each strategy means.
+// ProfileScanningStrategy is the allowlist of ScanningStrategyConfig keys a
+// profile is permitted to override: it selects WHICH strategy applies
+// (DefaultStrategy) and tunes the heuristics check, and nothing else. The
+// per-strategy phase tables (Lite/Balanced/Deep), session, scan_logs, http, and
+// port_sweep are deliberately excluded — a profile picks a strategy, it does not
+// redefine WHAT each strategy means or touch global-config concerns. This is why
+// ApplyProfile merges scanning_strategy field-by-field (below) rather than through
+// the general key-preserving section overlay: the general path would faithfully
+// apply any strategy sub-key a profile set, widening this authorization boundary.
 type ProfileScanningStrategy struct {
 	DefaultStrategy string `yaml:"default_strategy,omitempty"`
 	HeuristicsCheck string `yaml:"heuristics_check,omitempty"`
@@ -57,6 +57,12 @@ type ProfileSettings struct {
 	MutationStrategy  *MutationStrategyConfig  `yaml:"mutation_strategy,omitempty"`
 	Scope             *ScopeConfig             `yaml:"scope,omitempty"`
 	Notify            *NotifyConfig            `yaml:"notify,omitempty"`
+
+	// raw holds the profile document's top-level section value-nodes, keyed by
+	// their YAML key, captured by LoadProfile and consumed by ApplyProfile (see
+	// there for why). Unexported, so it never round-trips through YAML; nil for a
+	// ProfileSettings built programmatically rather than loaded from a file.
+	raw map[string]*yaml.Node
 }
 
 // LoadProfile reads and parses a scanning profile YAML file.
@@ -68,21 +74,58 @@ func LoadProfile(path string) (*ProfileSettings, error) {
 
 	content := ExpandEnvVars(string(data))
 
-	var profile ProfileSettings
-	if err := yaml.Unmarshal([]byte(content), &profile); err != nil {
+	// Parse once into a node, then derive both the typed struct and the per-section
+	// raw nodes from it. ApplyProfile overlays each present section from the raw
+	// nodes so it applies only the keys the file actually set (key-preserving).
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
 		return nil, fmt.Errorf("failed to parse profile file %s: %w", path, err)
 	}
+	var profile ProfileSettings
+	if err := doc.Decode(&profile); err != nil {
+		return nil, fmt.Errorf("failed to parse profile file %s: %w", path, err)
+	}
+	profile.raw = topLevelSectionNodes(&doc)
 
 	return &profile, nil
 }
 
+// topLevelSectionNodes returns the value node for each top-level mapping key in a
+// parsed YAML document, keyed by the key string; these are what make ApplyProfile
+// key-preserving. Returns nil for an empty or non-mapping document.
+func topLevelSectionNodes(doc *yaml.Node) map[string]*yaml.Node {
+	root := doc
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return nil
+		}
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return nil
+	}
+	sections := make(map[string]*yaml.Node, len(root.Content)/2)
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		sections[root.Content[i].Value] = root.Content[i+1]
+	}
+	return sections
+}
+
 // ApplyProfile overlays non-nil profile sections onto settings.
 //
-// Most sections are overlaid via a YAML round-trip (marshal the profile section,
-// unmarshal onto the settings section). The ScanningStrategy section is handled
-// specially via ProfileScanningStrategy: its fields are merged explicitly so that
-// the per-strategy phase tables (Lite/Balanced/Deep) defined in the global config
-// are never clobbered by a profile that only meant to set default_strategy.
+// Each section is overlaid KEY-PRESERVINGLY: the section's raw YAML node (captured
+// by LoadProfile) is decoded onto the live settings section, so only the keys the
+// profile file actually set are written and an omitted sub-key (e.g.
+// discovery.jstangle) keeps its global/default value. This replaces an earlier
+// marshal→unmarshal round-trip that emitted every non-omitempty field as its zero
+// value — which is how --intensity deep once silently zeroed
+// discovery.jstangle.memory_budget_mb and aborted the whole Discovery phase.
+//
+// ScanningStrategy is handled specially via the ProfileScanningStrategy allowlist
+// (merged field-by-field above) and never flows through the section overlay. Only
+// sections present as raw nodes are overlaid, so a programmatically-built
+// ProfileSettings (no raw nodes, e.g. tests) applies only ScanningStrategy here;
+// every current caller of the section overlay goes through LoadProfile.
 func ApplyProfile(settings *Settings, profile *ProfileSettings) error {
 	if profile.ScanningStrategy != nil {
 		if v := profile.ScanningStrategy.DefaultStrategy; v != "" {
@@ -93,47 +136,34 @@ func ApplyProfile(settings *Settings, profile *ProfileSettings) error {
 		}
 	}
 
+	// Each entry pairs a section's YAML key (matching its ProfileSettings/Settings
+	// yaml tag) with the live destination. Presence is decided by the raw node
+	// alone: a key the file omitted is left untouched — defaults intact, never
+	// re-zeroed — and a key written as an explicit null decodes as a no-op. The
+	// matching ProfileSettings pointer fields are not consulted here; they exist
+	// so LoadProfile type-checks the document up front.
 	type overlay struct {
-		src  any
+		key  string
 		dest any
 	}
 
-	overlays := []overlay{}
-	if profile.ScanningPace != nil {
-		overlays = append(overlays, overlay{profile.ScanningPace, &settings.ScanningPace})
-	}
-	if profile.Discovery != nil {
-		overlays = append(overlays, overlay{profile.Discovery, &settings.Discovery})
-	}
-	if profile.Spidering != nil {
-		overlays = append(overlays, overlay{profile.Spidering, &settings.Spidering})
-	}
-	if profile.KnownIssueScan != nil {
-		overlays = append(overlays, overlay{profile.KnownIssueScan, &settings.KnownIssueScan})
-	}
-	if profile.DynamicAssessment != nil {
-		overlays = append(overlays, overlay{profile.DynamicAssessment, &settings.DynamicAssessment})
-	}
-	if profile.ExternalHarvester != nil {
-		overlays = append(overlays, overlay{profile.ExternalHarvester, &settings.ExternalHarvester})
-	}
-	if profile.MutationStrategy != nil {
-		overlays = append(overlays, overlay{profile.MutationStrategy, &settings.MutationStrategy})
-	}
-	if profile.Scope != nil {
-		overlays = append(overlays, overlay{profile.Scope, &settings.Scope})
-	}
-	if profile.Notify != nil {
-		overlays = append(overlays, overlay{profile.Notify, &settings.Notify})
-	}
-
-	for _, o := range overlays {
-		data, err := yaml.Marshal(o.src)
-		if err != nil {
-			return fmt.Errorf("failed to marshal profile section: %w", err)
+	for _, o := range []overlay{
+		{"scanning_pace", &settings.ScanningPace},
+		{"discovery", &settings.Discovery},
+		{"spidering", &settings.Spidering},
+		{"known_issue_scan", &settings.KnownIssueScan},
+		{"dynamic-assessment", &settings.DynamicAssessment},
+		{"external_harvester", &settings.ExternalHarvester},
+		{"mutation_strategy", &settings.MutationStrategy},
+		{"scope", &settings.Scope},
+		{"notify", &settings.Notify},
+	} {
+		node, ok := profile.raw[o.key]
+		if !ok {
+			continue
 		}
-		if err := yaml.Unmarshal(data, o.dest); err != nil {
-			return fmt.Errorf("failed to apply profile section: %w", err)
+		if err := node.Decode(o.dest); err != nil {
+			return fmt.Errorf("failed to apply profile section %q: %w", o.key, err)
 		}
 	}
 

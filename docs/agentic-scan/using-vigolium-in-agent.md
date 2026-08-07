@@ -53,7 +53,8 @@ public/skills/vigolium-scanner/
     ├── agent-modes.md            # agent query/autopilot/swarm/audit/olium/triage/session
     ├── auth.md                   # --auth-file / --auth, YAML format, extract rules
     ├── data.md                   # db, finding, traffic, module, ext, js, config, export
-    ├── server-ingest.md          # server, ingest, proxy capture, live mirror
+    ├── server.md                 # vigolium server: REST API, recording/MITM proxy, live mirror
+    ├── ingest.md                 # vigolium ingest: local/remote, per-format input examples
     ├── extensions.md             # writing JS scanner modules against vigolium.*
     └── flags.generated.md        # generated from the command tree — grep by flag name
 ```

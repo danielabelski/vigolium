@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"time"
+
+	deparosconfig "github.com/vigolium/vigolium/pkg/deparos/config"
 )
 
 // DiscoveryConfig holds configuration for deparos content discovery.
@@ -47,6 +49,12 @@ type DiscoveryJSTangleConfig struct {
 	MaxAssetsPerParent int    `yaml:"max_assets_per_parent"`
 	MaxAssetsPerHost   int    `yaml:"max_assets_per_host"`
 	MaxAssetsTotal     int    `yaml:"max_assets_total"`
+}
+
+// IsEnabled reports whether jstangle analysis runs; nil defaults to on, matching
+// the sibling *Config.IsEnabled helpers in this file and boolPtrOr on the runner side.
+func (c *DiscoveryJSTangleConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 // DeparosDedupConfig controls the post-discovery cleanup of stored deparos
@@ -374,8 +382,17 @@ func (c *DiscoveryConfig) Validate() error {
 			return fmt.Errorf("discovery.jstangle.job_timeout must be a duration between 1s and 5m")
 		}
 	}
-	if c.JSTangle.WorkerCount < 0 || c.JSTangle.WorkerCount > 16 || c.JSTangle.MemoryBudgetMB < 0 || c.JSTangle.CacheMB < 0 {
+	if c.JSTangle.WorkerCount < 0 || c.JSTangle.WorkerCount > 16 || c.JSTangle.CacheMB < 0 {
 		return fmt.Errorf("discovery.jstangle worker/cache budgets are invalid")
+	}
+	// The deparos engine rejects an ENABLED jstangle whose memory budget is below
+	// the floor and then fails to construct, which silently aborts the whole
+	// Discovery phase. Mirror deparos's own floor here (shared constant) so an
+	// invalid budget surfaces as a clear config error at scan start instead. Gated
+	// on IsEnabled to match deparos, which skips all checks when jstangle is off.
+	if c.JSTangle.IsEnabled() && c.JSTangle.MemoryBudgetMB < deparosconfig.MinJSTangleMemoryBudgetMB {
+		return fmt.Errorf("discovery.jstangle.memory_budget_mb must be >= %d when jstangle is enabled, got %d",
+			deparosconfig.MinJSTangleMemoryBudgetMB, c.JSTangle.MemoryBudgetMB)
 	}
 	if c.JSTangle.MaxASTNodes != 0 && (c.JSTangle.MaxASTNodes < 1_000 || c.JSTangle.MaxASTNodes > 5_000_000) {
 		return fmt.Errorf("discovery.jstangle.max_ast_nodes must be 1000-5000000")

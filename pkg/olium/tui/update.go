@@ -250,7 +250,11 @@ func (m Model) applyEvent(ev engine.Event) (tea.Model, tea.Cmd) {
 
 	case engine.EventError:
 		m.errMsg = ev.Err
-		print = m.printScrollback(styleErr.Render(terminal.SymbolError + " " + ev.Err))
+		out := styleErr.Render(terminal.SymbolError + " " + ev.Err)
+		if url := strings.TrimSpace(m.cfg.SetupDocsURL); url != "" && looksLikeSetupError(ev.Err) {
+			out += "\n" + styleHint.Render("  setup guide: "+url)
+		}
+		print = m.printScrollback(out)
 	}
 
 	pump := tea.Cmd(nil)
@@ -261,6 +265,35 @@ func (m Model) applyEvent(ev engine.Event) (tea.Model, tea.Cmd) {
 		return m, tea.Sequence(print, pump)
 	}
 	return m, pump
+}
+
+// setupErrorNeedles are the substrings that mark a run error as "the provider
+// isn't set up", as opposed to a genuine runtime failure. Deliberately narrow:
+// a docs pointer under "exceeded max turns" would be actively misleading, so
+// the list stays at credential shapes plus the two endpoint failures that mean
+// the configured base_url isn't serving (a local Ollama/vLLM that was never
+// started is the single most common first-run failure on the default
+// openai-compatible provider).
+var setupErrorNeedles = []string{
+	"401", "403",
+	"unauthorized", "authentication", "authentication_error",
+	"api key", "api-key", "api_key", "apikey",
+	"no key", "no token", "credential", "oauth",
+	"invalid token", "token expired", "expired token",
+	"not found on path", "no such file or directory",
+	"connection refused", "no such host",
+}
+
+// looksLikeSetupError reports whether a terminal run error is credential- or
+// endpoint-shaped, i.e. one the setup guide can actually fix.
+func looksLikeSetupError(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, needle := range setupErrorNeedles {
+		if strings.Contains(m, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleTextDelta consumes a chunk of streamed assistant text, flushing every
