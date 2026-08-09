@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.11] - 2026-08-09
+
+An **external-harvest** release: `wayback`/`commoncrawl` now mine archived response bodies (not just their indexes), plus a new keyless `arquivo` source and urlscan paging fixes. No module changes (registry stays at 207 active + 116 passive).
+
+### Added
+
+- **`arquivo` source** — keyless web-archive index, added to the default source set.
+- **`wayback` body mining** — replays captures via `/web/<ts>id_/` and walks each host's robots.txt history to recover paths no index holds.
+- **`commoncrawl` body mining** — range-fetches each index row's WARC record (one small gzip member) and extracts in-scope URLs from the body.
+- **`urlscan` `task.url`** — also collects the originally-submitted URL, not only the final loaded one.
+
+### Changed
+
+- Mined URLs are scope-checked, junk-extension filtered, and stripped of archive hostnames; index rows are still emitted verbatim (provenance via `Result.Mined`).
+- Mining is gated on the index carrying timestamps and capped by fixed per-domain budgets, not flags.
+- Config validation's valid-source list and key-required checks now derive from one table, so they can't drift.
+
+### Fixed
+
+- **urlscan `search_after` cursor** — `sort` is kept as raw JSON so a millisecond timestamp isn't reformatted into a 400 (or a panic on a string value).
+- **urlscan page size lowered to 1000** — an over-large size is rejected outright rather than clamped.
+- **JS regex-literal false positives in the relative-URL extractor** — `(` is no longer treated as a URL delimiter and shapes like `/x/gi` are rejected.
+
 ## [v0.3.10] - 2026-08-08
 
 A **WSDL / SOAP input-format** release: scan a SOAP service the way you scan an OpenAPI spec. No module changes (registry stays at 207 active + 116 passive).

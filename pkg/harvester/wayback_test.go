@@ -422,3 +422,197 @@ func TestNewWaybackClient_Defaults(t *testing.T) {
 		t.Errorf("expected retry delay 1s, got %v", client.retryDelay)
 	}
 }
+
+// --- mining ---------------------------------------------------------------
+
+// waybackMineServer stands in for the archive: a CDX endpoint that answers both
+// the domain query and the per-host robots.txt history, plus an `id_` replay
+// endpoint serving raw captured bodies.
+func waybackMineServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/cdx/search/cdx"):
+			if strings.Contains(r.URL.RawQuery, "robots.txt") {
+				// Two distinct versions, which is what collapse=digest buys.
+				_, _ = fmt.Fprintln(w, "https://example.com/robots.txt 20150101000000")
+				_, _ = fmt.Fprintln(w, "https://example.com/robots.txt 20230101000000")
+				return
+			}
+			_, _ = fmt.Fprintln(w, "https://example.com/app.js 20200101000000 application/javascript 200")
+			_, _ = fmt.Fprintln(w, "https://example.com/ 20200102000000 text/html 200")
+			_, _ = fmt.Fprintln(w, "https://example.com/logo.png 20200103000000 image/png 200")
+
+		case strings.Contains(r.URL.Path, "id_/"):
+			switch {
+			case strings.HasSuffix(r.URL.Path, "robots.txt"):
+				_, _ = fmt.Fprint(w, "User-agent: *\nDisallow: /legacy-admin/\nSitemap: https://example.com/sitemap.xml\n")
+			case strings.HasSuffix(r.URL.Path, "sitemap.xml"):
+				_, _ = fmt.Fprint(w, `<urlset><url><loc>https://example.com/from-sitemap</loc></url></urlset>`)
+			case strings.HasSuffix(r.URL.Path, "app.js"):
+				_, _ = fmt.Fprint(w, `var api = "/api/v3/internal"; fetch("/api/v3/internal");`)
+			default:
+				_, _ = fmt.Fprint(w, `<a href="/linked-from-html">x</a>`)
+			}
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestWaybackClient_MinesArchivedBodies(t *testing.T) {
+	server := waybackMineServer(t)
+	defer server.Close()
+
+	client := &waybackClient{
+		httpClient: server.Client(),
+		baseURL:    server.URL,
+		userAgent:  "test-agent",
+		maxRetries: 1,
+		retryDelay: 10 * time.Millisecond,
+		maxBackoff: 20 * time.Millisecond,
+	}
+
+	results := make(chan Result, 500)
+	if err := client.fetch(context.Background(), "example.com", results, "wayback"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	close(results)
+
+	got := make(map[string]Result)
+	for r := range results {
+		if r.Error != nil {
+			t.Fatalf("unexpected result error: %v", r.Error)
+		}
+		got[r.URL] = r
+	}
+
+	// The index rows are still emitted exactly as before.
+	for _, want := range []string{
+		"https://example.com/app.js",
+		"https://example.com/",
+		"https://example.com/logo.png",
+	} {
+		if r, ok := got[want]; !ok {
+			t.Errorf("index URL %q missing", want)
+		} else if r.Source != "wayback" || r.Mined {
+			t.Errorf("index URL %q = %+v, want source \"wayback\" and Mined false", want, r)
+		}
+	}
+
+	// Everything below exists in no CDX index: a path only robots.txt ever
+	// named, a sitemap entry, and an endpoint written inside a script.
+	for _, want := range []string{
+		"https://example.com/legacy-admin/",
+		"https://example.com/from-sitemap",
+		"https://example.com/api/v3/internal",
+		"https://example.com/linked-from-html",
+	} {
+		r, ok := got[want]
+		if !ok {
+			t.Errorf("mined URL %q missing", want)
+			continue
+		}
+		// Provenance is a field, not a synthetic source name: every
+		// Result.Source stays equal to some Source.Name().
+		if r.Source != "wayback" || !r.Mined {
+			t.Errorf("mined URL %q = %+v, want source \"wayback\" and Mined true", want, r)
+		}
+	}
+}
+
+// TestWaybackClient_SkipsMiningWithoutTimestamps locks in the gate that keeps a
+// mining pass from firing against an index response that carries no timestamps.
+// A replay is addressed by timestamp, so without one there is nothing to fetch —
+// and firing anyway would spend a request per host to learn that.
+func TestWaybackClient_SkipsMiningWithoutTimestamps(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		_, _ = fmt.Fprintln(w, "https://example.com/page1")
+		_, _ = fmt.Fprintln(w, "https://example.com/page2")
+	}))
+	defer server.Close()
+
+	client := &waybackClient{
+		httpClient: server.Client(),
+		baseURL:    server.URL,
+		userAgent:  "test-agent",
+		maxRetries: 1,
+		retryDelay: 10 * time.Millisecond,
+		maxBackoff: 20 * time.Millisecond,
+	}
+
+	results := make(chan Result, 50)
+	if err := client.fetch(context.Background(), "example.com", results, "wayback"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	close(results)
+
+	var count int
+	for range results {
+		count++
+	}
+
+	if count != 2 {
+		t.Errorf("got %d URLs, want 2", count)
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Errorf("made %d requests, want 1 (mining should not have run)", got)
+	}
+}
+
+func TestParseCDXLine(t *testing.T) {
+	tests := []struct {
+		line string
+		want cdxRow
+	}{
+		{
+			line: "https://example.com/a 20200101000000 text/html 200",
+			want: cdxRow{URL: "https://example.com/a", Timestamp: "20200101000000", MIME: "text/html", Status: "200"},
+		},
+		// A field list is a request, not a guarantee: a URL-only row still parses.
+		{
+			line: "https://example.com/a",
+			want: cdxRow{URL: "https://example.com/a"},
+		},
+		{
+			line: "https://example.com/a 20200101000000",
+			want: cdxRow{URL: "https://example.com/a", Timestamp: "20200101000000"},
+		},
+		{line: "", want: cdxRow{}},
+		{line: "   ", want: cdxRow{}},
+	}
+
+	for _, tt := range tests {
+		if got := parseCDXLine(tt.line); got != tt.want {
+			t.Errorf("parseCDXLine(%q) = %+v, want %+v", tt.line, got, tt.want)
+		}
+	}
+}
+
+func TestSelectRobotsHosts(t *testing.T) {
+	rows := []cdxRow{
+		{URL: "https://api.example.com/a"},
+		{URL: "https://www.example.com/b"},
+		{URL: "https://cdn.example.com/c"},
+		{URL: "https://elsewhere.net/d"},
+	}
+
+	got := selectRobotsHosts(rows, "example.com")
+
+	if len(got) != mineMaxRobotsHosts {
+		t.Fatalf("got %d hosts, want %d: %v", len(got), mineMaxRobotsHosts, got)
+	}
+	// The apex leads: it is the host most likely to have been archived longest.
+	if got[0] != "example.com" {
+		t.Errorf("expected the apex first, got %v", got)
+	}
+	for _, host := range got {
+		if host == "elsewhere.net" {
+			t.Errorf("out-of-scope host selected: %v", got)
+		}
+	}
+}

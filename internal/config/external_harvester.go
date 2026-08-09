@@ -2,6 +2,9 @@ package config
 
 import (
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 )
 
 // ExternalHarvesterConfig holds configuration for pre-scan external intelligence harvesting.
@@ -17,47 +20,50 @@ type ExternalHarvesterAPIKeys struct {
 }
 
 // DefaultExternalHarvesterConfig returns default external harvester configuration.
+//
+// Only keyless sources are enabled by default, so the phase runs the same way
+// whether or not any credential is configured. urlscan and virustotal join in
+// only when their key is set.
 func DefaultExternalHarvesterConfig() *ExternalHarvesterConfig {
 	return &ExternalHarvesterConfig{
-		Sources: []string{"wayback", "commoncrawl", "alienvault"},
+		Sources: []string{"wayback", "commoncrawl", "alienvault", "arquivo"},
 	}
 }
 
 var validExternalHarvesterSources = map[string]bool{
 	"wayback":     true,
 	"commoncrawl": true,
+	"arquivo":     true,
 	"urlscan":     true,
 	"alienvault":  true,
 	"virustotal":  true,
 }
 
-var keyRequiredSources = map[string]bool{
-	"urlscan":    true,
-	"virustotal": true,
+// keyedSources maps each source that cannot run without a credential to the
+// config field supplying it. One table drives both the "is a key required" test
+// and the "which key is missing" message, so a source cannot end up in one and
+// not the other.
+var keyedSources = map[string]struct {
+	field string
+	value func(ExternalHarvesterAPIKeys) string
+}{
+	"urlscan":    {"api_keys.urlscan", func(k ExternalHarvesterAPIKeys) string { return k.URLScan }},
+	"virustotal": {"api_keys.virustotal", func(k ExternalHarvesterAPIKeys) string { return k.VirusTotal }},
 }
 
 // Validate checks external harvester configuration for errors.
 func (c *ExternalHarvesterConfig) Validate() error {
 	for _, s := range c.Sources {
 		if !validExternalHarvesterSources[s] {
-			return fmt.Errorf("external_harvester.sources: unknown source %q (valid: wayback, commoncrawl, urlscan, alienvault, virustotal)", s)
+			// The list is derived rather than written out, so it cannot drift
+			// from the map that actually decides.
+			valid := slices.Sorted(maps.Keys(validExternalHarvesterSources))
+			return fmt.Errorf("external_harvester.sources: unknown source %q (valid: %s)",
+				s, strings.Join(valid, ", "))
 		}
-	}
 
-	// Validate API keys for sources that require them
-	for _, s := range c.Sources {
-		if !keyRequiredSources[s] {
-			continue
-		}
-		switch s {
-		case "urlscan":
-			if c.APIKeys.URLScan == "" {
-				return fmt.Errorf("external_harvester: source %q requires api_keys.urlscan to be set", s)
-			}
-		case "virustotal":
-			if c.APIKeys.VirusTotal == "" {
-				return fmt.Errorf("external_harvester: source %q requires api_keys.virustotal to be set", s)
-			}
+		if keyed, ok := keyedSources[s]; ok && keyed.value(c.APIKeys) == "" {
+			return fmt.Errorf("external_harvester: source %q requires %s to be set", s, keyed.field)
 		}
 	}
 

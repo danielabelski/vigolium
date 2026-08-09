@@ -32,7 +32,7 @@ It scans for reflected XSS, SQL injection, SSTI, LFI, CRLF injection, open redir
 │                  Runner (multi-phase pipeline)                       │
 │                                                                      │
 │  ingestion          ─── Continuous input ingestion                  │
-│  external-harvest   ─── Wayback, CommonCrawl, OTX, …                │
+│  external-harvest   ─── Wayback, CommonCrawl, OTX, Arquivo + mining │
 │  discovery          ─── Deparos (adaptive content discovery)        │
 │  spidering          ─── Spitolas (Chromium via CDP, SPA aware)      │
 │  dynamic-assessment ─── Executor + active/passive scanner modules   │

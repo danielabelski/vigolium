@@ -17,7 +17,13 @@ import (
 // some sources put in the request (e.g. the VirusTotal apikey query parameter)
 // and the integrity of harvested data against a man-in-the-middle.
 func NewHTTPClient(timeout time.Duration, proxyURL string) *http.Client {
-	transport := &http.Transport{}
+	transport := &http.Transport{
+		// Body mining makes tens of requests to a single archive host per domain.
+		// The default idle-connection allowance per host is 2, so most of those
+		// would close after use and pay a fresh TCP+TLS handshake on the next
+		// wave — inside a phase that runs under a deadline.
+		MaxIdleConnsPerHost: mineConcurrency,
+	}
 	if proxyURL != "" {
 		if parsed, err := url.Parse(proxyURL); err == nil {
 			transport.Proxy = http.ProxyURL(parsed)

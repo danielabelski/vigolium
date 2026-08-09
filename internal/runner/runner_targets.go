@@ -529,6 +529,8 @@ func (r *Runner) buildExternalHarvesterSource() *source.ExternalHarvesterInputSo
 			sources = append(sources, harvester.NewWaybackSource(proxyURL))
 		case "commoncrawl":
 			sources = append(sources, harvester.NewCommonCrawlSource(proxyURL))
+		case "arquivo":
+			sources = append(sources, harvester.NewArquivoSource(proxyURL))
 		case "alienvault":
 			sources = append(sources, harvester.NewAlienVaultSource(proxyURL))
 		case "urlscan":

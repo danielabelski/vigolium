@@ -1162,13 +1162,19 @@ known_issue_scan:
 # Timeout is configured in scanning_pace.external_harvester.max_duration.
 external_harvester:
   # External sources to query for URLs.
-  # Free sources (no API key): wayback, commoncrawl, alienvault
+  # Free sources (no API key): wayback, commoncrawl, alienvault, arquivo
   # Keyed sources (require api_keys): urlscan, virustotal
-  # Default: [wayback, commoncrawl, alienvault]
+  # Default: [wayback, commoncrawl, alienvault, arquivo]
+  #
+  # wayback and commoncrawl also *mine* archived response bodies — robots.txt
+  # history, sitemaps, and a bounded sample of captured HTML/JS — for endpoints
+  # no CDX index records. This is on by default and bounded by fixed budgets;
+  # drop the source to switch it off.
   sources:
     - wayback
     - commoncrawl
     - alienvault
+    - arquivo
 
   # API keys for external sources that require authentication.
   # Use ${ENV_VAR} syntax to read from environment variables.

@@ -567,13 +567,22 @@ Pre-scan intelligence gathering from public data sources.
 
 ```yaml
 external_harvester:
-  sources: [wayback, commoncrawl, alienvault]
+  sources: [wayback, commoncrawl, alienvault, arquivo]
   # Additional sources: urlscan, virustotal (require API keys)
 
   api_keys:
     urlscan: ""
     virustotal: ""
 ```
+
+`wayback` and `commoncrawl` do more than read their index. Both also mine the
+archived response bodies the index points at — the robots.txt history of the
+main hosts, the sitemaps those files name, and a bounded sample of captured
+HTML/JavaScript — and emit the in-scope URLs found inside. That recovers
+endpoints no CDX index holds: a path that was only ever named in a script
+bundle, or one a site owner listed in robots.txt precisely so no crawler would
+record it. Mining is on by default, is capped by fixed per-domain budgets rather
+than flags, and is skipped entirely if the index query returns nothing.
 
 ### `oast`
 

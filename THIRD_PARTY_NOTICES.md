@@ -89,7 +89,8 @@ Vigolium's own source code, not to these independently obtained tools.
 | XBOW / Anthropic validation benchmarks | Benchmark reference material for agent evaluation docs/tests. |
 | [PortSwigger ginandjuice.shop](https://ginandjuice.shop/) | External blackbox benchmark target referenced in benchmark docs. |
 | [Internet Archive Wayback Machine](https://archive.org/web/) | URL harvesting source for historical URLs. |
-| [Common Crawl](https://commoncrawl.org/) | URL harvesting source via CDX indices. |
+| [Common Crawl](https://commoncrawl.org/) | URL harvesting source via CDX indices and ranged WARC record reads. |
+| [Arquivo.pt](https://arquivo.pt/) | URL harvesting source via the Portuguese Web Archive CDX API. |
 | [AlienVault OTX](https://otx.alienvault.com/) | URL harvesting source via OTX domain URL API. |
 | [urlscan.io](https://urlscan.io/) | URL harvesting source via urlscan search API. |
 | [VirusTotal](https://www.virustotal.com/) | URL harvesting source via VirusTotal domain report API. |
