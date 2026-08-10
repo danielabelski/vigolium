@@ -34,20 +34,20 @@ type ServerConfig struct {
 	// It must exceed the ordinary DefaultBodyLimitMiddleware cap so the large-upload
 	// routes (/api/import, /api/storage/upload-source) aren't rejected by the
 	// framework before the route exemption runs. 0 = default (512 MiB).
-	MaxUploadBytes int
-	CORSAllowedOrigins   string
-	UserStore            *UserStore    // File-based user store (nil = legacy auth only)
-	ScanQueueCapacity    int           // 0 = reject with 409 when busy (default), >0 = per-project queue depth
-	NoAgent              bool          // If true, disable all agent endpoints and warm sessions
-	ViewOnly             bool          // If true, only serve GET/viewer routes (no scanning, ingestion, or agent)
-	DemoOnly             bool          // If true, expose only the demo allowlist (subset of GET endpoints)
-	License              string        // Optional license tag surfaced in /server-info (configured in server.license)
-	EnableMetrics        bool          // Enable Prometheus /metrics endpoint
-	NoSwagger            bool          // If true, disable Swagger UI and spec endpoint
-	Debug                bool          // Log raw request body, query params, and headers
-	AgentHeavyMax        int           // Max concurrent heavy agent runs (autopilot/swarm); 0 = default 5
-	AgentLightMax        int           // Max concurrent light agent runs (query/chat); 0 = default 10
-	AgentQueueTimeout    time.Duration // Max wait time when all agent slots busy; 0 = default 30s
+	MaxUploadBytes     int
+	CORSAllowedOrigins string
+	UserStore          *UserStore    // File-based user store (nil = legacy auth only)
+	ScanQueueCapacity  int           // 0 = reject with 409 when busy (default), >0 = per-project queue depth
+	NoAgent            bool          // If true, disable all agent endpoints and warm sessions
+	ViewOnly           bool          // If true, only serve GET/viewer routes (no scanning, ingestion, or agent)
+	DemoOnly           bool          // If true, expose only the demo allowlist (subset of GET endpoints)
+	License            string        // Optional license tag surfaced in /server-info (configured in server.license)
+	EnableMetrics      bool          // Enable Prometheus /metrics endpoint
+	NoSwagger          bool          // If true, disable Swagger UI and spec endpoint
+	Debug              bool          // Log raw request body, query params, and headers
+	AgentHeavyMax      int           // Max concurrent heavy agent runs (autopilot/swarm); 0 = default 5
+	AgentLightMax      int           // Max concurrent light agent runs (query/chat); 0 = default 10
+	AgentQueueTimeout  time.Duration // Max wait time when all agent slots busy; 0 = default 30s
 	// AgentHeavyPerProject caps how many concurrent heavy agent runs a
 	// single project can hold at once. 0 = default 2; negative = disable
 	// the per-project cap (only the global AgentHeavyMax applies). Used

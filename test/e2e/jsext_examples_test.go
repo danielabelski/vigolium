@@ -57,9 +57,9 @@ func TestExtExample_ReflectedParamScanner(t *testing.T) {
 	host := strings.TrimPrefix(httpbinApp.BaseURL, "http://")
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(extensionsDir(), "reflected_param_scanner.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, nil)
@@ -111,9 +111,9 @@ func TestExtExample_ErrorPatternDetector(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(extensionsDir(), "error_pattern_detector.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, nil)
@@ -193,9 +193,9 @@ func TestExtExample_SensitiveHeaderLeak(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(extensionsDir(), "sensitive_header_leak.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, nil)
@@ -277,7 +277,7 @@ func TestExtExample_AddAuthHeader(t *testing.T) {
 
 	t.Run("InjectsAuthAndCorrelationID", func(t *testing.T) {
 		cfg := &config.ExtensionsConfig{
-			Enabled: true,
+			Enabled:   true,
 			CustomDir: []string{filepath.Join(extensionsDir(), "add_auth_header.js")},
 			Variables: map[string]string{
 				"auth_token": "my-secret-jwt-token",
@@ -318,7 +318,7 @@ func TestExtExample_AddAuthHeader(t *testing.T) {
 
 	t.Run("PassesThroughWithoutToken", func(t *testing.T) {
 		cfg := &config.ExtensionsConfig{
-			Enabled: true,
+			Enabled:   true,
 			CustomDir: []string{filepath.Join(extensionsDir(), "add_auth_header.js")},
 			// No auth_token variable set
 			Limits: config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
@@ -365,9 +365,9 @@ func TestExtExample_SkipStaticAssets(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(extensionsDir(), "skip_static_assets.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, nil)
@@ -423,9 +423,9 @@ func TestExtExample_TagCriticalDomains(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(extensionsDir(), "tag_critical_domains.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, nil)
@@ -503,9 +503,9 @@ func TestExtExample_LoadAllExtensions(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
+		Enabled:      true,
 		ExtensionDir: extensionsDir(),
-		Limits:     config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:       config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, nil)
@@ -552,7 +552,7 @@ func TestExtExample_ExecRecon(t *testing.T) {
 	cfg := &config.ExtensionsConfig{
 		Enabled:   true,
 		AllowExec: true,
-		CustomDir:   []string{filepath.Join(extensionsDir(), "exec_recon.js")},
+		CustomDir: []string{filepath.Join(extensionsDir(), "exec_recon.js")},
 		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
@@ -596,9 +596,9 @@ func TestExtExample_AnomalyBaseline(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(extensionsDir(), "anomaly_baseline.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, nil)

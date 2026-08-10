@@ -50,9 +50,9 @@ func serveTree(t *testing.T, tree map[string]string, qb http.HandlerFunc) *httpt
 
 func TestTreeWalkEnumeratesHarvestsSecretAndUsers(t *testing.T) {
 	tree := map[string]string{
-		"/libs.1.json":    `{"jcr:primaryType":"nt:folder","granite":{"jcr:primaryType":"nt:folder"}}`,
-		"/.1.json":        `{"jcr:primaryType":"rep:root","content":{"jcr:primaryType":"sling:Folder"},"apps":{"jcr:primaryType":"sling:Folder"},"home":{"jcr:primaryType":"rep:AuthorizableFolder"}}`,
-		"/content.1.json": `{"jcr:primaryType":"sling:Folder","dam":{"jcr:primaryType":"sling:Folder"},"mysite":{"jcr:primaryType":"cq:Page"}}`,
+		"/libs.1.json":           `{"jcr:primaryType":"nt:folder","granite":{"jcr:primaryType":"nt:folder"}}`,
+		"/.1.json":               `{"jcr:primaryType":"rep:root","content":{"jcr:primaryType":"sling:Folder"},"apps":{"jcr:primaryType":"sling:Folder"},"home":{"jcr:primaryType":"rep:AuthorizableFolder"}}`,
+		"/content.1.json":        `{"jcr:primaryType":"sling:Folder","dam":{"jcr:primaryType":"sling:Folder"},"mysite":{"jcr:primaryType":"cq:Page"}}`,
 		"/content/dam.1.json":    `{"jcr:primaryType":"sling:Folder"}`,
 		"/content/mysite.1.json": `{"jcr:primaryType":"cq:Page"}`,
 		"/apps.1.json":           `{"jcr:primaryType":"sling:Folder","system":{"jcr:primaryType":"sling:Folder"}}`,

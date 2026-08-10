@@ -139,9 +139,9 @@ type secretHit struct {
 }
 
 type walkState struct {
-	reached     []string
-	maxDepth    int
-	secretHits  []secretHit
+	reached      []string
+	maxDepth     int
+	secretHits   []secretHit
 	userEnumPath string
 	userEnumReq  string
 	userEnumID   string

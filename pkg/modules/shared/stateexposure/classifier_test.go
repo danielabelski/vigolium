@@ -23,7 +23,7 @@ func TestAnalyzeClassifiesSignalsWithoutEchoingValues(t *testing.T) {
 		if hit.Candidate {
 			candidates++
 		}
-		assert.NotContains(t, hit.Evidence, "sk_live_01" + "23456789ab" + "cdef")
+		assert.NotContains(t, hit.Evidence, "sk_live_01"+"23456789ab"+"cdef")
 		assert.NotContains(t, hit.Evidence, "real-password")
 	}
 	assert.Equal(t, 2, candidates, "private token and password-bearing database URL should be candidates")

@@ -559,7 +559,9 @@ func TestRunActiveWithTimeout_ParentCancelNotCounted(t *testing.T) {
 func TestRunActiveWithTimeout_PooledTimerReuse(t *testing.T) {
 	e := &Executor{cfg: ExecutorConfig{ActiveModuleTimeout: 30 * time.Millisecond}}
 	_, item := makeTestItem("example.com", "/", "ok")
-	fast := func(context.Context, *http.Requester) ([]*output.ResultEvent, error) { return []*output.ResultEvent{{}}, nil }
+	fast := func(context.Context, *http.Requester) ([]*output.ResultEvent, error) {
+		return []*output.ResultEvent{{}}, nil
+	}
 	slow := func(context.Context, *http.Requester) ([]*output.ResultEvent, error) {
 		time.Sleep(300 * time.Millisecond)
 		return []*output.ResultEvent{{}}, nil

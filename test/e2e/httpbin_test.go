@@ -15,8 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/vigolium/vigolium/pkg/httpmsg"
 	httpClient "github.com/vigolium/vigolium/pkg/http"
+	"github.com/vigolium/vigolium/pkg/httpmsg"
 )
 
 // TestHttpbin tests HTTP request/response handling using httpbin

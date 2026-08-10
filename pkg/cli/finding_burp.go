@@ -39,12 +39,8 @@ func pushFindingsToBurp(ctx context.Context, db *database.DB, findings []*databa
 	if err != nil {
 		return err
 	}
-	info, err := client.Health(ctx)
-	if err != nil {
-		return fmt.Errorf("burp bridge unavailable: %w", err)
-	}
-	if info.InScopeOnly && findingSendViaBurp {
-		fmt.Fprintf(os.Stderr, "%s Burp bridge is in-scope-only; out-of-scope targets will be refused (403)\n", terminal.WarningSymbol())
+	if _, err := preflightBridge(ctx, client, findingSendViaBurp); err != nil {
+		return err
 	}
 
 	toRepeater := findingToRepeater

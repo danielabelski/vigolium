@@ -142,7 +142,7 @@ func TestCheckNoSQLError_WeakNeedsContext(t *testing.T) {
 
 	// Lone weak tokens with no DB/error context — must be dropped.
 	for _, noise := range []string{
-		"config.$expr = compileExpr(node);",        // minified-code shape
+		"config.$expr = compileExpr(node);",          // minified-code shape
 		"throw new Error('unrecognized expression')", // a CSS/selector library message
 		"the parser hit an unknown operator token",   // generic English
 		`{"$expr":{"$gt":["$a","$b"]}}`,              // a query echoed as data, no error

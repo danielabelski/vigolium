@@ -13,12 +13,17 @@ import (
 )
 
 type ReportFinding struct {
-	ID                 int
-	Title              string
-	ModuleID           string
-	ModuleName         string
-	Description        string
-	DescriptionHTML    template.HTML
+	ID              int
+	Title           string
+	ModuleID        string
+	ModuleName      string
+	Description     string
+	DescriptionHTML template.HTML
+	// ModuleTitle is the module's own Name(), kept separate because ModuleName
+	// above holds the *display* name — parseFinding prefers the module's short
+	// description there, which reads as a sentence. A renderer that needs a
+	// compact label (SARIF's reportingDescriptor.name) wants this one.
+	ModuleTitle        string
 	Severity           string
 	Confidence         string
 	CWE                string
@@ -42,6 +47,13 @@ type ReportModule struct {
 	Name     string
 	Type     string
 	Severity string
+	// Description and ShortDescription are carried for renderers that describe
+	// the rule behind a finding rather than the finding itself (SARIF's
+	// reportingDescriptor). They are only populated when the export included
+	// module envelopes — `vigolium export` drops them by default (--exclude
+	// module) — so every consumer must treat them as optional.
+	Description      string
+	ShortDescription string
 }
 
 type ReportData struct {
@@ -163,18 +175,22 @@ func buildReportData(items []any, title string, meta HTMLReportMeta) ReportData 
 
 		case "module":
 			var mod struct {
-				ID       string `json:"id"`
-				Name     string `json:"name"`
-				Type     string `json:"type"`
-				Severity string `json:"severity"`
-				Enabled  bool   `json:"enabled"`
+				ID               string `json:"id"`
+				Name             string `json:"name"`
+				Type             string `json:"type"`
+				Severity         string `json:"severity"`
+				Description      string `json:"description"`
+				ShortDescription string `json:"short_description"`
+				Enabled          bool   `json:"enabled"`
 			}
 			if err := json.Unmarshal(envelope.Data, &mod); err == nil && mod.Enabled {
 				rd.Modules = append(rd.Modules, ReportModule{
-					ID:       mod.ID,
-					Name:     mod.Name,
-					Type:     mod.Type,
-					Severity: mod.Severity,
+					ID:               mod.ID,
+					Name:             mod.Name,
+					Type:             mod.Type,
+					Severity:         mod.Severity,
+					Description:      mod.Description,
+					ShortDescription: mod.ShortDescription,
 				})
 				switch mod.Type {
 				case "active":
@@ -242,6 +258,7 @@ func parseFinding(data json.RawMessage, md goldmark.Markdown) ReportFinding {
 		Title:              title,
 		ModuleID:           f.ModuleID,
 		ModuleName:         name,
+		ModuleTitle:        f.ModuleName,
 		Description:        f.Description,
 		DescriptionHTML:    descHTML,
 		Severity:           strings.ToLower(f.Severity),

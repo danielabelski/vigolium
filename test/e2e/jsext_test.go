@@ -93,7 +93,7 @@ module.exports = {
 
 	// Initialize engine
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
+		Enabled:      true,
 		ExtensionDir: scriptDir,
 		Limits: config.ScriptLimits{
 			Timeout:     "30s",
@@ -199,7 +199,7 @@ module.exports = {
 `)
 
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
+		Enabled:      true,
 		ExtensionDir: scriptDir,
 		Limits: config.ScriptLimits{
 			Timeout:     "30s",
@@ -282,7 +282,7 @@ module.exports = {
 `)
 
 		cfg := &config.ExtensionsConfig{
-			Enabled:    true,
+			Enabled:      true,
 			ExtensionDir: scriptDir,
 			Variables: map[string]string{
 				"api_token": "test-token-12345",
@@ -346,7 +346,7 @@ module.exports = {
 `)
 
 		cfg := &config.ExtensionsConfig{
-			Enabled:    true,
+			Enabled:      true,
 			ExtensionDir: scriptDir,
 			Limits: config.ScriptLimits{
 				Timeout:     "30s",
@@ -417,7 +417,7 @@ module.exports = {
 `)
 
 		cfg := &config.ExtensionsConfig{
-			Enabled:    true,
+			Enabled:      true,
 			ExtensionDir: scriptDir,
 			Limits: config.ScriptLimits{
 				Timeout:     "30s",
@@ -485,7 +485,7 @@ module.exports = {
 `)
 
 		cfg := &config.ExtensionsConfig{
-			Enabled:    true,
+			Enabled:      true,
 			ExtensionDir: scriptDir,
 			Limits: config.ScriptLimits{
 				Timeout:     "30s",
@@ -568,11 +568,11 @@ module.exports = {
 `)
 
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
+		Enabled:      true,
 		ExtensionDir: scriptDir,
 		Variables: map[string]string{
 			"collaborator_domain": "collab.test.local",
-			"secret_key":         "s3cr3t-v4lu3",
+			"secret_key":          "s3cr3t-v4lu3",
 		},
 		Limits: config.ScriptLimits{
 			Timeout:     "30s",
@@ -690,7 +690,7 @@ module.exports = {
 `)
 
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
+		Enabled:      true,
 		ExtensionDir: scriptDir,
 		Limits: config.ScriptLimits{
 			Timeout:     "30s",
@@ -786,7 +786,7 @@ module.exports = {
 `)
 
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
+		Enabled:      true,
 		ExtensionDir: scriptDir,
 		Limits: config.ScriptLimits{
 			Timeout:     "30s",
@@ -860,9 +860,9 @@ module.exports = {
 `)
 
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
+		Enabled:      true,
 		ExtensionDir: scriptDir,
-		Limits:     config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:       config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, nil)
@@ -927,10 +927,10 @@ module.exports = {
 `)
 
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
-		AllowExec:  true,
+		Enabled:      true,
+		AllowExec:    true,
 		ExtensionDir: scriptDir,
-		Limits:     config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:       config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, nil)
@@ -987,10 +987,10 @@ module.exports = {
 `)
 
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
-		AllowExec:  false, // exec() should be blocked
+		Enabled:      true,
+		AllowExec:    false, // exec() should be blocked
 		ExtensionDir: scriptDir,
-		Limits:     config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:       config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, nil)

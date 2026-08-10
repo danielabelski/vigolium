@@ -2,7 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.3.12] - 2026-08-10
+
+A **SARIF output** release: emit SARIF 2.1.0 so runs feed GitHub code scanning, DefectDojo, and the VS Code SARIF Viewer. Also teaches the bridge to say which proxy it is, so Caido traffic stops showing up labelled `burp`. No module changes (registry stays at 207 active + 116 passive).
+
+Upgrading with Caido: rebuild the [Caido plugin](https://github.com/vigolium/caido-vigolium) alongside this release. Vendor detection is wire-only with no fallback probe, so a listener predating it is read as Burp — silently. Rows imported from Caido before this release stay labelled `burp` and cannot be reclassified after the fact.
+
+### Added
+
+- **`sarif` output format** — writes a SARIF 2.1.0 log on `scan`/`scan-url`/`scan-request`/`run`, `vigolium export`, and `vigolium import --format`.
+- File-anchored findings map to the source file (URL kept as a related location); DAST evidence rides in `webRequest`/`webResponse`.
+- `security-severity`, zero-padded CWE tags, and `FindingHash` fingerprints so consumers bucket and track findings across re-scans.
+- **`--caido-bridge-url`** alias for `--burp-bridge-url` (`-B`) — the Caido plugin ([vigolium/caido-vigolium](https://github.com/vigolium/caido-vigolium)) exposes the same bridge listener.
+- **Bridge traffic is labelled by vendor** — listeners report an `implementation` identity on every `/health`, `/search` and `/inspect` reply, mapped through a closed allowlist to `http_records.source`, so the `traffic` Source column, `--source caido`, and persisted imports all name the proxy that actually served the traffic. Echoed per reply rather than probed from `/health`, because the read path never calls it and a single-record inspect has no preceding search to learn the vendor from.
+- **`X-Vigolium-Source` on `POST /api/ingest-http`** — a client pushing traffic can declare itself (`burp`, `caido`) instead of landing under the generic `ingest-server` label every HTTP client shares. The Caido plugin sets it, so one `--source caido` covers traffic that arrived either by pull or by push. Allowlisted rather than passthrough: `source` decides which rows scan-on-receive feeds back into a scan, so a client able to claim `scanner` could silently exclude its own traffic from the scan it just asked for.
+- `X-Vigolium-Bridge-Source` response header on `/api/http-records`, naming the vendor that answered.
+
+### Changed
+
+- `--format` extension/output-path machinery now recognizes `.sarif` on both scan and export sides.
+- Exported `severity.ToSeverity` helper that maps a severity name to its comparable enum rank.
+- `--source` on a bridge-enabled `traffic`/`replay` query admits any bridge vendor up front — which one is listening is not knowable until it replies — and drops the live set afterwards when the vendor does not match, zeroing its total alongside it so paging is not inflated by records it cannot show.
+- Send-preflight warnings and the bridge import summary name the answering vendor instead of assuming Burp.
+- Record UUIDs keep the `burp:` prefix for both vendors: it is a routing token meaning "this record lives behind the bridge, not in the database", not a provenance label. Vendor lives in `source`.
+
+### Fixed
+
+- Bridge-sourced rows were excluded from scan-on-receive — silently, since they land in the database and the poller simply never selected them. `burp` and `caido` now join `database.IngestRecordSources`.
 
 ## [v0.3.11] - 2026-08-09
 

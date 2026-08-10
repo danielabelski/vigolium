@@ -116,6 +116,7 @@ func TestStripFormatExtension(t *testing.T) {
 		{"run.db", "run"},               // db alias stripped
 		{"report.md", "report"},         // markdown stripped
 		{"report.markdown", "report"},   // markdown long form stripped
+		{"run.sarif", "run"},            // sarif stripped
 		// Archive extensions are two-part: filepath.Ext sees only ".gz", so
 		// stripping through it would leave "run.tar" and derive "run.tar.html".
 		{"run.tar.gz", "run"},
@@ -146,6 +147,7 @@ func TestFormatOutputPath(t *testing.T) {
 		{"report", "console", "report"},           // unknown format -> base unchanged
 		{"report", "markdown", "report.md"},       // export-only formats
 		{"report", "md", "report.md"},             // alias
+		{"report", "sarif", "report.sarif"},
 		{"report", "bundle", "report.tar.gz"},
 		{"report", "gz", "report.tar.gz"}, // alias
 		{"report", "fs", "report"},        // fs names a directory base, not a file

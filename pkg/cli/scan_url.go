@@ -101,14 +101,12 @@ func init() {
 // would be silently dropped on the fast in-memory direct path. Plain --json /
 // --ci-output-format leave globalFormat at "console" and keep the fast direct
 // path, preserving the JSON shape AI agents consume.
+// The predicate itself is wantsFileOutput, shared with the agentic -S path — an
+// unlisted format routed down the direct path is neither validated nor written,
+// so the command reports success and produces nothing. That is exactly how
+// `sarif` behaved before this became a predicate.
 func hasFileOutputFormat() bool {
-	for _, f := range parseFormats(globalFormat) {
-		switch strings.ToLower(f) {
-		case "jsonl", "html", "report", "pdf", "fs", "sqlite", "sqlite3", "db":
-			return true
-		}
-	}
-	return false
+	return wantsFileOutput(parseFormats(globalFormat))
 }
 
 // validateGlobalFormats validates the raw --format string (rejecting unknown
@@ -721,8 +719,14 @@ func buildPhaseOptions(target string) (*types.Options, error) {
 // lightweight commands fail the same way instead of silently producing nothing.
 func validateRunnerScanOutput(opts *types.Options) error {
 	if opts.Output == "" {
-		if opts.HasFormat("html") || opts.HasFormat("report") || opts.HasFormat("pdf") {
-			return fmt.Errorf("--format html/report/pdf requires -o/--output to specify the report file path")
+		// Derived from the same predicate `vigolium scan` uses, rather than a
+		// hand-listed set spelled out twice (condition and error string) that a
+		// new format has to be remembered in — which is how `sarif` reached here
+		// able to be requested and unable to be written.
+		for _, f := range opts.OutputFormats {
+			if formatNeedsOutput(f) {
+				return fmt.Errorf("--format %s requires -o/--output to specify the report file path", f)
+			}
 		}
 		if len(opts.OutputFormats) > 1 {
 			return fmt.Errorf("multiple --format values require -o/--output as a base path")

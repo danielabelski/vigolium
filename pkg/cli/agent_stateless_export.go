@@ -39,12 +39,17 @@ type agentStatelessPlan struct {
 	dbPath string
 }
 
-// wantsFiles reports whether any requested format materializes a file or
+// wantsFileOutput reports whether any requested format materializes a file or
 // directory. console alone writes nothing on its own — the run already streamed
 // to the terminal.
-func agentStatelessWantsFiles(formats []string) bool {
+//
+// Expressed as "anything that is not console" rather than as a list of file
+// formats: a list has to be remembered for every new format and silently treats
+// an unlisted one as writing nothing. Shared with scan-url's hasFileOutputFormat
+// so the direct-path routing and the agentic -S validation cannot disagree.
+func wantsFileOutput(formats []string) bool {
 	for _, f := range formats {
-		if f != "console" {
+		if !strings.EqualFold(f, "console") {
 			return true
 		}
 	}
@@ -73,7 +78,7 @@ func planAgentStateless(cmd *cobra.Command, cmdLabel string, stateless bool, out
 	}
 
 	output = strings.TrimSpace(output)
-	wantsFiles := agentStatelessWantsFiles(plan.formats)
+	wantsFiles := wantsFileOutput(plan.formats)
 	// --format is a root-persistent flag defaulting to "console", so only an
 	// explicit change can be a request for file output.
 	formatRequested := cmd != nil && cmd.Flags().Changed("format")

@@ -436,8 +436,8 @@ func (m *Module) buildFinding(
 			Severity:    m.Severity(),
 			Confidence:  m.Confidence(),
 		},
-		URL:                vulnURLString,
-		Host:               urlx.Host,
+		URL:  vulnURLString,
+		Host: urlx.Host,
 		// Matched is the location the console/grouping renders (MatchedURL prefers
 		// it over URL); use the full absolute URL so the live finding line shows
 		// the target host, matching every other active module. The bare path is

@@ -162,7 +162,7 @@ func init() {
 	pf.StringArrayVar(&trafficExcludeSearch, "exclude-search", nil, "Exclude records where the term appears in the URL, path, or raw request/response (repeatable; dropped if ANY term matches — the inverse of --search)")
 	pf.StringVar(&trafficExcludeHeader, "exclude-header", "", "Exclude records whose HTTP header names/values contain the term (inverse of --header)")
 	pf.StringVar(&trafficExcludeBody, "exclude-body", "", "Exclude records whose request/response body contains the term (inverse of --body)")
-	pf.StringVar(&trafficSource, "source", "", "Filter by record source (e.g. burp, scanner, ingest-cli, ingest-server, ingest-proxy, seed)")
+	pf.StringVar(&trafficSource, "source", "", "Filter by record source (e.g. burp, caido, scanner, ingest-cli, ingest-server, ingest-proxy, seed)")
 	pf.StringVar(&trafficSort, "sort", "created_at", "Sort by: uuid, created_at, sent_at, method, status, time")
 	pf.BoolVar(&trafficAsc, "asc", false, "Sort in ascending order (default: descending)")
 	pf.IntVarP(&trafficLimit, "limit", "n", 100, "Maximum records to display")
@@ -185,12 +185,8 @@ func init() {
 	f.BoolVarP(&trafficAll, "all", "a", false, "List/replay every matched record (ignore the -n/--limit cap); pair with --replay to re-send all stored traffic")
 	f.IntVarP(&trafficReplayConcurrency, "concurrency", "c", 10, "Concurrent replays (--replay); keep low to avoid overwhelming an intercepting proxy like Burp")
 	f.BoolVar(&trafficReplayBrowser, "with-browser", false, "Replay each URL through a real browser routed via --proxy (--replay), so Burp captures browser-driven traffic")
-	f.StringVarP(
-		&trafficBurpBridgeURL,
-		"burp-bridge-url",
-		"B",
-		burpbridge.URLFromEnvironment(),
-		"Merge live traffic from this loopback Burp bridge URL with local database records")
+	registerBridgeURLFlag(trafficCmd, &trafficBurpBridgeURL,
+		"Merge live traffic from this loopback Burp/Caido bridge URL with local database records")
 	f.BoolVar(
 		&trafficSaveToVigoliumDB,
 		"save-to-vigolium-db",

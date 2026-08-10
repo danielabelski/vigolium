@@ -83,7 +83,7 @@ func TestScanPerRequest_PrivateStateTokenIsCandidate(t *testing.T) {
 	assert.Equal(t, output.RecordKindCandidate, results[0].RecordKind)
 	assert.Equal(t, output.EvidenceGradeCandidate, results[0].EvidenceGrade)
 	for _, evidence := range results[0].ExtractedResults {
-		assert.NotContains(t, evidence, "sk_live_01" + "23456789ab" + "cdef")
+		assert.NotContains(t, evidence, "sk_live_01"+"23456789ab"+"cdef")
 	}
 }
 

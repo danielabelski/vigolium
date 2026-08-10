@@ -13,7 +13,7 @@ const testHead = "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n\r\
 
 func TestBuildEvidenceResponse_SmallBodyShownInFull(t *testing.T) {
 	body := []byte("var apiKey = \"AIzaSyAFi5" + "SqFWHuSSGO" + "5cyrhrLKdg" + "LpMsa1Jmk\";\n")
-	got := BuildEvidenceResponse(testHead, body, "AIzaSyAFi5" + "SqFWHuSSGO" + "5cyrhrLKdg" + "LpMsa1Jmk", -1, -1, 1)
+	got := BuildEvidenceResponse(testHead, body, "AIzaSyAFi5"+"SqFWHuSSGO"+"5cyrhrLKdg"+"LpMsa1Jmk", -1, -1, 1)
 
 	assert.Equal(t, testHead+string(body), got)
 	assert.NotContains(t, got, "truncated", "small body must not be truncated")

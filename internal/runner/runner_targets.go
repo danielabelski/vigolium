@@ -450,7 +450,7 @@ func (r *Runner) buildDeparosConfig(additionalTargets []string) source.DeparosDi
 		cfg.JSTangle = &deparosconfig.JSTangleConfig{
 			Enabled: boolPtrOr(dc.JSTangle.Enabled, true), ReplayMode: dc.JSTangle.ReplayMode,
 			ReplaySafety: dc.JSTangle.ReplaySafety,
-			SourceMaps: boolPtrOr(dc.JSTangle.SourceMaps, true), AssetGraph: boolPtrOr(dc.JSTangle.AssetGraph, true),
+			SourceMaps:   boolPtrOr(dc.JSTangle.SourceMaps, true), AssetGraph: boolPtrOr(dc.JSTangle.AssetGraph, true),
 			ProtocolHandshake: dc.JSTangle.ProtocolHandshake,
 			WorkerCount:       dc.JSTangle.WorkerCount, MemoryBudgetMB: dc.JSTangle.MemoryBudgetMB, CacheMB: dc.JSTangle.CacheMB,
 			WorkerMaxJobs: dc.JSTangle.WorkerMaxJobs, WorkerMaxRSSMB: dc.JSTangle.WorkerMaxRSSMB, JobTimeout: jobTimeout,

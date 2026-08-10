@@ -46,6 +46,24 @@ func (s Severity) MarshalJSON() ([]byte, error) {
 	return jsoniter.Marshal(s.String())
 }
 
+// ToSeverity maps a severity name onto its enum value, returning Undefined for
+// an unrecognized name. Mirrors ToConfidence.
+//
+// The enum is declared least-to-most severe, so the returned value doubles as a
+// comparable rank — which is the point of exporting this: a caller that needs to
+// *order* severities should resolve them here rather than re-type the ladder.
+// Several hand-rolled copies still exist and have drifted (pkg/cli/severity_gate.go,
+// pkg/agent/autopilot_pipeline.go, pkg/fsexport/render.go — the last ranks
+// suspect below info); migrating them changes their ordering behavior, so it is
+// deliberately a separate change, not something this helper has already done.
+func ToSeverity(s string) Severity {
+	sev, err := toSeverity(s)
+	if err != nil {
+		return Undefined
+	}
+	return sev
+}
+
 func toSeverity(valueToMap string) (Severity, error) {
 	normalizedValue := normalizeValue(valueToMap)
 	for key, currentValue := range severityMappings {

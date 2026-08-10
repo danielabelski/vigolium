@@ -458,4 +458,3 @@ func (m *PathModule) detectContext(
 		return HTMLGeneric
 	}
 }
-

@@ -12,6 +12,7 @@ import (
 
 	"github.com/uptrace/bun"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/utils"
 	"github.com/vigolium/vigolium/pkg/work"
 	"go.uber.org/zap"
 )
@@ -25,16 +26,50 @@ const (
 	RecordSourceIngestCLI    = "ingest-cli"    // `vigolium ingest ...` command
 	RecordSourceScanner      = "scanner"       // executor feedback re-injection
 	RecordSourceFinding      = "finding"       // request/response attached to a finding
+	RecordSourceBurp         = "burp"          // Burp Suite, via the loopback bridge or a push to /api/ingest-http
+	RecordSourceCaido        = "caido"         // Caido, via the loopback bridge or a push to /api/ingest-http
 )
+
+// BridgeRecordSources lists the http_records.source values a loopback bridge
+// listener can produce. Which one a given record gets is decided by the
+// implementation identity the listener reports (see pkg/burpbridge), not by the
+// flag spelling the user typed — --burp-bridge-url and --caido-bridge-url are
+// one flag pointing at one protocol.
+var BridgeRecordSources = []string{
+	RecordSourceBurp,
+	RecordSourceCaido,
+}
+
+// IsBridgeRecordSource reports whether a source label names a bridge vendor.
+// Case-insensitive, since it answers both a user-typed --source and a header
+// value written by a plugin.
+//
+// This is the single answer to "is this label a bridge vendor" — the traffic
+// and replay record selection ask it to decide whether a --source filter can be
+// satisfied by live bridge traffic at all, and the ingest endpoint asks it to
+// decide whether a client may claim the label. A second copy of the list is how
+// a third vendor ends up working on one path and not the other.
+func IsBridgeRecordSource(source string) bool {
+	return utils.StringSliceContains(BridgeRecordSources, source)
+}
 
 // IngestRecordSources lists the http_records.source values that represent
 // user-ingested traffic. Scan-on-receive filters the DBInputSource by this
 // list so it only processes traffic the user actually ingested — excluding
 // scanner-produced artefacts that would otherwise cause fan-out.
+//
+// The bridge vendors belong here for the same reason ingest-server does: a
+// record that arrived from Burp or Caido is traffic the user deliberately
+// handed over, whether it was pulled in by `traffic --save-to-vigolium-db` /
+// `import -B` or pushed to /api/ingest-http by the plugin. Omitting them is
+// silent — the rows land in the database and scan-on-receive simply never
+// polls them, with no error to explain why nothing was scanned.
 var IngestRecordSources = []string{
 	RecordSourceIngestServer,
 	RecordSourceIngestProxy,
 	RecordSourceIngestCLI,
+	RecordSourceBurp,
+	RecordSourceCaido,
 }
 
 // DBInputSource polls the database for HTTP records after the scan cursor and provides

@@ -32,7 +32,14 @@ func registerRoutes(app *fiber.App, handlers *Handlers, cfg ServerConfig) {
 	if cfg.CORSAllowedOrigins != "" {
 		corsCfg := cors.Config{
 			AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-			AllowHeaders: []string{"Content-Type", "Authorization", "X-Project-UUID", "X-User-Email"},
+			AllowHeaders: []string{
+				"Content-Type", "Authorization", "X-Project-UUID", "X-User-Email",
+				// A browser client pushing traffic needs this through preflight;
+				// without it the header is dropped and its records fall back to
+				// the generic ingest-server label. Plugin backends (Caido) are
+				// not browsers and are unaffected either way.
+				IngestSourceHeader,
+			},
 		}
 		switch cfg.CORSAllowedOrigins {
 		case "reflect-origin":

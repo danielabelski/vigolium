@@ -87,7 +87,7 @@ func TestScanPerRequest_PrivateTokenFormatIsCandidate(t *testing.T) {
 	assert.Equal(t, severity.Medium, results[0].Info.Severity)
 	assert.Equal(t, output.RecordKindCandidate, results[0].RecordKind)
 	assert.Equal(t, output.EvidenceGradeCandidate, results[0].EvidenceGrade)
-	assert.NotContains(t, results[0].ExtractedResults[0], "ghp_ABCDEF" + "GHIJKLMNOP" + "QRSTUVWXYZ" + "abcdefghij")
+	assert.NotContains(t, results[0].ExtractedResults[0], "ghp_ABCDEF"+"GHIJKLMNOP"+"QRSTUVWXYZ"+"abcdefghij")
 }
 
 // TestScanPerRequest_RedirectDowngraded mirrors the Cloudflare-Access finding: a

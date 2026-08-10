@@ -17,6 +17,10 @@ type RecordUpserter interface {
 }
 
 type ImportResult struct {
+	// Source is the http_records.source label written to every stored row —
+	// the vendor the listener reported. Surfaced so the CLI can name what it
+	// imported from instead of assuming Burp.
+	Source    string   `json:"source"`
 	Matched   int64    `json:"matched"`
 	Selected  int      `json:"selected"`
 	Inserted  int      `json:"inserted"`
@@ -40,7 +44,7 @@ func ImportIntoRepository(
 	query Query,
 	projectUUID string,
 ) (ImportResult, error) {
-	result := ImportResult{}
+	result := ImportResult{Source: Source}
 	query.ProjectUUID = projectUUID
 	query.IncludeRaw = false
 	if query.Location == "" {
@@ -64,6 +68,7 @@ func ImportIntoRepository(
 		if result.Matched == 0 {
 			result.Matched = page.Total
 		}
+		result.Source = page.Source
 		if len(page.Records) == 0 {
 			break
 		}
@@ -87,9 +92,13 @@ func ImportIntoRepository(
 				result.addError(fmt.Sprintf("%s: %v", summary.URL, err))
 				continue
 			}
-			_, outcome, err := repo.UpsertSnapshotRecord(ctx, rr, Source, projectUUID)
+			// Label the persisted row with the vendor that actually answered.
+			// The inspect reply is preferred over the page's because it is the
+			// reply this row came from; both fall back to Burp identically, so
+			// a listener that reports nothing still writes what it always did.
+			_, outcome, err := repo.UpsertSnapshotRecord(ctx, rr, inspection.Source(), projectUUID)
 			if err != nil {
-				return result, fmt.Errorf("store Burp record %s: %w", summary.URL, err)
+				return result, fmt.Errorf("store bridge record %s: %w", summary.URL, err)
 			}
 			switch outcome {
 			case "inserted":

@@ -91,7 +91,7 @@ Persistent flags available on every command.
 | `--ext` | — | stringArray | — | Load JavaScript extension script (repeatable) |
 | `--ext-dir` | — | string | — | Override extension scripts directory |
 | `--force` | — | bool | `false` | Skip confirmation prompts |
-| `--format` | — | string | `console` | Output format (comma-separated for multiple): console, jsonl, html, sqlite (needs -S), fs (flat traffic/finding tree) |
+| `--format` | — | string | `console` | Output format (comma-separated for multiple): console, jsonl, html, sarif, sqlite (needs -S), fs (alias: file-system; flat traffic/finding tree) |
 | `--full-example` | — | bool | `false` | Show full example commands organized by section |
 | `--json` | `-j` | bool | `false` | Emit machine-readable JSON for agent/programmatic use (compact bodies; pair with --fields/--compact/--full-body on finding/traffic/db). For the bulk {type,data} stream use --format jsonl / export. |
 | `--list-input-mode` | — | bool | `false` | List all supported input modes with examples |
@@ -165,7 +165,7 @@ Agentic scan: autonomous AI-driven vulnerability scanning
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--audit` | — | string | `lite` | vigolium-audit mode: lite (3-phase), balanced (9-phase), deep (12-phase), mock (sample output), or off (disable). Default: lite when --source is set |
-| `--burp-bridge-url` | `-B` | string | — | Pull live Burp Proxy history into the project DB before the run (e.g. http://127.0.0.1:9009), so the pre-scan and operator can mine it alongside prior traffic. Also honors $VIGOLIUM_BURP_BRIDGE_URL |
+| `--burp-bridge-url` | `-B` | string | — | Pull live Burp/Caido proxy history into the project DB before the run (e.g. http://127.0.0.1:9009), so the pre-scan and operator can mine it alongside prior traffic. Also honors $VIGOLIUM_BURP_BRIDGE_URL (alias: --caido-bridge-url) |
 | `--db-isolate` | — | bool | `false` | Run into a private temporary database, then merge results into --db (or the default DB) at the end — lets parallel runs share one --db without write contention (SQLite only) |
 | `--diff` | — | string | — | Focus on changed code: PR URL (github.com/.../pull/123), git ref range (main...branch), or HEAD~N |
 | `--disable-guardrail` | — | bool | `false` | Skip the prompt-safety classifier on the natural-language prompt (use only when refusing a known-good prompt) |
@@ -611,7 +611,7 @@ Browse vulnerability findings with fuzzy search and filtering
 | `--asc` | — | bool | `false` | Sort in ascending order (default: descending) |
 | `--body` | — | string | — | Search within HTTP request/response body content |
 | `--burp` | — | bool | `false` | Display in Burp Suite-style format (colored request/response) |
-| `--burp-bridge-url` | `-B` | string | — | Loopback Burp bridge URL used by --push-to-burp / --to-repeater |
+| `--burp-bridge-url` | `-B` | string | — | Loopback Burp/Caido bridge URL used by --push-to-burp / --to-repeater (alias: --caido-bridge-url) |
 | `--columns` | — | stringSlice | — | Columns to show (comma-separated, e.g. ID,SEVERITY,MODULE) |
 | `--compact` | — | bool | `false` | With --json, emit metadata only (omit request/response bodies). --markdown already compacts response bodies by default; use --full-body to render them whole |
 | `--confidence` | — | string | — | Filter by confidence: certain,firm,tentative (comma-separated) |
@@ -673,7 +673,7 @@ Inject payloads into a request and report per-payload response anomalies
 | `--anomaly-threshold` | — | string | `medium` | How strong a signal must be to report: low\|medium\|high, or a number |
 | `--auth-session` | — | string | — | Auth session name whose headers are merged in (from 'vigolium auth list') |
 | `--baseline-samples` | — | int | `0` | Send the un-fuzzed request this many times to measure timing jitter, enabling time_z (default 1, or 3 with --anomaly) |
-| `--burp-bridge-url` | `-B` | string | — | Loopback Burp bridge URL used by --send-via-burp / --matches-to-organizer |
+| `--burp-bridge-url` | `-B` | string | — | Loopback Burp/Caido bridge URL used by --send-via-burp / --matches-to-organizer (alias: --caido-bridge-url) |
 | `--cacert` | — | string | — | CA bundle used to verify the target (implies --verify-tls) |
 | `--cert` | — | string | — | Client certificate file (PEM), curl's -E |
 | `--class` | — | stringSlice | — | Built-in payload class to inject: cmdi,crlf,lfi,open_redirect,path_traversal,sqli,ssrf,ssti,xss,xxe (comma-list) |
@@ -756,7 +756,7 @@ Import scan data, databases, or live Burp Proxy history
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--burp-bridge-url` | `-B` | string | — | Import live Burp Proxy history from this loopback bridge URL into the database |
+| `--burp-bridge-url` | `-B` | string | — | Import live Burp/Caido proxy history from this loopback bridge URL into the database (alias: --caido-bridge-url) |
 | `--glob-db` | — | string | — | Glob of local files to import alongside any positional paths (use one format per run), e.g. --glob-db 'prefix-*.sqlite' or '*.jsonl' |
 | `--output` | `-o` | string | — | Report output path or gs://<project>/<key> URL (required when --format is set; supports {ts}) |
 | `--report-duration` | — | string | — | Human-readable scan duration for the report (e.g. "10h42m5s") |
@@ -935,7 +935,7 @@ Re-send a stored or supplied HTTP request and diff baseline vs replay
 | `--asc` | — | bool | `false` | Bulk: sort ascending (default: descending) |
 | `--auth-session` | — | string | — | Auth session name to merge headers from (from 'vigolium auth list') |
 | `--body` | — | string | — | Bulk: filter records whose request/response body contains this text |
-| `--burp-bridge-url` | `-B` | string | — | Loopback Burp bridge URL used by --save-to-burp / --send-via-burp / --to-repeater / --to-organizer |
+| `--burp-bridge-url` | `-B` | string | — | Loopback Burp/Caido bridge URL used by --save-to-burp / --send-via-burp / --to-repeater / --to-organizer (alias: --caido-bridge-url) |
 | `--concurrency` | `-c` | int | `10` | Bulk: concurrent replays; keep low to avoid overwhelming an intercepting proxy like Burp |
 | `--exclude-body` | — | string | — | Bulk: drop records whose request/response body contains the term (inverse of --body) |
 | `--exclude-header-search` | — | string | — | Bulk: drop records whose HTTP header names/values contain the term (inverse of --header-search) |
@@ -1218,7 +1218,7 @@ Start API server
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--alternative-ingest-key` | — | stringSlice | — | Additional API key for ingestion endpoints (repeatable) |
-| `--burp-bridge-url` | `-B` | string | — | Merge live Burp traffic from this loopback bridge URL into /api/http-records |
+| `--burp-bridge-url` | `-B` | string | — | Merge live proxy traffic from this loopback Burp/Caido bridge URL into /api/http-records (alias: --caido-bridge-url) |
 | `--catchup-threads` | — | int | `4` | Deprecated: no-op (catch-up scanning is disabled) |
 | `--demo-only` | — | bool | `false` | Expose only the demo allowlist: GET /api/findings[/:id], /api/http-records[/:uuid], /api/modules, /api/stats, /api/extensions[/:name\|/docs] |
 | `--disable-catchup` | — | bool | `false` | Deprecated: no-op (catch-up scanning is already disabled) |
@@ -1315,7 +1315,7 @@ Browse or replay HTTP traffic (alias: db ls --table http_records)
 | `--asc` | — | bool | `false` | Sort in ascending order (default: descending) |
 | `--body` | — | string | — | Search within HTTP request/response body content |
 | `--burp` | — | bool | `false` | Display in Burp Suite-style format (colored request/response) |
-| `--burp-bridge-url` | `-B` | string | — | Merge live traffic from this loopback Burp bridge URL with local database records |
+| `--burp-bridge-url` | `-B` | string | — | Merge live traffic from this loopback Burp/Caido bridge URL with local database records (alias: --caido-bridge-url) |
 | `--columns` | — | stringSlice | — | Columns to show (comma-separated, e.g. HOST,METHOD,PATH,STATUS) |
 | `--compact` | — | bool | `false` | With --json, emit metadata only (omit request/response bodies). --markdown already compacts response bodies by default; use --full-body to render them whole |
 | `--concurrency` | `-c` | int | `10` | Concurrent replays (--replay); keep low to avoid overwhelming an intercepting proxy like Burp |

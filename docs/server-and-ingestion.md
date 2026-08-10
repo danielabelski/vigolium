@@ -98,6 +98,29 @@ API key resolution order: `VIGOLIUM_API_KEY` env var > `server.auth_api_key` in 
 
 The `/api/ingest-http` endpoint accepts multiple input modes. All requests use `POST` with a JSON body.
 
+### Declaring the Pushing Tool
+
+Records ingested through this endpoint are stored with `source: "ingest-server"`
+by default — the same label every HTTP client shares. A client can name itself
+instead, so its traffic is distinguishable later:
+
+```bash
+curl -X POST http://localhost:9002/api/ingest-http \
+  -H "X-Vigolium-Source: caido" \
+  ...
+```
+
+Accepted values are `burp` and `caido` — the same labels the bridge path writes,
+so one `--source caido` filter covers traffic that arrived either by Vigolium
+pulling over the bridge or by the plugin pushing here. The Vigolium Caido plugin
+sets this automatically.
+
+The list is a closed allowlist rather than a passthrough, and anything else
+falls back to `ingest-server`. `source` is not only a display label: it decides
+which rows scan-on-receive feeds back into a running scan, so a client free to
+claim `scanner` could silently exclude its own traffic from the scan it just
+asked for.
+
 ### Ingest a Single URL
 
 ```bash
@@ -322,16 +345,29 @@ untrusted certificate.
 
 ## Querying Ingested Data
 
-To merge live Burp Proxy history into the same traffic API, enable the Bridge
-listener in the Vigolium Burp extension and start the server with:
+To merge live proxy history into the same traffic API, enable the Bridge
+listener in the Vigolium Burp extension or the Vigolium Caido plugin and start
+the server with:
 
 ```bash
 vigolium server --burp-bridge-url http://127.0.0.1:9009
 ```
 
+`--caido-bridge-url` is an alias for the same flag — both plugins speak one
+protocol, so which one is listening is discovered rather than declared.
+
 The `/api/http-records` examples below then query the combined database and
-Burp result set. Live records are identified by `"source": "burp"`. No
-separate bridge search route is needed.
+live result set. No separate bridge search route is needed.
+
+Live records are identified by their source: `"source": "burp"` or
+`"source": "caido"`, taken from the `implementation` the listener reports on
+every reply. A listener too old to report one is read as Burp. The response
+also carries `X-Vigolium-Bridge-Source` naming the vendor that answered, so a
+client can label the merged page without inspecting each row.
+
+Filtering by `?source=` works as expected in both directions: `?source=caido`
+against a Burp listener returns only the database's own Caido rows, and vice
+versa.
 
 ### List HTTP Records
 

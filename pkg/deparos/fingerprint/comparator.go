@@ -272,11 +272,11 @@ func (c *Comparator) CheckWildcardWithValidation(ctx context.Context, targetURL 
 // real resource, so we suppress ONLY when a prefix-breaking probe returns content.
 //
 // Algorithm:
-// 1. Generate 4 random path variations (Prefix, Suffix, Extension, Middle)
-// 2. Fetch each path with delays
-// 3. If NO prefix-breaking probe returns content -> content is VALID (covers both
-//    "all probes 404" unique files and "only prefix-preserving 200" real routes)
-// 4. If a prefix-breaking probe returns content -> learn as wildcard and return FALSE
+//  1. Generate 4 random path variations (Prefix, Suffix, Extension, Middle)
+//  2. Fetch each path with delays
+//  3. If NO prefix-breaking probe returns content -> content is VALID (covers both
+//     "all probes 404" unique files and "only prefix-preserving 200" real routes)
+//  4. If a prefix-breaking probe returns content -> learn as wildcard and return FALSE
 func (c *Comparator) validateWithWildcardTest(ctx context.Context, targetURL *url.URL, key CacheKey) (bool, error) {
 	// Escaped (wire) path so a bypass prefix survives into the sibling probes.
 	basePath := targetURL.EscapedPath()

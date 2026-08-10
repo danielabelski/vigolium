@@ -412,6 +412,9 @@ default address, so the bool is what decides whether the bridge is contacted —
 otherwise every config would silently enable it. Precedence is
 `-B/--burp-bridge-url` → `$VIGOLIUM_BURP_BRIDGE_URL` → config (only when
 `enable_burp_bridge: true`). Passing the flag works regardless of the bool.
+`--caido-bridge-url` is an alias of the same flag (a Caido plugin exposing the
+same loopback bridge); both spellings set the same value and read the same env
+var and config key.
 
 ### `agent`
 

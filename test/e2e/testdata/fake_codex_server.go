@@ -1,3 +1,4 @@
+//go:build ignore
 // +build ignore
 
 // fake_codex_server.go is a standalone program that mimics the codex app-server

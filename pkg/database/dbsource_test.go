@@ -484,7 +484,7 @@ func TestRiskPrioritizedDBInputSource_RiskLaneSpansPages(t *testing.T) {
 	scanUUID := createTestScan(t, repo)
 
 	host := "risklane.example.com"
-	const total = riskPrefetchBatchSize*2 + 40 // ~296 records
+	const total = riskPrefetchBatchSize*2 + 40   // ~296 records
 	const highRiskN = riskPrefetchBatchSize + 30 // ~158 high-risk → risk lane spans 2 pages
 	inserted := insertTestRecordsWithHost(t, repo, host, total)
 

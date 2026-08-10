@@ -219,8 +219,8 @@ func init() {
 	// optionally, hand matched anomalies to Burp's Organizer for triage.
 	f.BoolVar(&fuzzSendViaBurp, "send-via-burp", false,
 		"Send each payload through Burp's own HTTP stack (exact bytes — malformed/smuggling preserved) instead of Go's client; requires --burp-bridge-url")
-	f.StringVarP(&fuzzBurpBridgeURL, "burp-bridge-url", "B", burpbridge.URLFromEnvironment(),
-		"Loopback Burp bridge URL used by --send-via-burp / --matches-to-organizer")
+	registerBridgeURLFlag(fuzzCmd, &fuzzBurpBridgeURL,
+		"Loopback Burp/Caido bridge URL used by --send-via-burp / --matches-to-organizer")
 	f.StringVar(&fuzzHTTPMode, "http-mode", "",
 		"With --send-via-burp: wire protocol — auto|http1|http2|http2_ignore_alpn (default auto; use http1 for request smuggling/desync)")
 	f.DurationVar(&fuzzSendTimeout, "send-timeout", 0,
@@ -230,6 +230,7 @@ func init() {
 
 	// Curl-compatible request/transport/session flags.
 	registerFuzzNetFlags(f)
+
 }
 
 // fuzzOrganizerCap bounds how many matched requests are pushed to Burp's
@@ -741,12 +742,8 @@ func setupFuzzBurpBridge(ctx context.Context, _ *replaySource) (*fuzzBurpBridge,
 	if err != nil {
 		return nil, err
 	}
-	info, err := client.Health(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("burp bridge unavailable: %w", err)
-	}
-	if info.InScopeOnly {
-		fmt.Fprintf(os.Stderr, "%s Burp bridge is in-scope-only; out-of-scope targets will be refused (403)\n", terminal.WarningSymbol())
+	if _, err := preflightBridge(ctx, client, true); err != nil {
+		return nil, err
 	}
 	return &fuzzBurpBridge{
 		client:      client,

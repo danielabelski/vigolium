@@ -80,8 +80,8 @@ func TestSecretScanParityRawVsBeautified(t *testing.T) {
 		t.Skip("skipping jstangle beautify integration test in -short mode")
 	}
 	secrets := []string{
-		"sk_live_f0" + "1c79xuuug7" + "yodgzj5ws0" + "h1x2kyvho3",                              // stripe
-		"xoxb-24938" + "27450-2492" + "837401-Ff8" + "3jdkeExamp" + "le920Slack",                    // slack
+		"sk_live_f0" + "1c79xuuug7" + "yodgzj5ws0" + "h1x2kyvho3",                                             // stripe
+		"xoxb-24938" + "27450-2492" + "837401-Ff8" + "3jdkeExamp" + "le920Slack",                              // slack
 		"SG.ngeVfQF" + "YQlKU0ufo8" + "x5d1A.TwL2" + "iGABkTgUCC" + "3rmXGw5UQM" + "YtDMzOQMHy" + "kWn7ttUmM", // sendgrid
 	}
 	// Embed all secrets across modules of one webpack bundle. Each module carries a

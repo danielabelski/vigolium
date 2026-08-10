@@ -58,8 +58,8 @@ func (p probe) match(body string) (matched []string, ok bool) {
 var probes = []probe{
 	// .phps highlight handler
 	{
-		path:        "/index.phps",
-		name:        "PHP Highlight Source (index.phps)",
+		path:    "/index.phps",
+		name:    "PHP Highlight Source (index.phps)",
 		markers: []string{"<?php", "<code>", "<span style=", "highlight_file", "php_highlight"},
 		// The .phps highlighter renders HTML, so rely on the catch-all decoy disproof
 		// rather than a content-type gate that would reject the genuine hit.
@@ -113,8 +113,8 @@ var probes = []probe{
 	},
 	// Dangerous extension mappings
 	{
-		path:        "/index.phtml",
-		name:        "PHTML Extension Accessible",
+		path:    "/index.phtml",
+		name:    "PHTML Extension Accessible",
 		markers: []string{"<?php", "<?=", "<code>"},
 		// .phtml source may be served highlighted (HTML), so skip the content-type gate
 		// and let the catch-all decoy disproof guard it.

@@ -187,11 +187,11 @@ func TestGroupFindingsByValue_SuspectBundle(t *testing.T) {
 	// A NAMED provider family at Suspect severity (untagged) must NOT bundle — it
 	// is a distinct family and keeps its own finding (the Google/Storyblok case).
 	named := insertRuleFinding(t, db, ctx, projectUUID, mod, "Google Gemini API Key", "suspect", "app.x.net",
-		"https://app.x.net/config.js", `["AIzaSyA9ww` + `U3OfBHTOWZ` + `s_jrPLr6la` + `HG6YQwvnc"]`)
+		"https://app.x.net/config.js", `["AIzaSyA9ww`+`U3OfBHTOWZ`+`s_jrPLr6la`+`HG6YQwvnc"]`)
 
 	// A High-tier secret on the same host stays its own per-rule finding.
 	high := insertRuleFinding(t, db, ctx, projectUUID, mod, "Stripe Secret Key", "high", "app.x.net",
-		"https://app.x.net/app.js", `["sk_live_re` + `alkey01234` + `567890abcd"]`)
+		"https://app.x.net/app.js", `["sk_live_re`+`alkey01234`+`567890abcd"]`)
 
 	// A generic Suspect secret on another host stays separate under PerHost.
 	otherHost := insertRuleFindingTags(t, db, ctx, projectUUID, mod, "Generic Password", "suspect", "other.x.net",

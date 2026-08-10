@@ -17,8 +17,9 @@ Native scans accept these formats:
 | `html` | Self-contained interactive grid report |
 | `report` | Self-contained document-style report |
 | `pdf` | PDF document rendered through headless Chrome |
+| `sarif` | SARIF 2.1.0 log for GitHub code scanning, DefectDojo, SARIF viewers |
 | `sqlite` | Standalone database that can be reopened by Vigolium |
-| `fs` | Flat, browsable request/response and finding tree |
+| `fs` | Flat, browsable request/response and finding tree (alias: `file-system`) |
 
 Comma-separate formats to generate several artifacts from one scan:
 
@@ -65,6 +66,53 @@ vigolium scan https://example.com --format pdf -o report.pdf
 Full native scans can produce HTML reports. When `--only` isolates a phase,
 HTML is supported for discovery and spidering output.
 
+### SARIF (interchange with other tools)
+
+`--format sarif` writes a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/sarif-v2.1.0-errata01-os-complete.html)
+log of the run's findings — the format GitHub code scanning, DefectDojo, the
+VS Code SARIF Viewer and most SAST/DAST aggregators ingest without a custom
+parser.
+
+```bash
+vigolium scan https://example.com --format sarif -o scan.sarif
+vigolium export --format sarif -o project.sarif
+vigolium import ./audit-output --format sarif -o audit.sarif
+```
+
+How findings map onto the schema:
+
+| Vigolium | SARIF |
+|---|---|
+| module id / name | `tool.driver.rules[].id` / `.name` |
+| severity | `level` (critical+high → `error`, medium → `warning`, low+info → `note`) |
+| severity / CVSS | `properties["security-severity"]` — what GitHub buckets alerts by |
+| CWE | rule tag `external/cwe/cwe-079` |
+| source file `path:line` | `locations[].physicalLocation` with a `region` |
+| URL | `locations[].physicalLocation` when there is no source file |
+| request / response | `webRequest` / `webResponse` |
+| finding hash | `partialFingerprints` — lets a consumer track one finding across re-scans |
+
+Code findings (from `vigolium agent audit` and the source-aware agent modes)
+anchor to a **file and line**, which is what lets GitHub annotate them onto a
+pull request diff. Absolute audit paths are made repo-relative when the
+repository name identifies a directory in them; when it does not, the absolute
+path is kept rather than guessed at, so a result is never pinned to the wrong
+file.
+
+Findings from the native module fleet anchor to their **URL** and carry the
+proof exchange in the standard `webRequest`/`webResponse` fields. Bodies are
+capped (4 KB each) so a large scan stays inside upload limits; a result whose
+evidence was cut carries `properties.evidenceTruncated`.
+
+Uploading to GitHub code scanning:
+
+```bash
+vigolium scan -S "$TARGET" --format sarif -o results.sarif
+gh api /repos/{owner}/{repo}/code-scanning/sarifs \
+  -f commit_sha="$(git rev-parse HEAD)" -f ref="refs/heads/main" \
+  -f sarif="$(gzip -c results.sarif | base64)"
+```
+
 ### Standalone SQLite
 
 SQLite output requires stateless mode so the result is an explicit standalone
@@ -78,7 +126,7 @@ vigolium traffic -S --db scan.sqlite --tree
 
 ### Filesystem Output
 
-The `fs` format writes two sibling trees, `<base>-traffic/` and
+The `fs` format (alias `file-system`) writes two sibling trees, `<base>-traffic/` and
 `<base>-findings/`. Requests are replayable `.req` files, responses are split
 into headers and decoded bodies, and each tree has a machine-readable index.
 
@@ -90,7 +138,8 @@ vigolium export --format fs -o project-export
 ## Export Existing Data
 
 `vigolium export` reads the active project database and supports `jsonl`,
-`html`, `report`, `pdf`, `markdown`, `bundle`, and `fs`:
+`html`, `report`, `pdf`, `markdown`, `sarif`, `bundle`, and `fs`
+(alias `file-system`):
 
 ```bash
 vigolium export --only findings,http --format jsonl -o export.jsonl

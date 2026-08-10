@@ -137,7 +137,7 @@ func TestScanPerRequest_SubstantiveJWTClaimIsCandidate(t *testing.T) {
 	assert.Equal(t, output.RecordKindCandidate, results[0].RecordKind)
 	assert.Equal(t, output.EvidenceGradeCandidate, results[0].EvidenceGrade)
 	assert.Equal(t, true, results[0].Metadata["substantive_values"])
-	assert.NotContains(t, strings.Join(results[0].ExtractedResults, " "), "tok_live_7" + "Jr9mQ2vXp8" + "sK4nL")
+	assert.NotContains(t, strings.Join(results[0].ExtractedResults, " "), "tok_live_7"+"Jr9mQ2vXp8"+"sK4nL")
 }
 
 func testJWT(t *testing.T, claims map[string]any) string {

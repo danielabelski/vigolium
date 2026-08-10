@@ -20,13 +20,16 @@ func TestParseExportFormats(t *testing.T) {
 		{name: "multiple", raw: "html,bundle,markdown", want: []string{"html", "bundle", "markdown"}},
 		{name: "order preserved", raw: "markdown,html", want: []string{"markdown", "html"}},
 		{name: "aliases normalized", raw: "md,gz", want: []string{"markdown", "bundle"}},
+		{name: "file-system aliases fs", raw: "file-system", want: []string{"fs"}},
+		{name: "file-system is case insensitive", raw: "File-System", want: []string{"fs"}},
+		{name: "fs and its alias collapse", raw: "fs,file-system", want: []string{"fs"}},
 		{name: "whitespace tolerated", raw: " html , md ", want: []string{"html", "markdown"}},
 		{name: "case insensitive", raw: "HTML,PDF", want: []string{"html", "pdf"}},
 		{name: "duplicates collapsed", raw: "html,html", want: []string{"html"}},
 		{name: "alias dupes collapse onto canonical", raw: "markdown,md", want: []string{"markdown"}},
 		{name: "empty segments skipped", raw: "html,,jsonl", want: []string{"html", "jsonl"}},
-		{name: "every format", raw: "html,report,pdf,jsonl,markdown,bundle,fs",
-			want: []string{"html", "report", "pdf", "jsonl", "markdown", "bundle", "fs"}},
+		{name: "every format", raw: "html,report,pdf,jsonl,markdown,sarif,bundle,fs",
+			want: []string{"html", "report", "pdf", "jsonl", "markdown", "sarif", "bundle", "fs"}},
 		{name: "unknown is an error", raw: "html,nope", wantErr: `unsupported format "nope"`},
 		{name: "whole-string value is not a format", raw: "html;bundle", wantErr: `unsupported format "html;bundle"`},
 		{name: "empty is an error", raw: "", wantErr: "requires at least one format"},
@@ -218,5 +221,61 @@ func TestMultiFormatBundleDerivesArchiveExtension(t *testing.T) {
 		if err := validateExportFormatPath(s); err != nil {
 			t.Errorf("validateExportFormatPath(%s -> %s) = %v, want nil", s.format, s.path, err)
 		}
+	}
+}
+
+// TestNormalizeScanFormatsAliases locks in that the scan commands resolve the
+// same alias table `vigolium export` does — the two used to canonicalize through
+// separate code, so an alias could work on one and be rejected by the other.
+func TestNormalizeScanFormatsAliases(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      []string
+		want    []string
+		wantErr string
+	}{
+		{name: "file-system aliases fs", in: []string{"file-system"}, want: []string{"fs"}},
+		{name: "sqlite aliases preserved", in: []string{"sqlite3", "db"}, want: []string{"sqlite", "sqlite"}},
+		{name: "case folded", in: []string{"HTML", "File-System"}, want: []string{"html", "fs"}},
+		{name: "canonical untouched", in: []string{"console", "jsonl", "sarif"}, want: []string{"console", "jsonl", "sarif"}},
+		// An export-only alias canonicalizes, then fails the scan valid-list —
+		// and the error quotes what was typed, not the canonical name.
+		{name: "export-only alias rejected by name typed", in: []string{"gz"}, wantErr: `invalid --format value "gz"`},
+		{name: "unknown rejected", in: []string{"nope"}, wantErr: `invalid --format value "nope"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := append([]string(nil), tt.in...)
+			err := normalizeScanFormats(got)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("normalizeScanFormats(%v) error = %v, want it to contain %q", tt.in, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeScanFormats(%v) unexpected error: %v", tt.in, err)
+			}
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("normalizeScanFormats(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// The fs alias must also route scan-url through the Runner; taking the direct
+// path would neither validate nor write it.
+func TestHasFileOutputFormatAcceptsFSAlias(t *testing.T) {
+	prev := globalFormat
+	defer func() { globalFormat = prev }()
+	for _, f := range []string{"fs", "file-system", "sarif"} {
+		globalFormat = f
+		if !hasFileOutputFormat() {
+			t.Errorf("hasFileOutputFormat() = false for %q, want true", f)
+		}
+	}
+	globalFormat = "console"
+	if hasFileOutputFormat() {
+		t.Error("hasFileOutputFormat() = true for console, want false")
 	}
 }

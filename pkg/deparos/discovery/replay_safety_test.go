@@ -69,9 +69,9 @@ func TestParseReplaySafety(t *testing.T) {
 		"safe-baseline":  ReplaySafetyBaseline,
 		"state-changing": ReplaySafetyStateChanging,
 		"STATE-CHANGING": ReplaySafetyStateChanging, // case-insensitive
-		" read-only ":    ReplaySafetyReadOnly,       // trimmed
-		"":               ReplaySafetyReadOnly,       // default fails closed
-		"bogus":          ReplaySafetyReadOnly,       // unknown fails closed
+		" read-only ":    ReplaySafetyReadOnly,      // trimmed
+		"":               ReplaySafetyReadOnly,      // default fails closed
+		"bogus":          ReplaySafetyReadOnly,      // unknown fails closed
 	}
 	for in, want := range cases {
 		if got := ParseReplaySafety(in); got != want {

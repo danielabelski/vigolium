@@ -4,10 +4,13 @@
 
 Returns paginated HTTP request/response records stored in the database. Response and request bodies are excluded from list responses for performance.
 
-When the server is started with `--burp-bridge-url http://127.0.0.1:9009`, this
-same endpoint merges live Burp Proxy history with database records before
-sorting and pagination. Live rows use `source: "burp"`; use `source=burp` to
-select only those rows. No separate public bridge endpoint is required.
+When the server is started with `--burp-bridge-url http://127.0.0.1:9009`
+(alias `--caido-bridge-url`), this same endpoint merges live Burp or Caido Proxy
+history with database records before sorting and pagination. Live rows use
+`source: "burp"` or `source: "caido"` depending on which listener answered; use
+`source=caido` to select only those rows. The response carries
+`X-Vigolium-Bridge-Source` naming the vendor. No separate public bridge endpoint
+is required.
 
 **Query parameters:**
 
@@ -21,7 +24,7 @@ select only those rows. No separate public bridge endpoint is required.
 | `status_code`  | string |         | Filter by status code (comma-separated)      |
 | `content_type` | string |         | Filter by response content type              |
 | `search`       | string |         | Search metadata plus raw request/response headers and bodies |
-| `source`       | string |         | Filter by source (e.g. `burp`, `ingest-server`, `cli`) |
+| `source`       | string |         | Filter by source (e.g. `burp`, `caido`, `ingest-server`, `cli`) |
 | `min_risk`     | int    |         | Filter by minimum risk score                 |
 | `remark`       | string |         | Filter by remark                             |
 | `sort`         | string | `created_at` | Sort field: `created_at`, `sent_at`, `method`, `path`, `status_code`, `response_time` |

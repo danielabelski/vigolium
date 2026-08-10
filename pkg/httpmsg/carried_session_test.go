@@ -24,7 +24,7 @@ func TestFlattenCookiesForHost(t *testing.T) {
 	cookies := []*http.Cookie{
 		{Name: "cf_clearance", Value: "abc", Domain: ".example.com"},
 		{Name: "session", Value: "xyz", Domain: "www.example.com"},
-		{Name: "other", Value: "1", Domain: "unrelated.org"}, // different host → dropped
+		{Name: "other", Value: "1", Domain: "unrelated.org"},         // different host → dropped
 		{Name: "cf_clearance", Value: "dup", Domain: ".example.com"}, // dup name → first wins
 		{Name: "", Value: "skip", Domain: ".example.com"},            // no name → skipped
 	}
@@ -57,10 +57,10 @@ func TestFlattenCookiesForHost_HostOnlyCookie(t *testing.T) {
 
 func TestMergeCookieHeaders(t *testing.T) {
 	cases := []struct {
-		name           string
-		existing       string
-		carried        string
-		want           string
+		name     string
+		existing string
+		carried  string
+		want     string
 	}{
 		{"empty existing", "", "cf=1; s=2", "cf=1; s=2"},
 		{"empty carried", "a=1", "", "a=1"},

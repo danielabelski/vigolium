@@ -569,4 +569,3 @@ func TestAPI_ScanTrigger_WithRecords(t *testing.T) {
 		}
 	}
 }
-

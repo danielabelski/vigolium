@@ -223,12 +223,12 @@ func (m *Module) buildPackages(form qbForm, paths []string, reqPath, baseURL str
 		MatcherStatus:    true,
 		ExtractedResults: evidence,
 		Info: output.Info{
-			Name: "AEM Deployment Package / Archive Disclosure",
+			Name:        "AEM Deployment Package / Archive Disclosure",
 			Description: "QueryBuilder enumerated .zip archives in the repository (typically /etc/packages build packages, or config backups). AEM deployment packages routinely contain application source and plaintext infrastructure credentials, and are downloadable once located.",
-			Severity:   severity.High,
-			Confidence: severity.Firm,
-			Tags:       append([]string{"aem", "adobe", "info-disclosure", "content-discovery", "jcr"}, aem.ACLBypassTag(form.isBypass())...),
-			Reference:  refs,
+			Severity:    severity.High,
+			Confidence:  severity.Firm,
+			Tags:        append([]string{"aem", "adobe", "info-disclosure", "content-discovery", "jcr"}, aem.ACLBypassTag(form.isBypass())...),
+			Reference:   refs,
 		},
 	}
 	if form.isBypass() {

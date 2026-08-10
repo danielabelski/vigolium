@@ -146,6 +146,7 @@ vigolium export --format jsonl    -o gs://{project-uuid}/exports/data-{ts}.jsonl
 vigolium export --format html     -o gs://{project-uuid}/exports/report-{ts}.html
 vigolium export --format pdf      -o gs://{project-uuid}/exports/report-{ts}.pdf
 vigolium export --format markdown -o gs://{project-uuid}/exports/report-{ts}.md
+vigolium export --format sarif    -o gs://{project-uuid}/exports/report-{ts}.sarif
 vigolium export --format bundle   -o gs://{project-uuid}/exports/bundle-{ts}.tar.gz \
                                     --scan-uuid <run-uuid>
 ```

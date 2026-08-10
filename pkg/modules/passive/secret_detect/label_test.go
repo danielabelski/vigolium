@@ -87,7 +87,7 @@ func TestNewSecretFindingBundleTag(t *testing.T) {
 		t.Errorf("generic rule finding tags = %v, want it to carry %q", generic.Info.Tags, output.SuspectBundleTag)
 	}
 
-	named := NewSecretFinding("kingfisher.google.7", "Google Gemini API Key", "AIzaSyA9ww" + "U3OfBHTOWZ" + "s_jrPLr6la" + "HG6YQwvnc", "",
+	named := NewSecretFinding("kingfisher.google.7", "Google Gemini API Key", "AIzaSyA9ww"+"U3OfBHTOWZ"+"s_jrPLr6la"+"HG6YQwvnc", "",
 		severity.Suspect, severity.Tentative, "app.x.net", "https://app.x.net/config.js", "", "")
 	if hasBundleTag(named.Info.Tags) {
 		t.Errorf("named provider finding tags = %v, must NOT carry %q", named.Info.Tags, output.SuspectBundleTag)

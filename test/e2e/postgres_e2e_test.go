@@ -656,13 +656,13 @@ func TestPg_AgenticScanCRUD(t *testing.T) {
 
 	// Child run linked via parent_run_uuid (swarm sub-run)
 	child := &database.AgenticScan{
-		UUID:          "22222222-2222-2222-2222-222222222222",
-		ProjectUUID:   database.DefaultProjectUUID,
+		UUID:                  "22222222-2222-2222-2222-222222222222",
+		ProjectUUID:           database.DefaultProjectUUID,
 		ParentAgenticScanUUID: parentUUID,
-		Mode:          "autopilot",
-		AgentName:     "autopilot-worker",
-		Status:        "completed",
-		StartedAt:     now,
+		Mode:                  "autopilot",
+		AgentName:             "autopilot-worker",
+		Status:                "completed",
+		StartedAt:             now,
 	}
 	require.NoError(t, repo.CreateAgenticScan(ctx, child))
 

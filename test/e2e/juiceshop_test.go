@@ -12,8 +12,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
-	"github.com/vigolium/vigolium/pkg/modules/active/xss_light_scanner"
 	"github.com/vigolium/vigolium/pkg/modules/active/sqli_error_based"
+	"github.com/vigolium/vigolium/pkg/modules/active/xss_light_scanner"
 )
 
 // OWASP Juice Shop - https://github.com/juice-shop/juice-shop

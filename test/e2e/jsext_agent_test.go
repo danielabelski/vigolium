@@ -61,11 +61,11 @@ func newXSSMockClient() *mockAgentClient {
 	return &mockAgentClient{
 		rules: []mockRule{
 			{
-				keyword: "Generate",
+				keyword:  "Generate",
 				response: `{"payloads":["<script>alert('VGNM')</script>","<img src=x onerror=alert('VGNM')>","javascript:alert('VGNM')"]}`,
 			},
 			{
-				keyword: "Analyze",
+				keyword:  "Analyze",
 				response: `{"vulnerable":true,"confidence":"high","evidence":"XSS payload reflected verbatim in response","details":"Payload found unencoded in HTML body"}`,
 			},
 		},
@@ -145,9 +145,9 @@ func TestAgentExt_XSSScanner_FindsReflection(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(agentExtensionsDir(), "ai_xss_scanner.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 	engine := engineWithAgentClient(t, cfg, infra, newXSSMockClient())
 
@@ -206,9 +206,9 @@ func TestAgentExt_XSSScanner_NoFindingOnCleanEndpoint(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(agentExtensionsDir(), "ai_xss_scanner.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 	engine := engineWithAgentClient(t, cfg, infra, newXSSMockClient())
 
@@ -250,9 +250,9 @@ func TestAgentExt_XSSScanner_GracefulFallbackWithoutLLM(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(agentExtensionsDir(), "ai_xss_scanner.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 	// Nil LLMClient — agent API should not be set up
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, &jsext.EngineOptions{LLMClient: nil})
@@ -294,9 +294,9 @@ func TestAgentExt_FPFilter_DropsHighConfidenceFalsePositive(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(agentExtensionsDir(), "ai_false_positive_filter.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 	engine := engineWithAgentClient(t, cfg, infra, newFPFilterMockClient())
 
@@ -335,9 +335,9 @@ func TestAgentExt_FPFilter_AnnotatesConfirmedFinding(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(agentExtensionsDir(), "ai_false_positive_filter.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 	engine := engineWithAgentClient(t, cfg, infra, newFPFilterMockClient())
 	hookChain := jsext.NewHookChain(nil, engine.PostHooks())
@@ -376,9 +376,9 @@ func TestAgentExt_FPFilter_PassesThroughWithoutRequestResponse(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(agentExtensionsDir(), "ai_false_positive_filter.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 	engine := engineWithAgentClient(t, cfg, infra, newFPFilterMockClient())
 	hookChain := jsext.NewHookChain(nil, engine.PostHooks())
@@ -409,9 +409,9 @@ func TestAgentExt_FPFilter_GracefulFallbackWithoutLLM(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(agentExtensionsDir(), "ai_false_positive_filter.js")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, &jsext.EngineOptions{LLMClient: nil})
 	require.NoError(t, err)
@@ -447,9 +447,9 @@ func TestAgentExt_ResponseAnalyzerYAML_DetectsIssue(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(agentExtensionsDir(), "ai_response_analyzer.vgm.yaml")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 	engine := engineWithAgentClient(t, cfg, infra, newResponseAnalyzerMockClient())
 
@@ -530,9 +530,9 @@ func TestAgentExt_ResponseAnalyzerYAML_GracefulFallbackWithoutLLM(t *testing.T) 
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled: true,
+		Enabled:   true,
 		CustomDir: []string{filepath.Join(agentExtensionsDir(), "ai_response_analyzer.vgm.yaml")},
-		Limits:  config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:    config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 	engine, err := jsext.NewEngine(cfg, infra.HTTPClient, &jsext.EngineOptions{LLMClient: nil})
 	require.NoError(t, err)
@@ -566,9 +566,9 @@ func TestAgentExt_LoadAll(t *testing.T) {
 	defer infra.Cleanup()
 
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
+		Enabled:      true,
 		ExtensionDir: agentExtensionsDir(),
-		Limits:     config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
+		Limits:       config.ScriptLimits{Timeout: "30s", MaxMemoryMB: 128},
 	}
 	engine := engineWithAgentClient(t, cfg, infra, newXSSMockClient())
 

@@ -405,4 +405,3 @@ func TestScanRunner_VAmPI_OnlyKnownIssueScan(t *testing.T) {
 		t.Logf("  [%s] %s — %s", f.Severity, f.ModuleID, f.ModuleName)
 	}
 }
-

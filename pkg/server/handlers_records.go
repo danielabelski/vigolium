@@ -150,10 +150,19 @@ func (h *Handlers) HandleListRecords(c fiber.Ctx) error {
 		}
 		if clientErr != nil {
 			c.Set("X-Vigolium-Burp-Bridge", "unavailable")
-			zap.L().Warn("Burp bridge traffic unavailable; returning database records only", zap.Error(clientErr))
+			zap.L().Warn("bridge traffic unavailable; returning database records only", zap.Error(clientErr))
 		} else {
 			c.Set("X-Vigolium-Burp-Bridge", "connected")
+			// Which vendor answered, for a client that wants to label the
+			// merged rows without inspecting each one. The header name stays
+			// Burp-spelled: it is a protocol marker existing consumers key off,
+			// not a provenance label.
+			c.Set("X-Vigolium-Bridge-Source", live.Source)
 		}
+		// Mirrors the CLI path: Eligible admitted every bridge vendor because the
+		// answering one was not yet known, so a ?source naming the other vendor
+		// discards the live set.
+		live = live.FilterBySource(filters.Source)
 		records, total = burpbridge.MergePage(
 			records,
 			live.Records,

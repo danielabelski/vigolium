@@ -8,6 +8,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/vigolium/vigolium/internal/config"
+	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/input/formats/curl"
@@ -91,6 +92,36 @@ func (h *Handlers) fetchResponseIfNeeded(rr *httpmsg.HttpRequestResponse) *httpm
 	respChain.Close()
 
 	return rr.WithResponse(httpmsg.NewHttpResponse(raw))
+}
+
+// IngestSourceHeader lets a client declare which tool the traffic it is pushing
+// came from, so a record ingested by the Caido plugin is distinguishable from
+// one pushed by curl. Mirrors the X-Project-UUID convention: a header rather
+// than a body field, because the seven ingest modes share three save helpers
+// but seven request shapes.
+const IngestSourceHeader = "X-Vigolium-Source"
+
+// ingestSource resolves the source label for an ingestion request: the client's
+// declared tool when it names an allowed one, otherwise the generic
+// ingest-server label this endpoint has always written.
+//
+// The allowlist is database.IsBridgeRecordSource rather than a local table, and
+// it is an allowlist and not a passthrough on purpose: http_records.source is
+// not only a display label, it decides which rows scan-on-receive feeds back
+// into a running scan (database.IngestRecordSources) and which rows the executor
+// treats as its own artefacts. A client free to send source="scanner" could
+// silently exclude its own traffic from the scan it just asked for.
+func ingestSource(c fiber.Ctx) string {
+	declared := strings.ToLower(strings.TrimSpace(c.Get(IngestSourceHeader)))
+	if declared == "" {
+		return database.RecordSourceIngestServer
+	}
+	if database.IsBridgeRecordSource(declared) {
+		return declared
+	}
+	zap.L().Debug("ignoring unrecognised ingest source header",
+		zap.String("header", IngestSourceHeader), zap.String("declared", declared))
+	return database.RecordSourceIngestServer
 }
 
 // saveRecord persists an HTTP record, routing through the RecordWriter when
@@ -307,7 +338,7 @@ func (h *Handlers) ingestBurpBase64(c fiber.Ctx, ctx context.Context, req *Inges
 		})
 	}
 
-	if _, err := h.saveRecord(ctx, rr, "ingest-server", getProjectUUID(c)); err != nil {
+	if _, err := h.saveRecord(ctx, rr, ingestSource(c), getProjectUUID(c)); err != nil {
 		zap.L().Error("Failed to save ingested record", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to save record: " + err.Error(),
@@ -356,7 +387,7 @@ func (h *Handlers) ingestCurl(c fiber.Ctx, ctx context.Context, req *IngestHTTPR
 		})
 	}
 
-	if _, err := h.saveRecord(ctx, rr, "ingest-server", getProjectUUID(c)); err != nil {
+	if _, err := h.saveRecord(ctx, rr, ingestSource(c), getProjectUUID(c)); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to save record: " + err.Error(),
 			Code:  fiber.StatusInternalServerError,
@@ -383,7 +414,7 @@ func (h *Handlers) ingestOpenAPI(c fiber.Ctx, ctx context.Context, req *IngestHT
 	ext := openapi.DetectFormatFromContent(data)
 
 	var skipped int
-	acc := h.newIngestAccumulator(ctx, "ingest-server", getProjectUUID(c))
+	acc := h.newIngestAccumulator(ctx, ingestSource(c), getProjectUUID(c))
 
 	var urlOverrideSvc *httpmsg.Service
 	if req.URL != "" {
@@ -442,7 +473,7 @@ func (h *Handlers) ingestPostman(c fiber.Ctx, ctx context.Context, req *IngestHT
 
 	parser := postman.New()
 	var skipped int
-	acc := h.newIngestAccumulator(ctx, "ingest-server", getProjectUUID(c))
+	acc := h.newIngestAccumulator(ctx, ingestSource(c), getProjectUUID(c))
 
 	var urlOverrideSvc *httpmsg.Service
 	if req.URL != "" {
@@ -520,7 +551,7 @@ func (h *Handlers) ingestURL(c fiber.Ctx, ctx context.Context, req *IngestHTTPRe
 		})
 	}
 
-	if _, err := h.saveRecord(ctx, rr, "ingest-server", getProjectUUID(c)); err != nil {
+	if _, err := h.saveRecord(ctx, rr, ingestSource(c), getProjectUUID(c)); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to save record: " + err.Error(),
 			Code:  fiber.StatusInternalServerError,
@@ -545,7 +576,7 @@ func (h *Handlers) ingestHAR(c fiber.Ctx, ctx context.Context, req *IngestHTTPRe
 
 	parser := har.New()
 	var skipped int
-	acc := h.newIngestAccumulator(ctx, "ingest-server", getProjectUUID(c))
+	acc := h.newIngestAccumulator(ctx, ingestSource(c), getProjectUUID(c))
 
 	var urlOverrideSvc *httpmsg.Service
 	if req.URL != "" {
@@ -603,7 +634,7 @@ func (h *Handlers) ingestURLFile(c fiber.Ctx, ctx context.Context, req *IngestHT
 
 	var skipped int
 	var parseErrors []string // per-line parse errors keep their line context
-	acc := h.newIngestAccumulator(ctx, "ingest-server", getProjectUUID(c))
+	acc := h.newIngestAccumulator(ctx, ingestSource(c), getProjectUUID(c))
 
 	var urlOverrideSvc *httpmsg.Service
 	if req.URL != "" {

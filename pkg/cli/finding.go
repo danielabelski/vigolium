@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/vigolium/vigolium/pkg/burpbridge"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/cli/tui"
 	"github.com/vigolium/vigolium/pkg/database"
@@ -175,8 +174,8 @@ func init() {
 		"Push to a Burp Repeater tab instead of the Organizer (respects Burp's 30-tabs/min cap)")
 	f.BoolVar(&findingSendViaBurp, "send-via-burp", false,
 		"With --push-to-burp/--to-repeater: re-issue the request through Burp's engine and store the fresh response")
-	f.StringVarP(&findingBurpBridgeURL, "burp-bridge-url", "B", burpbridge.URLFromEnvironment(),
-		"Loopback Burp bridge URL used by --push-to-burp / --to-repeater")
+	registerBridgeURLFlag(findingCmd, &findingBurpBridgeURL,
+		"Loopback Burp/Caido bridge URL used by --push-to-burp / --to-repeater")
 	f.StringVar(&findingHTTPMode, "http-mode", "",
 		"With --send-via-burp: wire protocol — auto|http1|http2|http2_ignore_alpn (default auto)")
 

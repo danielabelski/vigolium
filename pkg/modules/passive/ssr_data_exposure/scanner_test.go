@@ -66,12 +66,12 @@ func makeSSRCtx(state string) *httpmsg.HttpRequestResponse {
 
 func TestScanPerRequest_PrivateTokenIsCandidate(t *testing.T) {
 	m := New()
-	results, err := m.ScanPerRequest(makeSSRCtx(`{"api_key":"sk_live_01` + `23456789ab` + `cdef"}`), &modkit.ScanContext{})
+	results, err := m.ScanPerRequest(makeSSRCtx(`{"api_key":"sk_live_01`+`23456789ab`+`cdef"}`), &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, output.RecordKindCandidate, results[0].RecordKind)
 	assert.Equal(t, output.EvidenceGradeCandidate, results[0].EvidenceGrade)
-	assert.NotContains(t, results[0].ExtractedResults[0], "sk_live_01" + "23456789ab" + "cdef")
+	assert.NotContains(t, results[0].ExtractedResults[0], "sk_live_01"+"23456789ab"+"cdef")
 }
 
 func TestScanPerRequest_RoutineClientStateIsObservation(t *testing.T) {

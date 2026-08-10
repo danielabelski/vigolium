@@ -191,7 +191,7 @@ func runDBExport(cmd *cobra.Command, args []string) error {
 // "vigolium" in the cwd when no -o is given.
 func runDBExportFS(db *database.DB) error {
 	dateFrom, dateTo, err := parseDateRangeFlags(exportFrom, exportTo,
-			timeFilterFromLabel, timeFilterToLabel)
+		timeFilterFromLabel, timeFilterToLabel)
 	if err != nil {
 		return err
 	}

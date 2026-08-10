@@ -32,16 +32,19 @@ func writeBurpImportResult(
 	jsonOutput bool,
 ) {
 	if jsonOutput {
+		// ImportResult already carries the resolved source, so it is not
+		// restated here — one `source` key, written from the vendor that
+		// actually answered rather than from a compile-time constant.
 		output := struct {
-			Source    string `json:"source"`
 			BridgeURL string `json:"bridge_url"`
 			burpbridge.ImportResult
-		}{Source: burpbridge.Source, BridgeURL: bridgeURL, ImportResult: result}
+		}{BridgeURL: bridgeURL, ImportResult: result}
 		_ = json.NewEncoder(w).Encode(output)
 		return
 	}
-	_, _ = fmt.Fprintf(w, "%s Imported Burp traffic: %d selected, %d inserted, %d updated, %d unchanged",
-		terminal.SuccessSymbol(), result.Selected, result.Inserted, result.Updated, result.Unchanged)
+	_, _ = fmt.Fprintf(w, "%s Imported %s traffic: %d selected, %d inserted, %d updated, %d unchanged",
+		terminal.SuccessSymbol(), burpbridge.VendorNameForSource(result.Source),
+		result.Selected, result.Inserted, result.Updated, result.Unchanged)
 	if result.Skipped > 0 {
 		_, _ = fmt.Fprintf(w, ", %d skipped", result.Skipped)
 	}

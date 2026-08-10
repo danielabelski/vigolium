@@ -27,7 +27,7 @@ func TestDetect_AcceptCapNotRawCap(t *testing.T) {
 	require.NoError(t, err)
 
 	placeholder := "SECRET_" + strings.Repeat("A", 20) // low entropy → gated out
-	real := "SECRET_aB3xK9mP2qR7sT1vW5yZ"               // "SECRET_" + 20 mixed chars → high entropy
+	real := "SECRET_aB3xK9mP2qR7sT1vW5yZ"              // "SECRET_" + 20 mixed chars → high entropy
 
 	var sb strings.Builder
 	for i := 0; i < 150; i++ { // 150 > old 100-raw cap, < rawCeiling

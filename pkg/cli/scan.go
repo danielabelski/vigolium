@@ -368,12 +368,9 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 		zap.L().Info("Phases skipped", zap.Strings("skip", scanOpts.SkipPhases))
 	}
 
-	// Validate HTML output format constraints. -o is required EXCEPT under
-	// --split-by-host, where each per-host file is named by the target's hostname.
+	// HTML's -o requirement is covered by the generic formatNeedsOutput loop
+	// below; only the phase restriction is html-specific.
 	if scanOpts.HasFormat("html") {
-		if scanOpts.Output == "" && !splitByHostNaming {
-			return fmt.Errorf("--format html requires -o/--output to specify the report file path (or pass --split-by-host to name per-host files by hostname)")
-		}
 		if phases := runner.OnlyPhaseSet(scanOpts.OnlyPhase); len(phases) > 0 {
 			for p := range phases {
 				if p != "discovery" && p != "spidering" {
@@ -383,8 +380,8 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
-	for _, f := range []string{"report", "pdf", "sqlite"} {
-		if scanOpts.HasFormat(f) && scanOpts.Output == "" && !splitByHostNaming {
+	for _, f := range scanOpts.OutputFormats {
+		if formatNeedsOutput(f) && scanOpts.Output == "" && !splitByHostNaming {
 			return fmt.Errorf("--format %s requires -o/--output to specify the output file path (or pass --split-by-host to name per-host files by hostname)", f)
 		}
 	}
@@ -1230,19 +1227,44 @@ func parseFormats(raw string) []string {
 // scanOutputFormats is the canonical set of --format values the scan commands
 // and the agentic-scan -S export accept — one list, because both materialize
 // their output through the same exporter (finishStatelessExport).
-var scanOutputFormats = []string{"console", "jsonl", "html", "report", "pdf", "sqlite", "fs"}
+var scanOutputFormats = []string{"console", "jsonl", "html", "report", "pdf", "sarif", "sqlite", "fs"}
 
-// normalizeScanFormats canonicalizes the sqlite aliases (sqlite3, db) in place —
-// so the downstream switches and path helpers only ever see one spelling — and
-// rejects anything outside scanOutputFormats. Shared by reconcileOutputFormats
-// and planAgentStateless so a format accepted by `scan -S` is accepted by
+// formatAliases maps every accepted alias spelling onto its canonical format
+// name, so only canonical names reach the downstream switches and path helpers.
+//
+// One table for both `--format` flavors rather than one per command: `fs` is
+// valid on the scan commands AND on `vigolium export`, so a per-command table
+// would have to carry its aliases twice — the kind of split that leaves an
+// alias working on one command and unknown on the other. An alias that
+// canonicalizes to a format a given command does not accept still fails that
+// command's own valid-list check, and the error quotes what the user typed.
+var formatAliases = map[string]string{
+	"md":          "markdown",
+	"gz":          "bundle",
+	"sqlite3":     "sqlite",
+	"db":          "sqlite",
+	"file-system": "fs",
+}
+
+// canonicalFormat resolves one --format token to its canonical name. Matching is
+// case-insensitive, which `vigolium export` already was; the scan side used to
+// fold case only for the sqlite aliases, so `--format SQLITE` worked while
+// `--format HTML` did not.
+func canonicalFormat(token string) string {
+	lower := strings.ToLower(strings.TrimSpace(token))
+	if canonical, ok := formatAliases[lower]; ok {
+		return canonical
+	}
+	return lower
+}
+
+// normalizeScanFormats canonicalizes aliases in place and rejects anything
+// outside scanOutputFormats. Shared by reconcileOutputFormats and
+// planAgentStateless so a format accepted by `scan -S` is accepted by
 // `agent autopilot -S` too.
 func normalizeScanFormats(formats []string) error {
 	for i, f := range formats {
-		switch strings.ToLower(f) {
-		case "sqlite", "sqlite3", "db":
-			formats[i] = "sqlite"
-		}
+		formats[i] = canonicalFormat(f)
 		if !slices.Contains(scanOutputFormats, formats[i]) {
 			return fmt.Errorf("invalid --format value %q; valid formats: %s", f, strings.Join(scanOutputFormats, ", "))
 		}
@@ -1299,6 +1321,26 @@ var reportFormats = []reportFormatEntry{
 	{format: "html", label: "HTML report", generate: output.GenerateHTMLReport, streamGenerate: output.GenerateHTMLReportStreaming},
 	{format: "report", label: "Document report", generate: output.GenerateDocumentReport},
 	{format: "pdf", label: "PDF report", generate: output.GeneratePDFReport, beforeMsg: "Generating PDF report (headless Chrome)..."},
+	{format: "sarif", label: "SARIF report", generate: output.GenerateSARIFReport},
+}
+
+// formatNeedsOutput reports whether a format writes a file the command cannot
+// name on its own, so `--format X` without `-o` must be rejected rather than
+// silently producing nothing. Shared by the scan commands and `export`/`import`,
+// which previously carried two predicates whose defaults for an unrecognized
+// format were opposite.
+//
+// A deny-list on purpose: `console` writes nothing, `jsonl` streams to stdout,
+// and `fs` defaults its base to the cwd — every other format names a file.
+// Stated the other way round, as a list of file formats, a newly added format
+// defaults to "needs no -o" and silently no-ops, which is exactly how `sarif`
+// shipped able to be requested and unable to be written.
+func formatNeedsOutput(format string) bool {
+	switch canonicalFormat(format) {
+	case "console", "jsonl", "fs":
+		return false
+	}
+	return true
 }
 
 // maybeGenerateReports generates all requested file-based reports post-scan.

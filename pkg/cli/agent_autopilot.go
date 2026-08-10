@@ -120,9 +120,10 @@ parser extracted.
 Inputs (--input, auto-detected; also reads stdin when piped):
   URL · curl command · raw HTTP · Burp XML · base64 raw HTTP
 
---burp-bridge-url http://127.0.0.1:9009 pulls live Burp Proxy history into the
-project DB before the run, so the operator mines that traffic (and prior
-findings) instead of only what a fresh scan produces.
+--burp-bridge-url http://127.0.0.1:9009 (alias --caido-bridge-url) pulls live
+Burp/Caido proxy history into the project DB before the run, so the operator
+mines that traffic (and prior findings) instead of only what a fresh scan
+produces.
 
 --plan-file: one file mixing prose + raw HTTP request(s) split on "---" or
 fenced ` + "```http```" + ` blocks. First request is the live seed; rest fold into
@@ -151,7 +152,7 @@ func init() {
 	f.StringVar(&autopilotInput, "input", "", "Raw input (curl command, raw HTTP, Burp XML, URL). Reads from stdin if piped")
 	f.BoolVar(&globalDBIsolate, "db-isolate", false, dbIsolateAgentFlagUsage)
 	f.StringVar(&autopilotRecordUUID, "record-uuid", "", "Use an HTTP record from the database as the seed input (looked up by UUID)")
-	f.StringVarP(&autopilotBurpBridgeURL, "burp-bridge-url", "B", burpbridge.URLFromEnvironment(), "Pull live Burp Proxy history into the project DB before the run (e.g. http://127.0.0.1:9009), so the pre-scan and operator can mine it alongside prior traffic. Also honors $VIGOLIUM_BURP_BRIDGE_URL")
+	registerBridgeURLFlag(agentAutopilotCmd, &autopilotBurpBridgeURL, "Pull live Burp/Caido proxy history into the project DB before the run (e.g. http://127.0.0.1:9009), so the pre-scan and operator can mine it alongside prior traffic. Also honors $VIGOLIUM_BURP_BRIDGE_URL")
 	f.StringVar(&autopilotPriorContext, "prior-context", "auto", "Front-load a bounded summary of the traffic + findings already in the project DB so the operator mines them instead of starting from scratch: auto (default; the bounded table when prior data exists), summary (one-line pointer), off")
 	f.StringVar(&autopilotOliumProvider, "provider", "", oliumProviderFlagUsage)
 	f.StringVar(&autopilotOliumModel, "model", "", "Olium model id override (falls back to agent.olium.model)")
@@ -199,6 +200,7 @@ func init() {
 	f.StringVar(&autopilotKnowledgeBase, "knowledge-base", "", "Path to a file or directory describing the app. Prose docs (markdown/txt/rst/…) are LLM-distilled into a compact brief + document index front-loaded into the operator (full docs stay on disk, read on demand). HTTP-traffic exports in the same path (HAR, Burp XML, curl, OpenAPI/Swagger, Postman, URL lists, raw HTTP) are auto-detected, parsed, and ingested into the project DB as normal traffic (source=knowledge-base) with a sample folded into the brief — disable with --knowledge-base-no-traffic. Works blackbox and whitebox.")
 	f.BoolVar(&autopilotKnowledgeBaseRaw, "knowledge-base-raw", false, "Skip the LLM distillation of --knowledge-base: front-load a deterministic document index only (offline / reproducible). No-op without --knowledge-base.")
 	f.BoolVar(&autopilotKnowledgeBaseNoTraffic, "knowledge-base-no-traffic", false, "Do not parse HTTP-traffic-format files (HAR, Burp XML, curl, OpenAPI/Swagger, Postman, URL lists, raw HTTP) found in --knowledge-base into normal traffic; treat every file as prose docs instead. By default such files are parsed and ingested into the project DB (source=knowledge-base). No-op without --knowledge-base.")
+
 }
 
 func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
@@ -403,7 +405,7 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 			return fmt.Errorf("--burp-bridge-url: %w", verr)
 		}
 		projectUUID, _ := resolveProjectUUID()
-		fmt.Fprintf(os.Stderr, "%s Importing live Burp traffic from %s ...\n",
+		fmt.Fprintf(os.Stderr, "%s Importing live bridge traffic from %s ...\n",
 			terminal.InfoSymbol(), terminal.Cyan(validated))
 		res, ierr := importBurpTrafficToDB(context.Background(), repo, validated,
 			burpbridge.Query{Location: "proxy_history"}, projectUUID)

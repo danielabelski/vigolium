@@ -110,7 +110,7 @@ func TestScanPerRequest_ExtensionCatchAllNoFalsePositive(t *testing.T) {
 		// No-extension paths (incl. the 404 fingerprint) get a divergent body so
 		// the candidate clears the fingerprint and reaches the decoy check.
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte("nothing here, just a plain not-found page for "+r.URL.Path))
+		_, _ = w.Write([]byte("nothing here, just a plain not-found page for " + r.URL.Path))
 	}))
 	defer srv.Close()
 

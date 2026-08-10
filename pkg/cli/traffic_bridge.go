@@ -61,9 +61,13 @@ func queryTrafficRecords(
 	live, bridgeErr := client.Query(ctx, bridgeQuery)
 	if bridgeErr != nil {
 		// The bridge is an optional source: retain normal database behavior when
-		// Burp is closed or the extension listener is temporarily unavailable.
-		zap.L().Warn("Burp bridge traffic unavailable; showing database records only", zap.Error(bridgeErr))
+		// Burp/Caido is closed or the listener is temporarily unavailable.
+		zap.L().Warn("bridge traffic unavailable; showing database records only", zap.Error(bridgeErr))
 	}
+	// burpbridge.Eligible had to admit every bridge vendor, because which one is
+	// listening is not knowable until it replies. Now that it has, a --source
+	// naming the other vendor discards the live set.
+	live = live.FilterBySource(filters.Source)
 
 	records, total := burpbridge.MergePage(
 		local,

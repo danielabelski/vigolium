@@ -124,8 +124,8 @@ func TestScope_StaticFile_IngestMultipleFormats(t *testing.T) {
 	env := newScopeTestEnv(t, settings)
 
 	staticURLs := []struct {
-		url  string
-		ext  string
+		url string
+		ext string
 	}{
 		{"http://example.com/fonts/roboto.woff2", ".woff2"},
 		{"http://example.com/img/photo.jpg", ".jpg"},

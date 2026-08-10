@@ -96,7 +96,7 @@ var serverCmd = &cobra.Command{
 Common modes:
   • Default: full API, requires the auto-generated key from config (see config ls server.api_key)
   • --view-only: read-only — no scan, ingest, or agent endpoints
-  • --burp-bridge-url: merge live Burp Proxy history into the normal HTTP records API
+  • --burp-bridge-url (alias --caido-bridge-url): merge live Burp/Caido proxy history into the normal HTTP records API
   • --scan-on-receive: continuously scan ingested traffic as it arrives
   • --ingest-proxy-port: enable a transparent HTTP ingest proxy on a separate port
   • -A: disable auth (local development only)`,
@@ -114,12 +114,8 @@ func init() {
 	// Server group
 	flags.StringVar(&serverOpts.Host, "host", "0.0.0.0", "Bind address for the API server")
 	flags.IntVar(&serverOpts.ServicePort, "service-port", 9002, "Port for the REST API server")
-	flags.StringVarP(
-		&serverOpts.BurpBridgeURL,
-		"burp-bridge-url",
-		"B",
-		burpbridge.URLFromEnvironment(),
-		"Merge live Burp traffic from this loopback bridge URL into /api/http-records")
+	registerBridgeURLFlag(serverCmd, &serverOpts.BurpBridgeURL,
+		"Merge live proxy traffic from this loopback Burp/Caido bridge URL into /api/http-records")
 	flags.IntVar(&serverOpts.IngestProxyPort, "ingest-proxy-port", 0, "Transparent HTTP proxy port for recording traffic (0 = disabled)")
 	flags.BoolVar(&serverOpts.ProxyMITM, "proxy-mitm", false,
 		"Intercept HTTPS through --ingest-proxy-port using a generated CA so TLS traffic is recorded (and scanned with -S). Trust the CA printed at startup")
@@ -173,6 +169,7 @@ func init() {
 	// Disable Swagger
 	flags.BoolVar(&serverOpts.NoSwagger, "no-swagger", false,
 		"Disable Swagger UI and API spec endpoint")
+
 }
 
 // newServerRunnerOptions builds the types.Options used by `vigolium server`

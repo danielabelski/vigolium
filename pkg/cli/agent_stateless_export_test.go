@@ -178,8 +178,8 @@ func TestAgentStatelessWantsFiles(t *testing.T) {
 		{[]string{"fs"}, true},
 	}
 	for _, tt := range tests {
-		if got := agentStatelessWantsFiles(tt.formats); got != tt.want {
-			t.Errorf("agentStatelessWantsFiles(%v) = %v, want %v", tt.formats, got, tt.want)
+		if got := wantsFileOutput(tt.formats); got != tt.want {
+			t.Errorf("wantsFileOutput(%v) = %v, want %v", tt.formats, got, tt.want)
 		}
 	}
 }

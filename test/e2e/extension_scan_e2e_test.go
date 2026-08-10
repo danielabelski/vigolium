@@ -288,7 +288,7 @@ module.exports = {
 `)
 
 	cfg := &config.ExtensionsConfig{
-		Enabled:    true,
+		Enabled:      true,
 		ExtensionDir: scriptDir,
 		Limits: config.ScriptLimits{
 			Timeout:     "10s",

@@ -30,7 +30,8 @@ var importCmd = &cobra.Command{
 	Long: `Import scan data into the database from various sources.
 
 Supported inputs:
-  - Live Burp Proxy history through --burp-bridge-url (no path argument)
+  - Live Burp/Caido proxy history through --burp-bridge-url (alias
+    --caido-bridge-url; no path argument)
   - Audit output folder: contains audit-state.json and findings-draft/
   - JSONL file: exported data with {"type": "...", "data": {...}} envelopes
     Supports http_record and finding types (e.g. from 'vigolium export --format jsonl')
@@ -66,7 +67,7 @@ Use --format with -o/--output to write a report in the same step, e.g.
 'vigolium import ./audit --format html -o audit-report.html'. This replaces
 the import-then-export two-step: when the import created an audit the
 report is scoped to that audit's findings. Formats mirror 'vigolium export':
-html, report, pdf, markdown (alias md).
+html, report, pdf, markdown (alias md), sarif.
 
 Report customization flags (--report-title, --report-target, --report-duration,
 --report-generated-at, --report-url) and finding filters (--severity, --search)
@@ -77,16 +78,12 @@ mirror 'vigolium export', so a single import step can emit a fully-branded repor
 }
 
 func init() {
-	importCmd.Flags().StringVarP(
-		&importBurpBridgeURL,
-		"burp-bridge-url",
-		"B",
-		burpbridge.URLFromEnvironment(),
-		"Import live Burp Proxy history from this loopback bridge URL into the database")
+	registerBridgeURLFlag(importCmd, &importBurpBridgeURL,
+		"Import live Burp/Caido proxy history from this loopback bridge URL into the database")
 	importCmd.Flags().Bool("upload", false, "Upload the local import source to cloud storage after import")
 	importCmd.Flags().String("upload-key", "", "Explicit storage key for --upload (default: imports/<basename>-<ts>.<ext>)")
 	importCmd.Flags().StringVar(&globalGlobDB, "glob-db", "", "Glob of local files to import alongside any positional paths (use one format per run), e.g. --glob-db 'prefix-*.sqlite' or '*.jsonl'")
-	importCmd.Flags().String("format", "", "Also write a report after import: html, report, pdf, or markdown (md). Mirrors `vigolium export --format`.")
+	importCmd.Flags().String("format", "", "Also write a report after import: html, report, pdf, markdown (md), or sarif. Mirrors `vigolium export --format`.")
 	importCmd.Flags().StringP("output", "o", "", "Report output path or gs://<project>/<key> URL (required when --format is set; supports {ts})")
 	// Report customization + finding filters — mirror `vigolium export` so a
 	// single import step can emit a fully-branded, filtered report.
@@ -173,7 +170,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--format is not applicable to a traffic-only Burp bridge import")
 		}
 		if _, _, ok := reportGenerator(reportFormat); !ok {
-			return fmt.Errorf("--format %q is not a report format; use html, report, pdf, or markdown", reportFormat)
+			return fmt.Errorf("--format %q is not a report format; use html, report, pdf, markdown, or sarif", reportFormat)
 		}
 		if reportOutput == "" {
 			return fmt.Errorf("--format %s requires -o/--output for the report path", reportFormat)
@@ -204,7 +201,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		if !globalJSON {
 			fmt.Fprint(os.Stderr, GetBanner())
 			fmt.Fprintf(os.Stderr, "%s %s\n", terminal.InfoSymbol(),
-				terminal.BoldCyan(fmt.Sprintf("Importing live Burp traffic from %s ...", bridgeURL)))
+				terminal.BoldCyan(fmt.Sprintf("Importing live bridge traffic from %s ...", bridgeURL)))
 		}
 		result, err := importBurpTrafficToDB(ctx, repo, bridgeURL, burpbridge.Query{
 			Location: "proxy_history",

@@ -40,7 +40,9 @@ var validExportTypes = []string{"http", "findings", "scans", "modules", "oast", 
 var exportCmd = &cobra.Command{
 	Use:   "export",
 	Short: "Export database tables and module registry",
-	Long: `Export the contents of one or more database tables (HTTP records, findings, scans, modules, OAST interactions, source repos, scopes) into JSONL, HTML, Markdown, PDF, or a bundle archive.
+	Long: `Export the contents of one or more database tables (HTTP records, findings, scans, modules, OAST interactions, source repos, scopes) into JSONL, HTML, Markdown, PDF, SARIF, or a bundle archive.
+
+--format sarif writes a SARIF 2.1.0 log of the findings, for ingestion by GitHub code scanning, DefectDojo, the VS Code SARIF Viewer and other aggregators. Code findings anchor to their source file (with line number) so they can be annotated onto a diff; HTTP findings anchor to their URL and carry the proof exchange in the standard webRequest/webResponse fields.
 
 Use --only to choose which tables to include, --omit-response to drop raw HTTP request/response bytes (keeps metadata, smaller files), and --search to fuzzy-filter rows before export. HTML and bundle output require -o/--output.
 
@@ -52,7 +54,7 @@ The --format bundle (alias gz) emits a .tar.gz archive containing export.jsonl, 
 
 func init() {
 	rootCmd.AddCommand(exportCmd)
-	exportCmd.Flags().StringVar(&topExportFormat, "format", "jsonl", "Export format(s), comma-separated: html, report, pdf, jsonl, markdown (alias: md), bundle (alias: gz), fs (flat request/response + finding tree)")
+	exportCmd.Flags().StringVar(&topExportFormat, "format", "jsonl", "Export format(s), comma-separated: html, report, pdf, jsonl, markdown (alias: md), sarif (SARIF 2.1.0 for GitHub code scanning / DefectDojo / SARIF viewers), bundle (alias: gz), fs (alias: file-system; flat request/response + finding tree)")
 	exportCmd.Flags().StringVarP(&topExportOutput, "output", "o", "", "Output file path or gs://<project>/<key> URL (required for html; base path when multiple formats are given); supports {ts} and {project-uuid} placeholders")
 	exportCmd.Flags().StringSliceVar(&topExportOnly, "only", nil,
 		"Export only these tables (repeatable: http, findings, scans, modules, oast, source-repos, scopes)")
@@ -117,14 +119,7 @@ func scopeProjectBun(q *bun.SelectQuery, projectUUID string) *bun.SelectQuery {
 
 // validExportFormats lists the canonical --format values `vigolium export`
 // accepts. Aliases are normalized onto these by parseExportFormats.
-var validExportFormats = []string{"html", "report", "pdf", "jsonl", "markdown", "bundle", "fs"}
-
-// exportFormatAliases maps accepted alias spellings onto their canonical format,
-// so only canonical names reach the dispatcher.
-var exportFormatAliases = map[string]string{
-	"md": "markdown",
-	"gz": "bundle",
-}
+var validExportFormats = []string{"html", "report", "pdf", "jsonl", "markdown", "sarif", "bundle", "fs"}
 
 // exportFormatSpec is one requested format after alias normalization: the
 // canonical name, the token the user actually typed (so errors quote their
@@ -148,10 +143,7 @@ func parseExportFormats(raw string) ([]exportFormatSpec, error) {
 		if token == "" {
 			continue
 		}
-		canonical := strings.ToLower(token)
-		if alias, ok := exportFormatAliases[canonical]; ok {
-			canonical = alias
-		}
+		canonical := canonicalFormat(token)
 		if !slices.Contains(validExportFormats, canonical) {
 			return nil, fmt.Errorf("unsupported format %q; valid formats: %s", token, strings.Join(validExportFormats, ", "))
 		}
@@ -191,21 +183,10 @@ func assignExportPaths(specs []exportFormatSpec, base string) {
 	}
 }
 
-// exportFormatNeedsOutput reports whether a format cannot run without -o. jsonl
-// streams to stdout when unset and fs defaults its base to the cwd; every other
-// format writes a file this command cannot name on its own.
-func exportFormatNeedsOutput(format string) bool {
-	switch format {
-	case "jsonl", "fs":
-		return false
-	}
-	return true
-}
-
 // validateExportFormatPath enforces the per-format output requirements against
 // the path the format actually resolved to.
 func validateExportFormatPath(s exportFormatSpec) error {
-	if exportFormatNeedsOutput(s.format) && s.path == "" {
+	if formatNeedsOutput(s.format) && s.path == "" {
 		return fmt.Errorf("--format %s requires -o/--output to specify the report file path", s.raw)
 	}
 	if s.format == "bundle" && !strings.HasSuffix(s.path, ".tar.gz") && !strings.HasSuffix(s.path, ".tgz") {
@@ -483,15 +464,22 @@ func (r *exportRun) exportReport(ctx context.Context, format, outputPath string)
 // `vigolium import --format <fmt> -o <file>` post-import shortcut, so both
 // commands stay in lockstep when a format is added or renamed.
 func reportGenerator(format string) (gen func([]any, string, output.HTMLReportMeta) error, defaultTitle string, ok bool) {
-	switch format {
+	// Resolve through the shared alias table rather than matching the raw token:
+	// `vigolium import --format` calls this directly with what the user typed, so
+	// a case-folded spelling or an alias must mean the same thing here as it does
+	// on `export`. Idempotent for exportRun, which passes an already-canonical
+	// format.
+	switch canonicalFormat(format) {
 	case "html":
 		return output.GenerateHTMLReport, "Vigolium Static Report", true
 	case "report":
 		return output.GenerateDocumentReport, "Vigolium Scan Report", true
 	case "pdf":
 		return output.GeneratePDFReport, "Vigolium Scan Report", true
-	case "markdown", "md":
+	case "markdown":
 		return output.GenerateMarkdownReport, "Vigolium Scan Report", true
+	case "sarif":
+		return output.GenerateSARIFReport, "Vigolium Scan Report", true
 	}
 	return nil, "", false
 }

@@ -52,16 +52,27 @@ include live Burp Proxy history in the ordinary HTTP-records API:
 vigolium server --burp-bridge-url http://127.0.0.1:9009
 ```
 
-`GET /api/http-records` then returns one globally sorted and paginated result
-containing both persisted database records and current Burp traffic. Live rows
-have `"source": "burp"` and temporary UUIDs beginning with `burp:`; the normal
-detail route, `GET /api/http-records/:uuid`, also resolves those live UUIDs.
-Existing filters such as `domain`, `method`, `path`, `status_code`, `search`,
-sorting, and `source=burp` apply without a separate bridge API workflow.
+`--caido-bridge-url` is an alias for the same flag: the Burp extension and the
+Caido plugin expose one protocol on one loopback port, so which one is listening
+is discovered from the reply rather than declared on the command line.
 
-The bridge is optional. If Burp is closed or its listener is unavailable, the
-server continues returning database records and sets
-`X-Vigolium-Burp-Bridge: unavailable` on the response. The URL must be an
+`GET /api/http-records` then returns one globally sorted and paginated result
+containing both persisted database records and current proxy traffic. Live rows
+have `"source": "burp"` or `"source": "caido"` — taken from the `implementation`
+the listener reports on every reply — and temporary UUIDs beginning with `burp:`
+regardless of vendor, since that prefix is a routing token rather than a
+provenance label. The normal detail route, `GET /api/http-records/:uuid`, also
+resolves those live UUIDs. Existing filters such as `domain`, `method`, `path`,
+`status_code`, `search`, sorting, and `source=caido` apply without a separate
+bridge API workflow.
+
+A listener too old to report an implementation is read as Burp, which is what
+every bridge record was labelled as before vendor detection existed.
+
+The bridge is optional. If the proxy is closed or its listener is unavailable,
+the server continues returning database records and sets
+`X-Vigolium-Burp-Bridge: unavailable` on the response; on a successful merge it
+sets `X-Vigolium-Bridge-Source` to the vendor that answered. The URL must be an
 HTTP loopback address with an explicit port. It can also be supplied through
 `VIGOLIUM_BURP_BRIDGE_URL`.
 
@@ -79,7 +90,8 @@ vigolium traffic --burp-bridge-url http://127.0.0.1:9009 \
 
 Imports are idempotent: new requests are inserted, changed responses refresh
 their existing record, and unchanged requests are left alone. Persisted rows
-retain `source=burp` and remain available after Burp or the bridge stops.
+retain the vendor they came from (`source=burp` or `source=caido`) and remain
+available after the proxy or the bridge stops.
 
 The bridge also supports the reverse direction into Burp's Target Site map:
 
