@@ -304,7 +304,7 @@ func (h *Handlers) HandleScanURL(c fiber.Ctx) error {
 	}
 
 	if !h.tryStartNativeScan(func() {
-		h.runBackgroundURLScan(scanID, req.URL, rr, moduleIDs, req.NoPassive)
+		h.runBackgroundURLScan(scanID, projectUUID, req.URL, rr, moduleIDs, req.NoPassive)
 	}) {
 		if h.repo != nil {
 			_ = h.repo.CompleteScan(context.Background(), scanID, "rejected: too many concurrent scans")
@@ -415,7 +415,7 @@ func (h *Handlers) HandleScanRequest(c fiber.Ctx) error {
 	}
 
 	if !h.tryStartNativeScan(func() {
-		h.runBackgroundURLScan(scanID, target, rr, moduleIDs, req.NoPassive)
+		h.runBackgroundURLScan(scanID, projectUUID, target, rr, moduleIDs, req.NoPassive)
 	}) {
 		if h.repo != nil {
 			_ = h.repo.CompleteScan(context.Background(), scanID, "rejected: too many concurrent scans")
@@ -513,7 +513,7 @@ func (h *Handlers) nativeScanContext() (context.Context, context.CancelFunc) {
 	return context.WithCancel(parent)
 }
 
-func (h *Handlers) runBackgroundURLScan(scanID, target string, rr *httpmsg.HttpRequestResponse, moduleIDs []string, noPassive bool) {
+func (h *Handlers) runBackgroundURLScan(scanID, projectUUID, target string, rr *httpmsg.HttpRequestResponse, moduleIDs []string, noPassive bool) {
 	// Any panic escaping this goroutine (nil deref in a module, panic inside
 	// a goroutine spawned by a module, etc.) would otherwise take the entire
 	// server process down. Recover here, log the stack, and mark the scan as
@@ -597,6 +597,7 @@ func (h *Handlers) runBackgroundURLScan(scanID, target string, rr *httpmsg.HttpR
 		HTTPRequester:        scanRequester,
 		Repository:           h.repo,
 		ScanUUID:             scanID,
+		ProjectUUID:          projectUUID,
 		MaxFindingsPerModule: 10,
 		// Hard upper bound: a module that hangs forever must not be able to
 		// keep this goroutine alive indefinitely. The executor cancels its

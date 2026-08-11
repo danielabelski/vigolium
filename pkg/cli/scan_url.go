@@ -502,6 +502,7 @@ func runScanWithRR(rr *httpmsg.HttpRequestResponse, target, method string) error
 
 	// Optional database
 	var repo *database.Repository
+	var scanProjectUUID string
 	db, dbErr := getDB()
 	if dbErr == nil {
 		ctx := context.Background()
@@ -509,6 +510,16 @@ func runScanWithRR(rr *httpmsg.HttpRequestResponse, target, method string) error
 			zap.L().Warn("Failed to create schema", zap.Error(schemaErr))
 		}
 		repo = database.NewRepository(db)
+		// Resolve the active project so the executor stamps its records and
+		// findings with it. Without this they fall through to the default
+		// project and become invisible to every project-scoped read. A failure
+		// here is fatal rather than a warning: continuing would file the whole
+		// scan into the default project — the exact silent misfiling this
+		// resolution exists to prevent — and `scan`/`ingest` both return it too.
+		var perr error
+		if scanProjectUUID, perr = resolveProjectUUID(); perr != nil {
+			return perr
+		}
 		defer closeDatabaseOnExit()
 	}
 
@@ -539,6 +550,7 @@ func runScanWithRR(rr *httpmsg.HttpRequestResponse, target, method string) error
 		HTTPRequester:        httpRequester,
 		Repository:           repo,
 		ScanUUID:             globalScanUUID,
+		ProjectUUID:          scanProjectUUID,
 		MaxFindingsPerModule: globalMaxFindingsPerModule,
 		TechFilterDisabled:   globalNoTechFilter,
 		OnResult: func(result *output.ResultEvent) {

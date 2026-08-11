@@ -1239,6 +1239,7 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 		RecordWriter:  recordWriter,
 		FindingWriter: findingWriter,
 		ScanUUID:      infra.scanUUID,
+		ProjectUUID:   r.options.ProjectUUID,
 		ScopeMatcher:  infra.scopeMatcher,
 		// Subdomain feed-back is wired only here, on the dynamic-assessment phase —
 		// the only phase that runs the full passive set with live feed-back. The
@@ -1815,6 +1816,7 @@ func (r *Runner) runExternalHarvestPhase(ctx context.Context, infra *phaseInfra)
 		HTTPRequester: infra.httpRequester,
 		Repository:    r.repository,
 		ScanUUID:      infra.scanUUID,
+		ProjectUUID:   r.options.ProjectUUID,
 		ScopeMatcher:  infra.scopeMatcher,
 		PauseCtrl:     r.pauseCtrl,
 		OnTraffic:     r.makeOnTraffic("harvest"),

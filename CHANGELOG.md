@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.4.0] - 2026-08-11
+
+A **multi-tenancy fix** release: scans, ingestion, and the project subcommands now honor the active project end-to-end, so non-default projects stop silently losing their findings and records. No module changes (registry stays at 207 active + 116 passive).
+
+### Fixed
+
+- Findings and records from `scan`/`scan-url`/`scan-request`/`ingest`/`server` landed in the default project on any non-default project — `ExecutorConfig.ProjectUUID` was consumed but never set by any caller.
+- Every executor caller now resolves and passes the active project (CLI scan/ingest paths, server URL/request/records handlers, and the discovery/harvest/dynamic-assessment runner phases).
+- A failed project resolution on `scan-url`/`scan-request` is now fatal, not a warning — continuing would silently misfile the whole scan into the default project.
+- `project create` (and `list`/`use`/`delete`) failed with "no such table: projects" on a fresh `--db` file — the subcommands never created the schema before touching it.
+- `project` subcommands now bootstrap schema and seed defaults via `openProjectRepo`, so a brand-new database is usable without cloning a populated one.
+
+### Added
+
+- `TestExecutorConfigAlwaysSetsProjectUUID` and a project-scoping E2E test guard the wiring against regression.
+
 ## [v0.3.12] - 2026-08-10
 
 A **SARIF output** release: emit SARIF 2.1.0 so runs feed GitHub code scanning, DefectDojo, and the VS Code SARIF Viewer. Also teaches the bridge to say which proxy it is, so Caido traffic stops showing up labelled `burp`. No module changes (registry stays at 207 active + 116 passive).

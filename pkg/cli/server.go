@@ -658,6 +658,10 @@ func runServerCmd(cmd *cobra.Command, args []string) error {
 
 		// Reuse the server scan UUID so the runner tracks cursor on the same record
 		runnerOpts.ScanUUID = serverScan.UUID
+		// ...and the same project. This matches the row above by value today,
+		// but stating it keeps the two from drifting apart silently: the feed
+		// reads the row's project while the executor writes this one.
+		runnerOpts.ProjectUUID = serverScan.ProjectUUID
 
 		// Both modes create their own DB sources internally:
 		// DA-only creates a continuous poller; full-pipeline creates one-shot

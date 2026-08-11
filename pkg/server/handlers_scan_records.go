@@ -88,6 +88,10 @@ func (h *Handlers) HandleScanRecords(c fiber.Ctx) error {
 
 	// Build runner options
 	opts := types.DefaultOptions()
+	// Must match the Scan row created above: the record feed resolves its
+	// project from that row, so an unset value here has the executor writing
+	// findings to the default project while the feed reads this one.
+	opts.ProjectUUID = projectUUID
 	concurrency := h.config.Concurrency
 	if concurrency <= 0 {
 		concurrency = 50

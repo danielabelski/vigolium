@@ -363,15 +363,20 @@ func runLocalIngest(cmd *cobra.Command, _ []string) error {
 	// Always create a matcher for static file filtering (unconditional)
 	staticMatcher := config.NewScopeMatcher(settings.Scope, globalTargets...)
 
+	// Every record this function writes — the direct-save paths below and the
+	// executor further down — belongs to the same project, so resolve it once.
+	// Without it records fall through to the default project and become
+	// invisible to every project-scoped read (scan feed, findings, exports).
+	ingestProjectUUID, projErr := resolveProjectUUID()
+	if projErr != nil {
+		return projErr
+	}
+
 	// Auto-skip refetch: items that already carry a response (Burp pair, etc.)
 	// are written straight to the database so the user-supplied response is
 	// preserved verbatim.
 	directSaved := 0
 	if len(preloadedWithResp) > 0 {
-		ingestProjectUUID, projErr := resolveProjectUUID()
-		if projErr != nil {
-			return projErr
-		}
 		var ingestScopeMatcher *config.ScopeMatcher
 		if settings.Scope.AppliedOnIngest {
 			ingestScopeMatcher = config.NewScopeMatcher(settings.Scope, globalTargets...)
@@ -444,11 +449,6 @@ func runLocalIngest(cmd *cobra.Command, _ []string) error {
 			scopeMatcher = config.NewScopeMatcher(settings.Scope, globalTargets...)
 		}
 
-		ingestProjectUUID, projErr := resolveProjectUUID()
-		if projErr != nil {
-			return projErr
-		}
-
 		var count int
 		for {
 			item, nextErr := inputSource.Next(ctx)
@@ -513,6 +513,7 @@ func runLocalIngest(cmd *cobra.Command, _ []string) error {
 		HTTPRequester:     httpRequester,
 		Repository:        repo,
 		ScanUUID:          ingestScanUUID,
+		ProjectUUID:       ingestProjectUUID,
 		StaticFileMatcher: staticMatcher, // always filter static files
 	}
 
@@ -792,6 +793,12 @@ func runLocalIngestScan(settings *config.Settings, db *database.DB, repo *databa
 	if err != nil {
 		return err
 	}
+	// The runner must scan under the same project the Scan row below is created
+	// with: the record feed resolves its project from that row, so leaving this
+	// empty makes the executor write findings to the default project while the
+	// feed reads this one — the scan then streams findings that its own project
+	// can never see.
+	opts.ProjectUUID = ingestScanProjectUUID
 	if scanUUID == "" {
 		scan := &database.Scan{
 			UUID:        fmt.Sprintf("scan-%d", time.Now().UnixNano()),

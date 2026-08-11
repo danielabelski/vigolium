@@ -26,6 +26,36 @@ func resolveProjectUUID() (string, error) {
 	return clicommon.ResolveProjectUUID(getDB, globalProjectUUID, globalProjectName)
 }
 
+// openProjectRepo opens the database, ensures the schema exists and seeds the
+// default rows, returning a repository over it.
+//
+// database.NewDB only opens the connection — it does not create tables. The
+// project subcommands are routinely the FIRST command to touch a brand-new
+// --db file (creating a project is step one of a clean install or a DB reset),
+// so unlike most read paths they cannot assume some earlier command already
+// bootstrapped it. Without this, `project create --db <new file>` failed with
+// "no such table: projects" and a fresh install could only be worked around by
+// cloning an already-populated database.
+//
+// CreateSchema and SeedDefaults are paired here for the same reason every other
+// first-touch site pairs them (cmd_import.go, cmd_init.go, init.go): schema
+// alone leaves no default user and no default project row, so the new project's
+// OwnerUUID would dangle and resolveProjectUUID's default fallback would point
+// at a project that does not exist.
+func openProjectRepo(ctx context.Context) (*database.Repository, error) {
+	db, err := getDB()
+	if err != nil {
+		return nil, err
+	}
+	if err := db.CreateSchema(ctx); err != nil {
+		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
+	}
+	if err := db.SeedDefaults(ctx); err != nil {
+		return nil, fmt.Errorf("failed to seed default data: %w", err)
+	}
+	return database.NewRepository(db), nil
+}
+
 // checkProjectReadonly returns an error if VIGOLIUM_PROJECT_READONLY is set,
 // preventing mutating project operations from the CLI.
 func checkProjectReadonly() error {
@@ -53,12 +83,11 @@ var projectCreateCmd = &cobra.Command{
 		defer syncLogger()
 		defer closeDatabaseOnExit()
 
-		db, err := getDB()
+		ctx := context.Background()
+		repo, err := openProjectRepo(ctx)
 		if err != nil {
 			return err
 		}
-		repo := database.NewRepository(db)
-		ctx := context.Background()
 
 		projectUUID := uuid.New().String()
 		// Honor --project-uuid only when explicitly set on the command line, so
@@ -113,12 +142,11 @@ var projectListCmd = &cobra.Command{
 		defer syncLogger()
 		defer closeDatabaseOnExit()
 
-		db, err := getDB()
+		ctx := context.Background()
+		repo, err := openProjectRepo(ctx)
 		if err != nil {
 			return err
 		}
-		repo := database.NewRepository(db)
-		ctx := context.Background()
 
 		projects, err := repo.ListProjects(ctx, "")
 		if err != nil {
@@ -202,12 +230,11 @@ var projectUseCmd = &cobra.Command{
 
 		projectUUID := args[0]
 
-		db, err := getDB()
+		ctx := context.Background()
+		repo, err := openProjectRepo(ctx)
 		if err != nil {
 			return err
 		}
-		repo := database.NewRepository(db)
-		ctx := context.Background()
 
 		project, err := repo.GetProjectByUUID(ctx, projectUUID)
 		if err != nil {
@@ -291,12 +318,11 @@ var projectDeleteCmd = &cobra.Command{
 			return fmt.Errorf("cannot delete the default project (%s)", database.DefaultProjectUUID)
 		}
 
-		db, err := getDB()
+		ctx := context.Background()
+		repo, err := openProjectRepo(ctx)
 		if err != nil {
 			return err
 		}
-		repo := database.NewRepository(db)
-		ctx := context.Background()
 
 		project, err := repo.GetProjectByUUID(ctx, projectUUID)
 		if err != nil {
