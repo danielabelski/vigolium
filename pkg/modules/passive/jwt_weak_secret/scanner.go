@@ -3,13 +3,10 @@ package jwt_weak_secret
 import (
 	"bufio"
 	"bytes"
-	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"hash"
 	"regexp"
 	"strings"
 	"sync"
@@ -235,72 +232,14 @@ func (m *Module) loadSecrets() ([][]byte, error) {
 }
 
 // tryBruteForce attempts to find a weak HMAC secret for the given JWT.
-// Returns the matched secret and algorithm, or empty strings if no match.
+// Returns the matched secret and algorithm, or empty strings if no match. The
+// crack loop itself lives in jwtutil.CrackHMAC, shared with `kit jwt-crack`.
 func tryBruteForce(token string, secrets [][]byte) (string, string) {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) != 3 {
+	secret, alg, ok := jwtutil.CrackHMAC(token, secrets)
+	if !ok {
 		return "", ""
 	}
-
-	// Decode header to get algorithm
-	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return "", ""
-	}
-
-	var hdr jwtHeader
-	if err := json.Unmarshal(headerJSON, &hdr); err != nil {
-		return "", ""
-	}
-
-	// Build list of (hash function, label) pairs to try
-	type hashVariant struct {
-		newHash func() hash.Hash
-		label   string
-	}
-	var variants []hashVariant
-
-	switch hdr.Alg {
-	case "HS256":
-		variants = []hashVariant{{sha256.New, "HS256"}}
-	case "HS384":
-		variants = []hashVariant{{sha512.New384, "HS384"}}
-	case "HS512":
-		variants = []hashVariant{{sha512.New, "HS512"}}
-	case "RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512":
-		// Algorithm confusion: try all HMAC variants on asymmetric tokens (CVE-2015-9235).
-		// Some servers may accept any HMAC variant, not just HS256.
-		variants = []hashVariant{
-			{sha256.New, fmt.Sprintf("%s (alg-confusion: tested as HS256)", hdr.Alg)},
-			{sha512.New384, fmt.Sprintf("%s (alg-confusion: tested as HS384)", hdr.Alg)},
-			{sha512.New, fmt.Sprintf("%s (alg-confusion: tested as HS512)", hdr.Alg)},
-		}
-	default:
-		return "", ""
-	}
-
-	// Decode the existing signature
-	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return "", ""
-	}
-
-	// The signing input is "header.payload"
-	signingInput := []byte(parts[0] + "." + parts[1])
-
-	// Try each variant and secret combination
-	for _, v := range variants {
-		for _, secret := range secrets {
-			mac := hmac.New(v.newHash, secret)
-			mac.Write(signingInput)
-			expected := mac.Sum(nil)
-			if hmac.Equal(expected, signature) {
-				return string(secret), v.label
-			}
-		}
-	}
-
-	return "", ""
+	return secret, alg
 }
 
 // getJWTAlgorithm extracts the "alg" field from a JWT header.

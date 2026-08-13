@@ -522,27 +522,10 @@ func (r *Runner) buildExternalHarvesterSource() *source.ExternalHarvesterInputSo
 
 	proxyURL := r.options.ProxyURL
 
-	var sources []harvester.Source
-	for _, name := range cfg.Sources {
-		switch name {
-		case "wayback":
-			sources = append(sources, harvester.NewWaybackSource(proxyURL))
-		case "commoncrawl":
-			sources = append(sources, harvester.NewCommonCrawlSource(proxyURL))
-		case "arquivo":
-			sources = append(sources, harvester.NewArquivoSource(proxyURL))
-		case "alienvault":
-			sources = append(sources, harvester.NewAlienVaultSource(proxyURL))
-		case "urlscan":
-			if cfg.APIKeys.URLScan != "" {
-				sources = append(sources, harvester.NewURLScanSource(cfg.APIKeys.URLScan, proxyURL))
-			}
-		case "virustotal":
-			if cfg.APIKeys.VirusTotal != "" {
-				sources = append(sources, harvester.NewVirusTotalSource(cfg.APIKeys.VirusTotal, proxyURL))
-			}
-		}
-	}
+	sources := harvester.BuildSources(cfg.Sources, harvester.SourceKeys{
+		URLScan:    cfg.APIKeys.URLScan,
+		VirusTotal: cfg.APIKeys.VirusTotal,
+	}, proxyURL)
 
 	if len(sources) == 0 {
 		zap.L().Warn("ExternalHarvester enabled but no sources configured")

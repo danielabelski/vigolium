@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.4.1] - 2026-08-12
+
+A **standalone utilities** release: a new `vigolium kit` command exposes the scanner's internal primitives as one-shot tools for coding agents and shell pipelines. No module changes (registry stays at 207 active + 116 passive).
+
+### Added
+
+- **`vigolium kit`** — standalone security utilities that reuse the scanner's own engines, usable outside a full scan.
+- `kit secret-scan` — scan files, dirs, or stdin for leaked credentials via the built-in secret catalog.
+- `kit js-beautify` — unminify and unpack a JavaScript bundle (file/url/stdin) into readable source.
+- `kit oast new`/`poll` — mint OOB/OAST callback URLs and drain their received interactions.
+- `kit harvest` — collect known URLs for a domain from public archives and indexes.
+- `kit jwt-crack` — recover a JWT's HMAC signing secret from a wordlist.
+- `kit wordlist` — list the built-in wordlists or print one to stdout.
+- `kit payload` — emit built-in payload sets by vulnerability class.
+
+### Changed
+
+- Extracted `jwtutil.CrackHMAC` from the `jwt_weak_secret` module so the passive scanner and `kit jwt-crack` share one crack loop.
+- Extracted `harvester.BuildSources` so `kit harvest` and the `external-harvest` runner phase share one source set.
+
 ## [v0.4.0] - 2026-08-11
 
 A **multi-tenancy fix** release: scans, ingestion, and the project subcommands now honor the active project end-to-end, so non-default projects stop silently losing their findings and records. No module changes (registry stays at 207 active + 116 passive).
