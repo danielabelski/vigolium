@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -305,7 +306,10 @@ func (h *Handlers) HandleAgenticScanList(c fiber.Ctx) error {
 	// Try DB first for comprehensive history
 	if h.repo != nil {
 		mode := c.Query("mode")
-		runs, _, err := h.repo.ListAgenticScans(context.Background(), projectUUID, mode, 100, 0)
+		// Summaries, not full rows: agenticScanToStatusResponse reads counters,
+		// phases and timestamps only, so the blob columns would be transferred
+		// and deserialized purely to be discarded — 100 of them per poll.
+		runs, _, err := h.repo.ListAgenticScanSummaries(context.Background(), projectUUID, mode, 100, 0)
 		if err == nil && len(runs) > 0 {
 			statuses := make([]*AgenticScanStatusResponse, 0, len(runs))
 			for _, run := range runs {
@@ -479,7 +483,10 @@ func (h *Handlers) HandleAgentSessionList(c fiber.Ctx) error {
 		limit = 500
 	}
 
-	runs, total, err := h.repo.ListAgenticScans(c.Context(), projectUUID, mode, limit, offset)
+	// Summaries, not full rows: AgentSessionSummary carries no blob field (the
+	// blobs live on AgentSessionDetail, served by /sessions/:id), so a full-row
+	// read here transfers up to 500 runs' prompts and results to build a list.
+	runs, total, err := h.repo.ListAgenticScanSummaries(c.Context(), projectUUID, mode, limit, offset)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 			Error: "failed to list agent sessions: " + err.Error(),
@@ -550,6 +557,17 @@ var reANSIEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 // stripANSI returns s with ANSI color/style escape sequences removed.
 func stripANSI(s string) string {
 	return reANSIEscape.ReplaceAllString(s, "")
+}
+
+// stripANSIBytes is stripANSI without the round trip through string and back,
+// which on a multi-megabyte log tail is two full copies spent only to satisfy a
+// signature. The Match guard skips the replace allocation entirely for the
+// common case of a log with no escapes in it.
+func stripANSIBytes(b []byte) []byte {
+	if !reANSIEscape.Match(b) {
+		return b
+	}
+	return reANSIEscape.ReplaceAll(b, nil)
 }
 
 // openSessionRuntimeLog opens runtime.log in the given session dir for
@@ -632,17 +650,7 @@ func (h *Handlers) HandleAgentSessionLogs(c fiber.Ctx) error {
 		return h.streamAgentSessionLog(c, agenticScanUUID, logPath, strip)
 	}
 
-	data, readErr := os.ReadFile(logPath)
-	if readErr != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
-			Error: "failed to read runtime.log: " + readErr.Error(),
-		})
-	}
-	if strip {
-		data = []byte(stripANSI(string(data)))
-	}
-	c.Set("Content-Type", "text/plain; charset=utf-8")
-	return c.Send(data)
+	return sendLogTail(c, logPath, strip)
 }
 
 // maxArtifactListEntries caps the number of files reported by
@@ -757,15 +765,7 @@ func (h *Handlers) HandleAgentSessionArtifact(c fiber.Ctx) error {
 		})
 	}
 
-	maxBytes := int64(maxArtifactReadBytes)
-	if v := c.Query("max_bytes"); v != "" {
-		if parsed, parseErr := strconv.ParseInt(v, 10, 64); parseErr == nil && parsed > 0 {
-			if parsed > maxArtifactReadBytesHardCap {
-				parsed = maxArtifactReadBytesHardCap
-			}
-			maxBytes = parsed
-		}
-	}
+	maxBytes := queryByteLimit(c, maxArtifactReadBytes, maxArtifactReadBytesHardCap)
 
 	sendSize := info.Size()
 	truncated := false
@@ -969,12 +969,15 @@ func (h *Handlers) streamAgentSessionLog(c fiber.Ctx, agenticScanUUID, logPath s
 	// Disable proxy buffering so chunks reach the client promptly.
 	c.Set("X-Accel-Buffering", "no")
 
+	// Status column only. tailSessionLog calls this every 500 ms for as long as
+	// the client watches, and the full row it used to read carries the run's
+	// prompt, raw output and result JSON.
 	isDone := func() bool {
-		run, err := h.repo.GetAgenticScan(context.Background(), agenticScanUUID)
-		if err != nil || run == nil {
+		status, err := h.repo.AgenticScanStatusByUUID(context.Background(), agenticScanUUID)
+		if err != nil {
 			return true
 		}
-		return isTerminalAgentStatus(run.Status)
+		return isTerminalAgentStatus(status)
 	}
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
@@ -983,13 +986,11 @@ func (h *Handlers) streamAgentSessionLog(c fiber.Ctx, agenticScanUUID, logPath s
 }
 
 // isTerminalAgentStatus reports whether an agentic_scans.status value indicates
-// the run has finished and no more bytes will be appended to run.log.
+// the run has finished and no more bytes will be appended to run.log. It reads
+// database.TerminalAgenticScanStatuses so the log follower and the retention
+// sweep can never disagree about what "finished" means — see that variable.
 func isTerminalAgentStatus(status string) bool {
-	switch status {
-	case "completed", "failed", "cancelled", "timeout", "error":
-		return true
-	}
-	return false
+	return slices.Contains(database.TerminalAgenticScanStatuses, status)
 }
 
 // terminalStatusForRunErr maps a streaming run's terminal error to its status

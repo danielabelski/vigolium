@@ -1,8 +1,8 @@
 package server
 
 import (
+	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
 	"strings"
 	"time"
@@ -106,6 +106,23 @@ func (h *Handlers) HandleStorageDownloadSource(c fiber.Ctx) error {
 		})
 	}
 
+	// Stat before committing headers: it resolves existence (so a miss is still a
+	// clean JSON 404 rather than a truncated stream) and yields the size we need
+	// for Content-Length, in the same round trip Exists would have cost.
+	info, err := sc.Stat(c.Context(), projectUUID, fullKey)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
+				Error: "file not found in storage",
+				Code:  fiber.StatusNotFound,
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
+			Error: "failed to check storage: " + err.Error(),
+			Code:  fiber.StatusInternalServerError,
+		})
+	}
+
 	reader, err := sc.Download(c.Context(), projectUUID, fullKey)
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{
@@ -113,12 +130,32 @@ func (h *Handlers) HandleStorageDownloadSource(c fiber.Ctx) error {
 			Code:  fiber.StatusNotFound,
 		})
 	}
-	defer func() { _ = reader.Close() }()
 
 	c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", key))
 	c.Set("Content-Type", "application/octet-stream")
-	_, err = io.Copy(c.Response().BodyWriter(), reader)
-	return err
+	return c.SendStream(reader, objectStreamSize(info.Size))
+}
+
+// objectStreamSize narrows a bucket object's size to the int c.SendStream
+// takes, falling back to -1 (chunked) rather than a wrong Content-Length when
+// the value doesn't survive the conversion.
+//
+// The point of streaming here at all: the obvious spelling — io.Copy into
+// c.Response().BodyWriter() — is not a stream. BodyWriter appends into the
+// response's in-memory body buffer, so the whole object is retained before a
+// single byte is transmitted and RSS scales with object size times
+// concurrency. SendStream copies during response write instead, so a slow
+// client backpressures the bucket read rather than the server racing ahead
+// into memory. Two consequences: fasthttp closes the reader (it is an
+// io.Closer) on every completion path, so callers must not also defer a Close;
+// and headers are committed before the body is read, so an upstream failure
+// partway through is a short read on an otherwise-200 response, not a JSON
+// error.
+func objectStreamSize(size int64) int {
+	if size >= 0 && int64(int(size)) == size {
+		return int(size)
+	}
+	return -1
 }
 
 // HandleStorageDownloadResults handles GET /api/storage/results/:scan_uuid.
@@ -159,19 +196,19 @@ func (h *Handlers) HandleStorageDownloadResults(c fiber.Ctx) error {
 		storage.AgenticScanResultKey(scanUUID),
 	}
 
-	// Probe for existence first — minio's GetObject is lazy, so a non-existent
-	// key only surfaces an error inside io.Copy, by which point we've already
-	// committed to that key and can't fall back to the next one.
+	// Stat for existence first — minio's GetObject is lazy, so a non-existent
+	// key only surfaces an error once the body is read, by which point we've
+	// already committed to that key and can't fall back to the next one.
 	for _, key := range keys {
-		exists, err := sc.Exists(c.Context(), projectUUID, key)
+		info, err := sc.Stat(c.Context(), projectUUID, key)
 		if err != nil {
+			if errors.Is(err, storage.ErrObjectNotFound) {
+				continue
+			}
 			return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
 				Error: "failed to check storage: " + err.Error(),
 				Code:  fiber.StatusInternalServerError,
 			})
-		}
-		if !exists {
-			continue
 		}
 
 		reader, err := sc.Download(c.Context(), projectUUID, key)
@@ -181,12 +218,10 @@ func (h *Handlers) HandleStorageDownloadResults(c fiber.Ctx) error {
 				Code:  fiber.StatusInternalServerError,
 			})
 		}
-		defer func() { _ = reader.Close() }()
 
 		c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(key)))
 		c.Set("Content-Type", "application/gzip")
-		_, err = io.Copy(c.Response().BodyWriter(), reader)
-		return err
+		return c.SendStream(reader, objectStreamSize(info.Size))
 	}
 
 	return c.Status(fiber.StatusNotFound).JSON(ErrorResponse{

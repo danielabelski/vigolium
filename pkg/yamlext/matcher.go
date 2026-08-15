@@ -1,7 +1,6 @@
 package yamlext
 
 import (
-	"regexp"
 	"strings"
 
 	"github.com/grafana/sobek"
@@ -53,7 +52,7 @@ func evalBodyMatcher(m *MatcherDef, resp *httpmsg.HttpResponse, ctx *TemplateCon
 	}
 
 	if m.Regex != "" {
-		re, err := regexp.Compile(m.Regex)
+		re, err := compileCached(m.Regex)
 		if err != nil {
 			return false, ""
 		}
@@ -91,7 +90,7 @@ func evalHeaderMatcher(m *MatcherDef, resp *httpmsg.HttpResponse, ctx *TemplateC
 	}
 
 	if m.Regex != "" {
-		re, err := regexp.Compile(m.Regex)
+		re, err := compileCached(m.Regex)
 		if err != nil {
 			return false, ""
 		}
@@ -200,7 +199,7 @@ func EvalRuleMatch(match *RuleMatchDef, resp *httpmsg.HttpResponse, ctx *Templat
 
 		// If regex or contains specified, check value
 		if match.Regex != "" {
-			re, err := regexp.Compile(match.Regex)
+			re, err := compileCached(match.Regex)
 			if err != nil {
 				return false, ""
 			}
@@ -235,7 +234,7 @@ func EvalRuleMatch(match *RuleMatchDef, resp *httpmsg.HttpResponse, ctx *Templat
 	// Check body_regex
 	if match.BodyRegex != "" {
 		body := resp.BodyToString()
-		re, err := regexp.Compile(match.BodyRegex)
+		re, err := compileCached(match.BodyRegex)
 		if err != nil {
 			return false, ""
 		}

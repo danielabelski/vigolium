@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"time"
@@ -219,8 +220,15 @@ func DebugRequestMiddleware() fiber.Handler {
 		// Headers
 		fields = append(fields, zap.Any("headers", redactSensitiveHeaders(c.GetReqHeaders())))
 
-		// Body (for POST/PUT/PATCH)
-		if body := c.Body(); len(body) > 0 {
+		// Body (for POST/PUT/PATCH). Never on the large-upload routes: c.Body()
+		// on a streamed upload drains the whole object into memory, so with
+		// --debug on, logging alone would materialize a half-gigabyte tarball
+		// that the handler was carefully staging to disk. Log its shape instead.
+		if bodyLimitExemptPaths[c.Path()] {
+			fields = append(fields,
+				zap.String("body", "<not read: upload route>"),
+				zap.Int("declared_content_length", c.Request().Header.ContentLength()))
+		} else if body := c.Body(); len(body) > 0 {
 			if scrubbed := redactJSONBody(body); len(scrubbed) > 0 {
 				fields = append(fields, zap.ByteString("body", scrubbed))
 			}
@@ -234,6 +242,13 @@ func DebugRequestMiddleware() fiber.Handler {
 
 const defaultBodyLimit = 4 << 20 // 4 MB — default for non-upload routes
 
+// maxOversizeDrainBytes is how much of a rejected body is discarded so the
+// sender can finish and read the 413 instead of taking a connection reset. It
+// is a courtesy budget, not a limit: nothing is retained, but neither is the
+// server willing to spend unbounded socket time reading bytes it has already
+// refused.
+const maxOversizeDrainBytes = 8 << 20 // 8 MB
+
 // bodyLimitExemptPaths are routes that accept large uploads (archive bundles,
 // source-code tarballs) and must skip the 4 MB cap. The matching is exact —
 // every entry covers a single POST endpoint.
@@ -243,14 +258,30 @@ var bodyLimitExemptPaths = map[string]bool{
 }
 
 // DefaultBodyLimitMiddleware rejects request bodies larger than defaultBodyLimit
-// for routes that aren't in bodyLimitExemptPaths. With StreamRequestBody enabled
-// (see fiber.Config), the declared-Content-Length check rejects an oversized body
-// before it is read into memory — so a normal JSON route no longer buffers up to
-// the framework's 512 MB ceiling just to bounce it. Chunked/undeclared bodies
-// (ContentLength() < 0) fall through to the read-based check, which fasthttp still
-// bounds at the framework BodyLimit.
+// for routes that aren't in bodyLimitExemptPaths.
+//
+// With StreamRequestBody enabled (see fiber.Config) the declared-Content-Length
+// check rejects an oversized body before it is read into memory, so a normal
+// JSON route no longer buffers up to the framework's 512 MB ceiling just to
+// bounce it. A chunked or otherwise undeclared body has no length to check, and
+// there the naive `len(c.Body()) > limit` is the problem rather than the fix:
+// c.Body() drains the stream first and asks afterwards, and the only ceiling on
+// that drain is the framework BodyLimit — so a sender who omits Content-Length
+// gets to grow the server's heap by 512 MB per request on a route whose limit is
+// 4 MB, and a handful of concurrent senders can exhaust memory on requests that
+// were always going to be rejected.
+//
+// So the undeclared case is read explicitly, through a reader capped one byte
+// past the limit: at most limit+1 bytes are ever allocated, and crossing the
+// threshold is detectable without having consumed what follows.
 func DefaultBodyLimitMiddleware() fiber.Handler {
 	tooLarge := func(c fiber.Ctx) error {
+		if req := c.Request(); req.IsBodyStream() {
+			_, _ = io.Copy(io.Discard, io.LimitReader(req.BodyStream(), maxOversizeDrainBytes))
+		}
+		// Whatever is left unread would be parsed as the next request on this
+		// connection, so it cannot be reused.
+		c.Response().Header.SetConnectionClose()
 		return c.Status(fiber.StatusRequestEntityTooLarge).JSON(ErrorResponse{
 			Error: "request body exceeds 4 MB limit",
 		})
@@ -259,12 +290,49 @@ func DefaultBodyLimitMiddleware() fiber.Handler {
 		if bodyLimitExemptPaths[c.Path()] {
 			return c.Next()
 		}
-		if cl := c.Request().Header.ContentLength(); cl > defaultBodyLimit {
+
+		req := c.Request()
+		cl := req.Header.ContentLength()
+		if cl > defaultBodyLimit {
 			return tooLarge(c)
+		}
+		if cl < 0 && req.IsBodyStream() {
+			// Undeclared length (chunked or identity). Read at most limit+1.
+			// Deliberately not pre-sized: the cap is 4 MB and most requests are
+			// a few hundred bytes, so ReadAll's growth beats allocating the
+			// ceiling every time.
+			body, err := io.ReadAll(io.LimitReader(req.BodyStream(), defaultBodyLimit+1))
+			if err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{
+					Error: "failed to read request body: " + err.Error(),
+				})
+			}
+			if len(body) > defaultBodyLimit {
+				return tooLarge(c)
+			}
+			// Hand the bytes back as an ordinary in-memory body. SetBodyRaw
+			// adopts the slice rather than copying it into the pooled body
+			// buffer (SetBody would), which is safe because we own it and
+			// nothing else aliases it; it also closes and releases the stream,
+			// correct here since we have read everything it could produce.
+			req.SetBodyRaw(body)
 		}
 		if len(c.Body()) > defaultBodyLimit {
 			return tooLarge(c)
 		}
+		return c.Next()
+	}
+}
+
+// AuthorHeaderMiddleware stamps the `X-Author:` response header, the companion
+// to the `Server:` banner. The value comes from ServerConfig.Author (wired from
+// pkg/cli.Author) rather than a literal here — pkg/server cannot import pkg/cli
+// without an import cycle, and a second copy of the name would drift.
+// registerRoutes skips this middleware entirely when the author is unset, so an
+// empty header is never written.
+func AuthorHeaderMiddleware(author string) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		c.Set("X-Author", author)
 		return c.Next()
 	}
 }

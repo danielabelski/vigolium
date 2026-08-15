@@ -18,8 +18,26 @@ import (
 // sharedBaseRequest holds a read-only request buffer shared across insertion points
 // from a single CreateAllInsertionPoints call. BuildRequest() never mutates baseRequest
 // (it allocates a new result slice), so sharing without synchronization is safe.
+//
+// It also carries the request's Content-Length rewrite layout, which depends only
+// on raw and is therefore identical for every insertion point built from it.
+// Computing it per point meant re-scanning the header block once per parameter and
+// once per nested child — three passes over the headers plus a string allocation
+// per header line, each time (~3 µs / 4.9 KB / 28 allocs on a 10-header request).
 type sharedBaseRequest struct {
 	raw []byte
+	cl  clRewrite
+}
+
+// newSharedBaseRequest wraps raw (retained by reference, never mutated) and
+// precomputes the layout shared by every insertion point derived from it.
+//
+// Always construct through this rather than a struct literal: a zero cl is a
+// valid value meaning "not eligible for the in-place rewrite", so a literal would
+// silently push every derived insertion point onto the UpdateContentLength slow
+// path instead of failing.
+func newSharedBaseRequest(raw []byte) *sharedBaseRequest {
+	return &sharedBaseRequest{raw: raw, cl: computeCLRewriteRaw(raw)}
 }
 
 // ==================== PARAMETER INSERTION POINT ====================
@@ -142,12 +160,17 @@ func newParameterInsertionPointShared(shared *sharedBaseRequest, param *Param) *
 		panic("Parameter cannot be nil")
 	}
 	ipType := param.ToInsertionPointType()
-	return &ParameterInsertionPoint{
+	ip := &ParameterInsertionPoint{
 		parameter:     param,
 		baseRequest:   shared.raw, // shared reference, no copy
 		insertionType: ipType,
-		cl:            computeCLRewrite(shared.raw, param),
 	}
+	// Same gate as computeCLRewrite, against the layout resolved once for the
+	// whole request rather than re-derived per insertion point.
+	if param.RequiresContentLengthUpdate() {
+		ip.cl = shared.cl
+	}
+	return ip
 }
 
 // Name returns the parameter name.
@@ -456,43 +479,57 @@ type EncodedInsertionPoint struct {
 	insertionType InsertionPointType // h: insertion point type
 }
 
-// NewEncodedInsertionPoint creates a new encoded insertion point.
+// NewEncodedInsertionPoint creates a new encoded insertion point over a private
+// copy of request, so a caller-owned slice cannot be mutated underneath it.
 func NewEncodedInsertionPoint(name string, request []byte, startOffset, endOffset int, encoder Encoder, prefix []byte, ipType InsertionPointType) *EncodedInsertionPoint {
-	if name == "" {
-		panic("Name cannot be empty")
-	}
 	if request == nil {
 		panic("Base request cannot be nil")
 	}
-	if startOffset < 0 || endOffset > len(request) || endOffset < startOffset {
+
+	// Validation happens inside, against the clone — same length, same panics.
+	ip := newEncodedInsertionPointShared(name, bytes.Clone(request), startOffset, endOffset, encoder, ipType)
+	if prefix != nil {
+		ip.prefix = bytes.Clone(prefix)
+	}
+	return ip
+}
+
+// newEncodedInsertionPointShared is NewEncodedInsertionPoint without the base
+// buffer clone: buf is retained by reference and must never be mutated after
+// this call. It is the child-side counterpart to newParameterInsertionPointShared.
+//
+// Nested discovery materializes the decoded parent value itself and hands the
+// same buffer to every child of that parent, none of which writes to it
+// (BuildRequest allocates a fresh result slice in buildRequestWithPayload).
+// Cloning per child made retained memory quadratic in the child count — a 98 KB
+// request with 2,000 nested children retained ~188 MiB, and those slices are what
+// the executor's insertion-point LRU holds.
+//
+// Unexported deliberately: sharing is only sound when the caller owns the buffer
+// and guarantees immutability for the lifetime of every derived insertion point.
+func newEncodedInsertionPointShared(name string, buf []byte, startOffset, endOffset int, encoder Encoder, ipType InsertionPointType) *EncodedInsertionPoint {
+	if name == "" {
+		panic("Name cannot be empty")
+	}
+	if buf == nil {
+		panic("Base request cannot be nil")
+	}
+	if startOffset < 0 || endOffset > len(buf) || endOffset < startOffset {
 		panic("Invalid offsets")
 	}
 	if encoder == nil {
 		panic("Encoder cannot be nil")
 	}
 
-	// Clone request to ensure thread safety
-	requestCopy := make([]byte, len(request))
-	copy(requestCopy, request)
-
-	// Extract and decode base value
-	baseBytes := request[startOffset:endOffset]
-	decodedBaseValue := encoder.Decode(baseBytes)
-
-	// Clone prefix if provided
-	var prefixCopy []byte
-	if prefix != nil {
-		prefixCopy = make([]byte, len(prefix))
-		copy(prefixCopy, prefix)
-	}
+	decodedBaseValue := encoder.Decode(buf[startOffset:endOffset])
 
 	return &EncodedInsertionPoint{
 		name:          name,
-		baseRequest:   requestCopy,
+		baseRequest:   buf, // shared reference, no copy
 		startOffset:   startOffset,
 		endOffset:     endOffset,
 		baseValue:     string(decodedBaseValue),
-		prefix:        prefixCopy,
+		prefix:        nil,
 		encoder:       encoder,
 		insertionType: ipType,
 	}

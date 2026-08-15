@@ -284,6 +284,12 @@ func (h *Handlers) startAgenticScan(c fiber.Ctx, mode string, stream bool, opts 
 	opts.ProjectUUID = projectUUID
 	agenticScanUUID, err := h.registerRunningAgenticScan(mode, opts.AgentName, opts.ScanUUID, projectUUID)
 	if err != nil {
+		// Release the slot acquired above. Every other exit from this function
+		// hands ownership to a goroutine that releases it (the SSE stream writer
+		// or runBackgroundAgentWithOpts); this path hands it to nobody, so
+		// without an explicit release a caller can permanently shrink the light
+		// agent pool by repeating a request that fails registration.
+		h.releaseAgentSlot(h.agentLightSem)
 		if byokCleanup != nil {
 			byokCleanup()
 		}

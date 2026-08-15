@@ -158,7 +158,7 @@ type ExecutorConfig struct {
 	FeedbackDrainMaxStall time.Duration                                                                                                       // Hard cap on draining with workers in-flight but making no progress (0 = 2x active module timeout). Guards against a module that ignores cancellation.
 	WorkerExitGrace       time.Duration                                                                                                       // Grace for worker goroutines to exit after the item channel is closed (0 = default 60s, capped at FeedbackDrainMaxStall). Kept short and separate from the drain-stall cap so shutdown stays responsive.
 	IPCacheSize           int                                                                                                                 // LRU cache size for parsed insertion points (default: 4096)
-	IPCache               *lru.Cache[string, []httpmsg.InsertionPoint]                                                                        // Optional: shared IP cache (if nil, a new one is created)
+	IPCache               *InsertionPointCache                                                                                                // Optional: shared IP cache (if nil, a new one is created)
 	ParallelPassive       bool                                                                                                                // When true, run passive per-request modules concurrently
 	PassiveModuleTimeout  time.Duration                                                                                                       // Timeout per passive module call (default: 5s). 0 uses default.
 	ActiveModuleTimeout   time.Duration                                                                                                       // Timeout per active module call (default: 300s). 0 uses default. Modules may raise via TimeoutHinter.
@@ -340,8 +340,9 @@ type hostClaimKey struct {
 // is safe for concurrent use (bounded LRU / sharded map / sync.Map).
 type scanCaches struct {
 	// ipCache is an insertion-point cache keyed by request SHA-256 hash, bounded
-	// LRU. Avoids redundant AnalyzeRequest() calls for repeated/retried requests.
-	ipCache *lru.Cache[string, []httpmsg.InsertionPoint]
+	// by both entry count and retained bytes. Avoids redundant AnalyzeRequest()
+	// calls for repeated/retried requests.
+	ipCache *InsertionPointCache
 
 	// requestUUIDs tracks the database record UUID for each HttpRequestResponse
 	// (for linking findings). Key: request hash, value: database record UUID.
@@ -424,13 +425,16 @@ func NewExecutor(
 		}
 	}
 
-	var ipCache *lru.Cache[string, []httpmsg.InsertionPoint]
+	var ipCache *InsertionPointCache
 	if cfg.IPCache != nil {
 		ipCache = cfg.IPCache
 	} else {
 		ipCacheSize := cfg.IPCacheSize
 		if ipCacheSize <= 0 {
-			// Auto-size based on input source count for better cache utilization
+			// Auto-size based on input source count for better cache utilization.
+			// This is an entry cap only — retained bytes are bounded separately by
+			// the cache itself (ipCacheMaxBytes), since entry size varies by four
+			// orders of magnitude between a short GET and a large nested body.
 			total := getKnownTotal(src)
 			switch {
 			case total > 0 && total <= 500:
@@ -443,14 +447,7 @@ func NewExecutor(
 				ipCacheSize = 4096
 			}
 		}
-		// Guard the size so lru.New cannot fail: it only errors on a
-		// non-positive size, which would otherwise leave ipCache nil and
-		// nil-panic on the first Get/Add. With size >= 1 the ignored error is
-		// provably nil.
-		if ipCacheSize < 1 {
-			ipCacheSize = 4096
-		}
-		ipCache, _ = lru.New[string, []httpmsg.InsertionPoint](ipCacheSize)
+		ipCache = NewInsertionPointCache(ipCacheSize)
 	}
 
 	// Bounded LRUs for the per-host run-once claims (size <= 0 is the only error
@@ -898,7 +895,29 @@ drainLoop:
 		e.cfg.OASTService.Flush()
 	}
 
+	e.logInsertionPointCacheStats()
+
 	return e.results.Load(), nil
+}
+
+// logInsertionPointCacheStats reports the insertion-point cache's behaviour once
+// the scan is done. Byte evictions and size rejections are the interesting
+// signals: they mean the byte budget, not the entry cap, was the binding limit —
+// i.e. this scan's requests were heavy enough to re-derive insertion points that
+// a larger budget would have kept.
+func (e *Executor) logInsertionPointCacheStats() {
+	s := e.caches.ipCache.Stats()
+	if s.Hits == 0 && s.Misses == 0 {
+		return
+	}
+
+	zap.L().Debug("Insertion-point cache",
+		zap.Int("entries", s.Entries),
+		zap.Int64("retained_mib", s.RetainedBytes>>20),
+		zap.Int64("hits", s.Hits),
+		zap.Int64("misses", s.Misses),
+		zap.Int64("byte_evictions", s.Evictions),
+		zap.Int64("size_rejections", s.Rejected))
 }
 
 func (e *Executor) feedItems(ctx context.Context, itemCh chan<- *work.WorkItem) {

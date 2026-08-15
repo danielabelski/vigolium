@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useMemo, useCallback } from 'react';
-import { usePathname } from 'next/navigation';
 import { useDemoRouter } from '@/lib/useDemoHref';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -11,7 +10,7 @@ import 'prismjs/components/prism-bash';
 import 'prismjs/components/prism-javascript';
 import 'prismjs/components/prism-json';
 import 'prismjs/components/prism-yaml';
-import { Info, Search, Settings, Palette, FolderKanban, Plus, Trash2, Check, User, Users, Mail, Monitor, Loader2, Copy } from 'lucide-react';
+import { Info, Search, Settings, Palette, FolderKanban, Plus, Trash2, Check, User, Users, Mail, Monitor, Copy } from 'lucide-react';
 import { useTheme } from '@/contexts/ThemeContext';
 import { COLOR_SCHEMES, type ColorScheme } from '@/lib/colorSchemes';
 import { isStaticBuild } from '@/lib/buildMode';
@@ -143,7 +142,6 @@ export default function SettingsPage({ initialTab }: { initialTab?: string }) {
 
   const { schemeId, setScheme } = useTheme();
   const router = useDemoRouter();
-  const pathname = usePathname();
   const [activeTab, setActiveTabState] = useState<SettingsTab>(validTab);
   const setActiveTab = useCallback((tab: SettingsTab) => {
     setActiveTabState(tab);

@@ -120,17 +120,12 @@ func (e *Executor) runActivePerInsertionPoint(ctx context.Context, reqClient *ht
 		return
 	}
 
-	// Cache lookup by request hash (same SHA-256 used by HttpRequest.ID())
-	key := item.Request().ID()
-	allPoints, ok := e.caches.ipCache.Get(key)
-	if !ok {
-		var err error
-		allPoints, err = httpmsg.CreateAllInsertionPoints(item.Request().Raw(), true)
-		if err != nil {
-			zap.L().Debug("Failed to create insertion points", zap.Error(err))
-			return
-		}
-		e.caches.ipCache.Add(key, allPoints)
+	// Cache lookup by request hash (same SHA-256 used by HttpRequest.ID()), through
+	// the same accessor the module-facing provider uses so both agree on the key.
+	allPoints, err := e.caches.ipCache.GetOrCompute(item.Request().Raw(), item.Request().ID(), true)
+	if err != nil {
+		zap.L().Debug("Failed to create insertion points", zap.Error(err))
+		return
 	}
 
 	// Pre-compute host+path for cross-module finding dedup

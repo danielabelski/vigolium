@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.4.2] - 2026-08-15
+
+A **hardening and performance** release for the REST API server and the scan hot paths: bounded memory everywhere a caller could previously make the server allocate without limit, plus a cross-project record-scoping fix. No module changes (registry stays at 207 active + 116 passive).
+
+### Fixed
+
+- `POST /api/scan-records` validated record UUIDs unscoped — a leaked UUID could pull another project's traffic into a scan.
+- A failed agentic-scan registration leaked its concurrency slot, shrinking the agent pool on every repeat.
+- CORS preflight omitted `PATCH`, so a browser client could never mark a finding triaged.
+- `completed_with_errors` wasn't a terminal status: its log stream ran to the 2-hour cap and its row survived every retention sweep.
+- Storage downloads answered a missing object with a truncated stream instead of a JSON 404.
+- Storage read endpoints were unreachable in view-only mode.
+- The `Server:` header rendered as `Vigolium vv0.4.1`.
+- A chunked body could grow the heap to the 512 MB framework ceiling on a 4 MB route; now capped at `limit+1` and drained before the 413.
+- `--debug` logging drained streamed uploads into memory on the large-upload routes.
+- Crawl-path repair rescanned every edge in the graph on each duplicate transition.
+
+### Performance
+
+- Nested insertion points share one base-request buffer: a 98 KB request with 2,000 nested children retains ~0.9 MiB, was ~188 MiB.
+- The insertion-point cache is bounded by retained bytes (128 MiB) and per-entry size, not entry count alone.
+- The Content-Length rewrite layout is computed once per request instead of once per insertion point.
+- Scan and agent log endpoints return the last 2 MiB of `runtime.log` (`?max_bytes=` up to 64 MiB) instead of the whole file per poll.
+- Storage downloads stream to the client instead of buffering the whole object in memory.
+- Agent list endpoints read blob-free summaries; the SSE log follower polls the status column alone.
+- YAML extension matcher regexes are compiled once and cached, failures included.
+- DOM-XSS taint matching dropped its per-identifier regex compile (~50 µs → ~0.9 µs per statement, zero allocations).
+- `POST /api/scan-records` caps `record_uuids` at 10,000 and checks scan admission before enumerating.
+
+### Added
+
+- `X-Author` response header, the companion to the `Server:` banner.
+
+### Changed
+
+- Workbench moved to an ESLint flat config (`eslint .` replaces `next lint`); TypeScript stays on 6.x and ESLint on 9.x, since either bump breaks the lint run outright.
+- Workbench dependency bumps: Next 16.3, React 19.2.8, ag-grid 36.
+- Workbench header account links use `next/link`; the dead `ScanDetailPanel` was removed.
+
 ## [v0.4.1] - 2026-08-12
 
 A **standalone utilities** release: a new `vigolium kit` command exposes the scanner's internal primitives as one-shot tools for coding agents and shell pipelines. No module changes (registry stays at 207 active + 116 passive).

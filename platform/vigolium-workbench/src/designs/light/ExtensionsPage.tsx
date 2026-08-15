@@ -81,11 +81,6 @@ const CATEGORY_COLORS: Record<string, string> = {
   utils: '#a0522d',
 };
 
-function CategoryRenderer({ value }: { value: string }) {
-  const color = CATEGORY_COLORS[value?.toLowerCase()] || '#708e8e';
-  return <span className="text-xs font-bold" style={{ color }}>{value}</span>;
-}
-
 function NamespaceRenderer({ value }: { value: string }) {
   const tail = value?.split('.').pop()?.toLowerCase() || '';
   const color = CATEGORY_COLORS[tail] || '#708e8e';

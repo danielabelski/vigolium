@@ -2,12 +2,12 @@
 
 import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Square, Send, Bot, Terminal, MessageSquare, Clock, CheckCircle, XCircle, Loader2, Zap, Layers, Bug, ScrollText, Copy, Check, Upload, ChevronDown, Play, X, Settings2, Crosshair, Scale, ShieldCheck } from 'lucide-react';
+import { Square, Send, Bot, Terminal, Clock, CheckCircle, XCircle, Loader2, Zap, Layers, Bug, ScrollText, Copy, Check, Upload, ChevronDown, Play, Settings2, Crosshair, Scale, ShieldCheck } from 'lucide-react';
 import type { AgentSession, AgentSessionDetail } from '@/api/types';
 import { formatDate, formatDuration, truncate } from '@/lib/formatters';
 import PageShell from './PageShell';
 import Dropdown from './Dropdown';
-import { useAgentsLogic, AGENT_OPTIONS, AUDIT_PREP_MODE_OPTIONS, INTENSITY_OPTIONS, AUDIT_MODE_OPTIONS, type ScanProfile, type AdvancedMode, type DetectedInputType } from '@/hooks/useAgentsLogic';
+import { useAgentsLogic, AGENT_OPTIONS, AUDIT_PREP_MODE_OPTIONS, INTENSITY_OPTIONS, AUDIT_MODE_OPTIONS, type DetectedInputType } from '@/hooks/useAgentsLogic';
 
 const INPUT_TYPE_LABELS: Record<DetectedInputType, { label: string; color: string }> = {
   url: { label: 'URL', color: '#00b368' },

@@ -1750,32 +1750,34 @@ func (c *Crawler) inspectNewState(ctx context.Context, page *browser.Page, event
 	c.crawlPath.Add(eventable)
 
 	// This handles: AddState (putIfAbsent), AddEdge, and ChangeState all in one call.
-	existingState, isClone := c.stateMachine.SwitchToStateAndCheckIfClone(newState, eventable)
+	existingState, isClone, graphEdge := c.stateMachine.SwitchToStateAndCheckIfClone(newState, eventable)
 	if isClone {
 		// Clone state detected
 		zap.L().Debug("State already exists (clone detected)",
 			zap.String("state", existingState.Name),
 			zap.String("state_id", existingState.ID))
 
-		// When addEdge detects a duplicate, it sets eventable.ID = -1.
-		// We must fix the crawlPath by replacing the clone edge with the real graph edge.
+		// When addEdge detects a duplicate, it sets eventable.ID = -1 and returns
+		// the pre-existing graph edge. We must fix the crawlPath by replacing the
+		// clone edge with that real graph edge.
+		//
+		// The edge comes back from the state machine rather than being searched
+		// for: this branch is the common case in a crawl (revisiting a known
+		// state), and scanning c.graph.AllEdges() to re-find an edge AddEdge just
+		// returned costs a full materialization of every edge in the graph plus an
+		// Equals per edge, growing with the graph on every duplicate transition.
 		if eventable.ID == -1 {
 			zap.L().Debug("Removing Clone Edge from crawlPath")
 			c.crawlPath.RemoveLast()
-			fixed := false
-			for _, edge := range c.graph.AllEdges() {
-				if edge.Equals(eventable) {
-					c.crawlPath.Add(edge)
-					zap.L().Debug("CrawlPath fixed with existing graph edge", zap.Int64("edge_id", edge.ID))
-					fixed = true
-					break
-				}
-			}
-			if !fixed {
-				// Fallback: re-add the original eventable
+
+			replacement := eventable // fallback: re-add the original eventable
+			if graphEdge != nil && graphEdge != eventable {
+				replacement = graphEdge
+				zap.L().Debug("CrawlPath fixed with existing graph edge", zap.Int64("edge_id", graphEdge.ID))
+			} else {
 				zap.L().Debug("Crawlpath could not be fixed with graph, using removed eventable")
-				c.crawlPath.Add(eventable)
 			}
+			c.crawlPath.Add(replacement)
 		}
 
 		c.candidates.RediscoveredState(existingState.ID)

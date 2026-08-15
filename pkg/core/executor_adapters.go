@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
@@ -104,30 +103,12 @@ var nopFeederInstance = nopFeeder{}
 // executorIPProvider wraps the executor's LRU insertion point cache
 // as a modkit.InsertionPointProvider so modules can reuse cached IPs.
 type executorIPProvider struct {
-	cache *lru.Cache[string, []httpmsg.InsertionPoint]
+	cache *InsertionPointCache
 }
 
 func (p *executorIPProvider) GetInsertionPoints(raw []byte, requestID string, includeNested bool) ([]httpmsg.InsertionPoint, error) {
-	if p.cache == nil {
-		return httpmsg.CreateAllInsertionPoints(raw, includeNested)
-	}
-
-	// Cache key includes includeNested flag to separate variants
-	key := requestID
-	if !includeNested {
-		key = requestID + ":shallow"
-	}
-
-	if points, ok := p.cache.Get(key); ok {
-		return points, nil
-	}
-
-	points, err := httpmsg.CreateAllInsertionPoints(raw, includeNested)
-	if err != nil {
-		return nil, err
-	}
-	p.cache.Add(key, points)
-	return points, nil
+	// A nil cache is handled by GetOrCompute's nil receiver.
+	return p.cache.GetOrCompute(raw, requestID, includeNested)
 }
 
 // repoRemarksAnnotator adapts *database.Repository to modkit.RemarksAnnotator.

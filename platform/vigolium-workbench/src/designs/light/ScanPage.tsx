@@ -29,7 +29,6 @@ const MODE_BADGE_COLORS: Record<ScanMode, string> = {
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const;
 const STRATEGIES = ['lite', 'balanced', 'deep'] as const;
-const PHASES = ['', 'discovery', 'spidering', 'audit'] as const;
 const SCOPE_ORIGINS = ['', 'all', 'relaxed', 'balanced', 'strict'] as const;
 const HEURISTICS = ['', 'none', 'basic', 'advanced'] as const;
 const HISTORY_PAGE_SIZE = 20;

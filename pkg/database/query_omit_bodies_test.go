@@ -103,7 +103,7 @@ func TestRepository_ExistingRecordUUIDs(t *testing.T) {
 	insertHTTPRecord(t, db, "rec2", DefaultProjectUUID)
 	repo := NewRepository(db)
 
-	got, err := repo.ExistingRecordUUIDs(ctx, []string{"rec1", "missing", "rec2"})
+	got, err := repo.ExistingRecordUUIDs(ctx, DefaultProjectUUID, []string{"rec1", "missing", "rec2"})
 	if err != nil {
 		t.Fatalf("ExistingRecordUUIDs: %v", err)
 	}
@@ -116,12 +116,44 @@ func TestRepository_ExistingRecordUUIDs(t *testing.T) {
 		}
 	}
 
-	empty, err := repo.ExistingRecordUUIDs(ctx, []string{"nope"})
+	empty, err := repo.ExistingRecordUUIDs(ctx, DefaultProjectUUID, []string{"nope"})
 	if err != nil {
 		t.Fatalf("ExistingRecordUUIDs (none): %v", err)
 	}
 	if len(empty) != 0 {
 		t.Fatalf("got %v, want none", empty)
+	}
+}
+
+// TestRepository_ExistingRecordUUIDsProjectScoped locks in the scoping the
+// selective-scan handler depends on: a record UUID is globally unique, so an
+// unscoped check would confirm a row belonging to another engagement and let
+// the caller pull it into their own scan.
+func TestRepository_ExistingRecordUUIDsProjectScoped(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	insertHTTPRecord(t, db, "mine", DefaultProjectUUID)
+	insertHTTPRecord(t, db, "theirs", "11111111-1111-1111-1111-111111111111")
+	repo := NewRepository(db)
+
+	got, err := repo.ExistingRecordUUIDs(ctx, DefaultProjectUUID, []string{"mine", "theirs"})
+	if err != nil {
+		t.Fatalf("ExistingRecordUUIDs: %v", err)
+	}
+	if len(got) != 1 || got[0] != "mine" {
+		t.Fatalf("got %v, want only the requesting project's record", got)
+	}
+
+	// There is no opt-out: a blank project UUID means the default project, as
+	// everywhere else in this package, not "any project". Enforcing ownership
+	// is this method's entire purpose, so a caller must not be able to disable
+	// it by passing the zero value.
+	blank, err := repo.ExistingRecordUUIDs(ctx, "", []string{"mine", "theirs"})
+	if err != nil {
+		t.Fatalf("ExistingRecordUUIDs (blank project): %v", err)
+	}
+	if len(blank) != 1 || blank[0] != "mine" {
+		t.Fatalf("got %v, want the blank project UUID to mean the default project", blank)
 	}
 }
 

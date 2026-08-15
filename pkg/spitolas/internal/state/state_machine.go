@@ -216,41 +216,48 @@ func (sm *StateMachine) canGoTo(sourceID, targetID string) bool {
 }
 
 // addStateToCurrentState adds a new state and edge to the graph.
-// Returns the existing clone state if the state already existed, nil if new.
-func (sm *StateMachine) addStateToCurrentState(newState *State, eventable *action.Eventable) *State {
-	// putIfAbsent — add state to graph if not already present
-	isNew := sm.graph.AddState(newState)
-
-	if !isNew {
-		// State already exists — it's a clone
-		cloneState, _ := sm.graph.GetState(newState.ID)
-		// Add edge from current state to clone
-		if sm.currentState != nil && cloneState != nil && eventable != nil {
-			sm.graph.AddEdge(sm.currentState.ID, cloneState.ID, eventable)
-		}
-		return cloneState
+// Returns the existing clone state if the state already existed (nil if new),
+// along with the graph edge AddEdge resolved to — which is the pre-existing
+// equivalent edge when the transition was a duplicate.
+func (sm *StateMachine) addStateToCurrentState(newState *State, eventable *action.Eventable) (*State, *action.Eventable) {
+	// putIfAbsent — a state that was already present is a clone, and the edge is
+	// added to the existing instance rather than the one just handed to us.
+	target := newState
+	var cloneState *State
+	if !sm.graph.AddState(newState) {
+		cloneState, _ = sm.graph.GetState(newState.ID)
+		target = cloneState
 	}
 
-	// New state — add edge from current state to new state
-	if sm.currentState != nil && eventable != nil {
-		sm.graph.AddEdge(sm.currentState.ID, newState.ID, eventable)
+	var edge *action.Eventable
+	if sm.currentState != nil && target != nil && eventable != nil {
+		edge = sm.graph.AddEdge(sm.currentState.ID, target.ID, eventable)
 	}
-	return nil
+	return cloneState, edge
 }
 
 // SwitchToStateAndCheckIfClone adds newState to graph, adds edge, and switches.
-// Returns (existingState, isClone):
-//   - If newState is a clone, switches to existing state and returns (existing, true)
-//   - If newState is new, switches to new state and returns (nil, false)
-func (sm *StateMachine) SwitchToStateAndCheckIfClone(newState *State, eventable *action.Eventable) (*State, bool) {
+// Returns (existingState, isClone, resolvedEdge):
+//   - If newState is a clone, switches to existing state and returns (existing, true, …)
+//   - If newState is new, switches to new state and returns (nil, false, …)
+//
+// resolvedEdge is the graph edge the transition resolved to. When AddEdge finds
+// an equivalent edge already in the graph it marks the caller's eventable with
+// ID = -1 and returns the pre-existing edge — which is what a crawl path must be
+// repaired with. Returning it saves the caller a full AllEdges() scan (which
+// materializes every edge in the graph and compares each one) on what is the
+// common case in a crawl: revisiting a known state.
+//
+// resolvedEdge is nil when no edge was added — no current state, or a nil eventable.
+func (sm *StateMachine) SwitchToStateAndCheckIfClone(newState *State, eventable *action.Eventable) (*State, bool, *action.Eventable) {
 	if newState == nil {
-		return nil, false
+		return nil, false, nil
 	}
 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	cloneState := sm.addStateToCurrentState(newState, eventable)
+	cloneState, edge := sm.addStateToCurrentState(newState, eventable)
 
 	// TODO: runOnInvariantViolationPlugins(context) — requires invariant checker
 
@@ -259,7 +266,7 @@ func (sm *StateMachine) SwitchToStateAndCheckIfClone(newState *State, eventable 
 		sm.currentState = newState
 		zap.L().Debug("Switched to new state",
 			zap.String("state", newState.Name))
-		return nil, false
+		return nil, false, edge
 	}
 
 	// Clone — switch to the existing clone
@@ -267,7 +274,7 @@ func (sm *StateMachine) SwitchToStateAndCheckIfClone(newState *State, eventable 
 	zap.L().Debug("Switched to clone state",
 		zap.String("new_state", newState.Name),
 		zap.String("clone_state", cloneState.Name))
-	return cloneState, true
+	return cloneState, true, edge
 }
 
 // Rewind resets the state machine to initial state (internal state only).

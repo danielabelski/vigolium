@@ -153,7 +153,6 @@ export default function OASTInteractionsPage({ initialId }: { initialId?: number
     return () => document.removeEventListener('keydown', handler);
   }, [navigateToInteraction]);
 
-  const inputClass = "bg-[#f6edda] border border-[#bbc3c4] text-[#005661] text-xs px-2 py-0.5 focus:outline-none focus:border-[#0078c8]/50";
 
   return (
     <PageShell>

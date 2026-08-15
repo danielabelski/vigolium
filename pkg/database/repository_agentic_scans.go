@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 // CreateAgenticScan stores a new agent run record. When a row with run.UUID
@@ -76,6 +78,50 @@ func (r *Repository) UpdateAgenticScan(ctx context.Context, run *AgenticScan) er
 	return nil
 }
 
+// agenticScanBlobColumns are the agentic_scans columns holding uncapped
+// JSON/text blobs — a single autopilot run's result_json is routinely
+// megabytes. A list of 100 runs otherwise transfers, allocates and
+// deserializes all of them so the handler can throw them away building a DTO
+// of counters and timestamps. Mirrors recordBodyColumns / findingBodyColumns.
+//
+// Stated as an exclusion rather than as the complementary include list on
+// purpose: the model has 40-odd columns, so an include list has to be updated
+// for every column added or that column silently reads back as its zero value
+// in every list view, with no compile-time or test signal.
+var agenticScanBlobColumns = []string{
+	"input_raw", "prompt_sent", "agent_raw_output",
+	"attack_plan", "triage_result", "result_json",
+}
+
+// ListAgenticScanSummaries is ListAgenticScans with agenticScanBlobColumns
+// dropped — same rows, same order, same total. Use it for any view that
+// renders a run rather than replaying it; the omitted fields come back empty,
+// so a caller that serializes the *AgenticScan verbatim (the `--json` CLI
+// paths) must keep using ListAgenticScans.
+func (r *Repository) ListAgenticScanSummaries(ctx context.Context, projectUUID string, mode string, limit, offset int) ([]*AgenticScan, int64, error) {
+	return r.listAgenticScans(ctx, projectUUID, mode, limit, offset, agenticScanBlobColumns)
+}
+
+// AgenticScanStatusByUUID returns just the status column for a run.
+//
+// It exists for the SSE log follower, which asks "is this run finished yet?"
+// twice a second for as long as a client watches: doing that through
+// GetAgenticScan reads the run's full row — blobs included — so N followers on
+// a finished-but-still-watched autopilot run pull 2N megabyte-scale reads per
+// second out of the database to learn one short string.
+func (r *Repository) AgenticScanStatusByUUID(ctx context.Context, uuid string) (string, error) {
+	var status string
+	err := r.db.NewSelect().
+		Model((*AgenticScan)(nil)).
+		Column("status").
+		Where("uuid = ?", uuid).
+		Scan(ctx, &status)
+	if err != nil {
+		return "", fmt.Errorf("agent run not found: %w", err)
+	}
+	return status, nil
+}
+
 // UpdateAgenticScanStorageURL sets the storage_url field on an agentic scan record.
 func (r *Repository) UpdateAgenticScanStorageURL(ctx context.Context, agenticScanUUID, storageURL string) error {
 	_, err := r.db.NewUpdate().Model((*AgenticScan)(nil)).
@@ -85,8 +131,16 @@ func (r *Repository) UpdateAgenticScanStorageURL(ctx context.Context, agenticSca
 	return err
 }
 
-// ListAgenticScans returns paginated agent runs for a project, ordered by created_at DESC.
+// ListAgenticScans returns paginated agent runs for a project, ordered by
+// created_at DESC, with every column populated. Callers that only render the
+// run should prefer ListAgenticScanSummaries.
 func (r *Repository) ListAgenticScans(ctx context.Context, projectUUID string, mode string, limit, offset int) ([]*AgenticScan, int64, error) {
+	return r.listAgenticScans(ctx, projectUUID, mode, limit, offset, nil)
+}
+
+// listAgenticScans backs both list variants. A nil exclude slice selects every
+// column; otherwise the named ones are left out.
+func (r *Repository) listAgenticScans(ctx context.Context, projectUUID string, mode string, limit, offset int, exclude []string) ([]*AgenticScan, int64, error) {
 	projectUUID = defaultProjectUUID(projectUUID)
 	if limit <= 0 {
 		limit = 50
@@ -108,6 +162,9 @@ func (r *Repository) ListAgenticScans(ctx context.Context, projectUUID string, m
 		Limit(limit).
 		Offset(offset)
 
+	if len(exclude) > 0 {
+		q = q.ExcludeColumn(exclude...)
+	}
 	if mode != "" {
 		q = q.Where("mode = ?", mode)
 	}
@@ -134,11 +191,31 @@ func (r *Repository) GetChildAgenticScans(ctx context.Context, parentUUID string
 	return runs, nil
 }
 
-// DeleteOldAgenticScans removes completed/failed agent runs older than the given duration.
+// TerminalAgenticScanStatuses is the authoritative set of agentic_scans.status
+// values meaning the run has finished. Two subsystems must agree on it — the
+// SSE log follower, which tails runtime.log until the run is terminal, and the
+// retention sweep below, which only deletes finished runs — and a status
+// present in one and absent from the other is either a stream that never ends
+// or a row that is never cleaned. Both were true of "completed_with_errors",
+// what a multi-driver audit writes when one leg fails: following its log spun
+// until the two-hour cap and its row outlived every retention window. Add new
+// terminal statuses here, not at either call site.
+var TerminalAgenticScanStatuses = []string{
+	"completed",
+	"completed_with_errors",
+	"failed",
+	"cancelled",
+	"timeout",
+	"error",
+}
+
+// DeleteOldAgenticScans removes finished agent runs older than the given
+// duration. "Finished" is TerminalAgenticScanStatuses, not a literal list —
+// see that variable.
 func (r *Repository) DeleteOldAgenticScans(ctx context.Context, olderThan time.Duration) (int, error) {
 	cutoff := time.Now().Add(-olderThan)
 	res, err := r.db.NewDelete().Model((*AgenticScan)(nil)).
-		Where("status IN (?, ?)", "completed", "failed").
+		Where("status IN (?)", bun.List(TerminalAgenticScanStatuses)).
 		Where("completed_at < ?", cutoff).
 		Exec(ctx)
 	if err != nil {

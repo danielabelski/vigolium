@@ -143,7 +143,7 @@ vigolium ingest -s http://localhost:9002 -i api.yaml -I openapi
 
 See [running the server](https://docs.vigolium.com/server-mode/running-the-server) for server setup, [ingestion](https://docs.vigolium.com/server-mode/ingestion) for ingestion workflows, and the [API overview](https://docs.vigolium.com/api-overview) for the full REST API reference.
 
-> **Burp Suite integration**: forward live Burp Suite traffic to a running Vigolium server with the [burp-vigolium](https://github.com/vigolium/burp-vigolium) extension.
+> **Proxy integrations**: forward live proxy traffic to a running Vigolium server with the [burp-vigolium](https://github.com/vigolium/burp-vigolium) extension for Burp Suite or the [caido-vigolium](https://github.com/vigolium/caido-vigolium) plugin for Caido. Both serve the same bridge protocol (`-B/--burp-bridge-url`, alias `--caido-bridge-url`), and ingested traffic is labelled with the proxy it came from.
 
 ## Authenticated Scanning
 
@@ -211,9 +211,9 @@ See the [agent mode guide](https://docs.vigolium.com/agentic-scan/agent-mode) fo
 
 ## ⚡ Vigolium Cloud Console
 
-A cloud-based solution for teams that want the power of Vigolium without managing infrastructure. Console is the **upgraded, fully-featured version of Vigolium**: managed scanning, centralized reporting, team collaboration, and extra features layered on top of the open-source core, so you can focus on fixing vulnerabilities instead of maintaining tooling.
+A cloud-based solution for teams that want the power of Vigolium without managing infrastructure. Console is the **upgraded, fully-featured version of Vigolium**, led by an **advanced autonomous agent** that drives the whole engagement — reasoning about the target, choosing its own attack paths, and confirming what it finds — with hosted scanning and shared results layered on top of the open-source core, so you can focus on fixing vulnerabilities instead of maintaining tooling.
 
-> Check out the Cloud Console at [console.vigolium.com](https://console.vigolium.com/).
+> Interested? [Get in touch for a demo](https://www.vigolium.com/request-demo).
 
 ## Native Scan Layers
 

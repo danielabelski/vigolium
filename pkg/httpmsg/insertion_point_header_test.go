@@ -203,7 +203,7 @@ func TestHeaderInsertionPoint_FastPathEquivalence(t *testing.T) {
 		"User-Agent: Mozilla/5.0\r\n" +
 		"\r\n")
 
-	shared := &sharedBaseRequest{raw: request}
+	shared := newSharedBaseRequest(request)
 	headers, _, _, err := ExtractAllHeaders(request)
 	if err != nil {
 		t.Fatalf("ExtractAllHeaders error: %v", err)

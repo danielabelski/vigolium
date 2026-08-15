@@ -175,13 +175,13 @@ func TestStateMachineSwitchToStateAndCheckIfClone(t *testing.T) {
 	sm := NewStateMachine(g, s1)
 
 	// Nil newState.
-	if existing, isClone := sm.SwitchToStateAndCheckIfClone(nil, nil); existing != nil || isClone {
+	if existing, isClone, _ := sm.SwitchToStateAndCheckIfClone(nil, nil); existing != nil || isClone {
 		t.Error("nil newState should return (nil, false)")
 	}
 
 	// Brand-new state.
 	s2 := New("http://test.com/b", "", "DOM-B", 1)
-	existing, isClone := sm.SwitchToStateAndCheckIfClone(s2, createTestEventable("/body/a"))
+	existing, isClone, _ := sm.SwitchToStateAndCheckIfClone(s2, createTestEventable("/body/a"))
 	if existing != nil || isClone {
 		t.Errorf("new state should return (nil, false), got (%v, %v)", existing, isClone)
 	}
@@ -191,7 +191,7 @@ func TestStateMachineSwitchToStateAndCheckIfClone(t *testing.T) {
 
 	// A state with an existing ID is a clone.
 	clone := New("http://test.com/b-again", "", "DOM-B", 5) // same StrippedDOM => same ID as s2
-	existing, isClone = sm.SwitchToStateAndCheckIfClone(clone, createTestEventable("/body/b"))
+	existing, isClone, _ = sm.SwitchToStateAndCheckIfClone(clone, createTestEventable("/body/b"))
 	if !isClone {
 		t.Error("a state with a duplicate ID should be detected as a clone")
 	}

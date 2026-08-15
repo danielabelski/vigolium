@@ -50,7 +50,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       localStorage.setItem(s.base === 'dark' ? LAST_DARK_KEY : LAST_LIGHT_KEY, migrated);
     }
     // Run once on mount; setScheme handles updates afterward.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const scheme = getScheme(schemeId);

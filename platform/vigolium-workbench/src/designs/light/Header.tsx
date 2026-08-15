@@ -1,5 +1,6 @@
 import { Moon, ShieldCheck, Coins, Loader2, Menu } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
+import Link from 'next/link';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useToast } from '@/contexts/ToastContext';
 import { useProjectContext } from '@/contexts/ProjectContext';
@@ -209,13 +210,13 @@ export default function Header({ serverInfo, isConnected }: HeaderProps) {
                     )}
                   </a>
                   {currentUser.organization && (
-                    <a href="/settings/team" className="hidden lg:inline" style={{ color: 'var(--v-text-muted)' }} title="Team">
+                    <Link href="/settings/team" className="hidden lg:inline" style={{ color: 'var(--v-text-muted)' }} title="Team">
                       [{currentUser.organization.name}]
-                    </a>
+                    </Link>
                   )}
-                  <a href="/settings" className="hidden lg:inline" style={{ color: 'var(--v-secondary)' }}>
+                  <Link href="/settings" className="hidden lg:inline" style={{ color: 'var(--v-secondary)' }}>
                     [Login as <span style={{ color: '#e879f9' }}>{currentUser.name}</span>]
-                  </a>
+                  </Link>
                 </div>
               )}
               {isConnected && isDemoUser && (

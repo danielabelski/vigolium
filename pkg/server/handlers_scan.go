@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -957,18 +956,7 @@ func (h *Handlers) HandleGetScanLogs(c fiber.Ctx) error {
 		sessionsDir = h.settings.ScanningStrategy.ScanLogs.EffectiveSessionsDir()
 	}
 	if logPath := resolveRuntimeLogPath(filepath.Join(sessionsDir, scanUUID)); logPath != "" {
-		data, readErr := os.ReadFile(logPath)
-		if readErr != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{
-				Error: "failed to read runtime.log: " + readErr.Error(),
-				Code:  fiber.StatusInternalServerError,
-			})
-		}
-		if parseBoolParam(c.Query("strip")) {
-			data = []byte(stripANSI(string(data)))
-		}
-		c.Set("Content-Type", "text/plain; charset=utf-8")
-		return c.Send(data)
+		return sendLogTail(c, logPath, parseBoolParam(c.Query("strip")))
 	}
 
 	// Fallback: structured DB logs. Preserved for clients that relied on the

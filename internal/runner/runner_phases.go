@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/pkg/errors"
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/core"
@@ -21,7 +20,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/core/services"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/http"
-	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/jsext"
 	"github.com/vigolium/vigolium/pkg/knownissuescan"
 	"github.com/vigolium/vigolium/pkg/modules"
@@ -1183,7 +1181,7 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 	inScopeHostnames := database.HostnamesOf(inScopeHosts)
 
 	// Shared insertion point cache across feedback rounds to avoid cold-start overhead
-	ipCache, _ := lru.New[string, []httpmsg.InsertionPoint](4096)
+	ipCache := core.NewInsertionPointCache(4096)
 
 	// Resolve per-phase settings from scanning pace config (static across rounds)
 	var daMaxDuration time.Duration

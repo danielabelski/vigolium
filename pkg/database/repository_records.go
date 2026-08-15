@@ -460,7 +460,15 @@ func (r *Repository) GetRecordsByUUIDs(ctx context.Context, uuids []string) ([]*
 // uuid column straight into a []string, so validating a caller-supplied list
 // costs neither the raw_request/raw_response blobs nor an HTTPRecord struct per
 // row.
-func (r *Repository) ExistingRecordUUIDs(ctx context.Context, uuids []string) ([]string, error) {
+//
+// The answer is always scoped to a project, blank meaning the default one as
+// everywhere else in this package. The scoping is not optional because
+// enforcing ownership is this method's whole purpose: record UUIDs are
+// globally unique, so an unscoped check answers "does this row exist anywhere"
+// when the question is "does the caller own it", and a caller who learns one
+// UUID from another engagement could pull its traffic into their own scan. An
+// opt-out parameter would make the safe and unsafe calls look identical.
+func (r *Repository) ExistingRecordUUIDs(ctx context.Context, projectUUID string, uuids []string) ([]string, error) {
 	if len(uuids) == 0 {
 		return nil, nil
 	}
@@ -469,6 +477,7 @@ func (r *Repository) ExistingRecordUUIDs(ctx context.Context, uuids []string) ([
 		Model((*HTTPRecord)(nil)).
 		Column("uuid").
 		Where("uuid IN (?)", bun.List(uuids)).
+		Where("project_uuid = ?", defaultProjectUUID(projectUUID)).
 		Scan(ctx, &out)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get record UUIDs: %w", err)

@@ -17,7 +17,11 @@ import (
 
 // registerRoutes sets up all middleware and routes on the Fiber app.
 func registerRoutes(app *fiber.App, handlers *Handlers, cfg ServerConfig) {
-	// Global middleware
+	// Global middleware. The author banner registers first so X-Author lands
+	// directly under the Server header rather than trailing the request id.
+	if author := strings.TrimSpace(cfg.Author); author != "" {
+		app.Use(AuthorHeaderMiddleware(author))
+	}
 	app.Use(requestid.New())
 	app.Use(fiberlogger.New())
 	app.Use(fiberrecover.New())
@@ -31,7 +35,11 @@ func registerRoutes(app *fiber.App, handlers *Handlers, cfg ServerConfig) {
 	// CORS
 	if cfg.CORSAllowedOrigins != "" {
 		corsCfg := cors.Config{
-			AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+			// PATCH is load-bearing, not decorative: PATCH /api/findings/:id/status
+			// is the only way a browser client marks a finding triaged, and a method
+			// missing from this list fails the preflight — the request never reaches
+			// the route at all. Keep this in sync with the verbs registered below.
+			AllowMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 			AllowHeaders: []string{
 				"Content-Type", "Authorization", "X-Project-UUID", "X-User-Email",
 				// A browser client pushing traffic needs this through preflight;
@@ -177,6 +185,15 @@ func registerRoutes(app *fiber.App, handlers *Handlers, cfg ServerConfig) {
 	viewer.Get("/db/tables/:table/records", handlers.HandleListDBRecords)
 	viewer.Get("/db/tables/:table/records/:id", handlers.HandleGetDBRecord)
 
+	// --- Cloud storage reads (viewer) ---
+	// Registered here, above the view-only return, because they are reads: a
+	// view-only deployment that can list a scan but not fetch its result bundle
+	// is missing half the read surface. The storage writes stay with the other
+	// operator routes below. Scoped by project UUID via middleware; requires
+	// storage config to be enabled.
+	viewer.Get("/storage/source/:key", handlers.HandleStorageDownloadSource)
+	viewer.Get("/storage/results/:scan_uuid", handlers.HandleStorageDownloadResults)
+
 	// In view-only mode, skip all write/mutation routes (operator + admin).
 	if cfg.ViewOnly {
 		return
@@ -222,10 +239,8 @@ func registerRoutes(app *fiber.App, handlers *Handlers, cfg ServerConfig) {
 	admin.Post("/projects", handlers.HandleCreateProject)
 	admin.Put("/projects/:uuid", handlers.HandleUpdateProject)
 
-	// --- Cloud storage endpoints ---
-	// Scoped by project UUID via middleware. Requires storage config to be enabled.
-	viewer.Get("/storage/source/:key", handlers.HandleStorageDownloadSource)
-	viewer.Get("/storage/results/:scan_uuid", handlers.HandleStorageDownloadResults)
+	// --- Cloud storage writes ---
+	// The matching viewer reads are registered above the view-only return.
 	operator.Post("/storage/upload-source", handlers.HandleStorageUploadSource)
 	operator.Post("/storage/presign", handlers.HandleStoragePresign)
 

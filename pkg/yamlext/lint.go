@@ -2,7 +2,6 @@ package yamlext
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -142,7 +141,7 @@ func lintCommonYAML(def *ExtensionDef) []YAMLLintIssue {
 	// Validate regex patterns in matchers
 	for i, m := range def.Matchers {
 		if m.Regex != "" {
-			if _, err := regexp.Compile(m.Regex); err != nil {
+			if _, err := compileCached(m.Regex); err != nil {
 				issues = append(issues, YAMLLintIssue{
 					Severity: "error",
 					Message:  fmt.Sprintf("matchers[%d]: invalid regex %q: %v", i, m.Regex, err),
@@ -175,7 +174,7 @@ func lintCommonYAML(def *ExtensionDef) []YAMLLintIssue {
 	// Validate regex patterns in rules
 	for i, rule := range def.Rules {
 		if rule.Match.Regex != "" {
-			if _, err := regexp.Compile(rule.Match.Regex); err != nil {
+			if _, err := compileCached(rule.Match.Regex); err != nil {
 				issues = append(issues, YAMLLintIssue{
 					Severity: "error",
 					Message:  fmt.Sprintf("rules[%d].match.regex: invalid regex %q: %v", i, rule.Match.Regex, err),
@@ -183,7 +182,7 @@ func lintCommonYAML(def *ExtensionDef) []YAMLLintIssue {
 			}
 		}
 		if rule.Match.BodyRegex != "" {
-			if _, err := regexp.Compile(rule.Match.BodyRegex); err != nil {
+			if _, err := compileCached(rule.Match.BodyRegex); err != nil {
 				issues = append(issues, YAMLLintIssue{
 					Severity: "error",
 					Message:  fmt.Sprintf("rules[%d].match.body_regex: invalid regex %q: %v", i, rule.Match.BodyRegex, err),

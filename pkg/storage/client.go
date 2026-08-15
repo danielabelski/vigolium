@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -285,23 +286,36 @@ func (c *Client) List(ctx context.Context, projectUUID, prefix string) ([]Object
 	return objects, nil
 }
 
-// Exists reports whether the object at projectUUID/key is present in the
-// bucket. minio's GetObject is lazy and only fails on first Read, so callers
-// that want to fall back to a different key on miss should probe with Exists
-// first instead of relying on Download error handling.
-func (c *Client) Exists(ctx context.Context, projectUUID, key string) (bool, error) {
+// ErrObjectNotFound is returned by Stat when the object is absent. Callers
+// distinguish it from a transport/credential failure so a genuine outage isn't
+// reported to the client as a 404.
+var ErrObjectNotFound = errors.New("object not found")
+
+// Stat returns metadata for a single object without transferring its body.
+//
+// It doubles as the existence probe: minio's GetObject is lazy and only fails
+// on first Read, so a caller that needs to fall back to another key on a miss —
+// or to answer 404 before committing response headers — must ask first, and
+// Stat's size is what a streaming download needs for Content-Length. One
+// StatObject round trip serves both.
+func (c *Client) Stat(ctx context.Context, projectUUID, key string) (ObjectInfo, error) {
 	objKey, err := objectKey(projectUUID, key)
 	if err != nil {
-		return false, err
+		return ObjectInfo{}, err
 	}
-	_, err = c.mc.StatObject(ctx, c.bucket, objKey, minio.StatObjectOptions{})
-	if err == nil {
-		return true, nil
+	info, err := c.mc.StatObject(ctx, c.bucket, objKey, minio.StatObjectOptions{})
+	if err != nil {
+		if errResp := minio.ToErrorResponse(err); errResp.StatusCode == 404 || errResp.Code == "NoSuchKey" {
+			return ObjectInfo{}, fmt.Errorf("%s: %w", objKey, ErrObjectNotFound)
+		}
+		return ObjectInfo{}, fmt.Errorf("failed to stat %s: %w", objKey, err)
 	}
-	if errResp := minio.ToErrorResponse(err); errResp.StatusCode == 404 || errResp.Code == "NoSuchKey" {
-		return false, nil
-	}
-	return false, fmt.Errorf("failed to stat %s: %w", objKey, err)
+	return ObjectInfo{
+		Key:          key,
+		Size:         info.Size,
+		LastModified: info.LastModified,
+		ContentType:  info.ContentType,
+	}, nil
 }
 
 func (c *Client) Delete(ctx context.Context, projectUUID, key string) error {

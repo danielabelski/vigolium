@@ -59,7 +59,6 @@ export const COLOR_SCHEMES: ColorScheme[] = [
   { id: 'zenbones', name: 'Zenbones', base: 'light', colors: { bg: '#f0edec', surface: '#e8e2df', text: '#2c363c', textMuted: '#8e99a0', accent: '#a8334c', secondary: '#286486', tertiary: '#944927', border: '#cfc9c4', success: '#4f6c31', error: '#a8334c' } },
 ];
 
-import { isStaticBuild } from '@/lib/buildMode';
 
 export const DEFAULT_DARK_SCHEME = 'default-dark';
 export const DEFAULT_LIGHT_SCHEME = 'default-light';

@@ -4,7 +4,6 @@ import (
 	goruntime "runtime"
 	"testing"
 
-	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/work"
 )
@@ -220,12 +219,12 @@ func TestExecutorIPProvider_GetInsertionPoints(t *testing.T) {
 	}
 
 	// with cache: first call is a miss (computes + stores), second is a hit.
-	cache, _ := lru.New[string, []httpmsg.InsertionPoint](16)
+	cache := NewInsertionPointCache(16)
 	cached := &executorIPProvider{cache: cache}
 	if _, err := cached.GetInsertionPoints(raw, "req-2", true); err != nil {
 		t.Fatalf("GetInsertionPoints (cache miss) error = %v", err)
 	}
-	if cache.Len() == 0 {
+	if cache.Stats().Entries == 0 {
 		t.Error("expected cache to be populated after miss")
 	}
 	hit, err := cached.GetInsertionPoints(raw, "req-2", true)
@@ -240,7 +239,7 @@ func TestExecutorIPProvider_GetInsertionPoints(t *testing.T) {
 	if _, err := cached.GetInsertionPoints(raw, "req-2", false); err != nil {
 		t.Fatalf("GetInsertionPoints (shallow) error = %v", err)
 	}
-	if cache.Len() < 2 {
-		t.Errorf("shallow variant should add a distinct key; cache len = %d", cache.Len())
+	if entries := cache.Stats().Entries; entries < 2 {
+		t.Errorf("shallow variant should add a distinct key; cache len = %d", entries)
 	}
 }

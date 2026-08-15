@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -24,6 +25,22 @@ import (
 // source of truth shared with the CLI's --export-ca path so a CA exported
 // out-of-band matches the one the running proxy uses.
 const DefaultIngestProxyCADir = "~/.vigolium/ca"
+
+// serverHeader builds the `Server:` response header. The version stamped into
+// the binary already carries its own "v" prefix (pkg/cli.Version is "v0.4.1",
+// and .goreleaser.yaml stamps "v{{.Version}}"), so a hardcoded "v" in front of
+// it rendered as "Vigolium vv0.4.1". The prefix is normalized rather than just
+// dropped so a build stamped without one still reads as a version.
+func serverHeader(version string) string {
+	v := strings.TrimSpace(version)
+	switch {
+	case v == "":
+		v = "dev"
+	case !strings.HasPrefix(v, "v"):
+		v = "v" + v
+	}
+	return "Vigolium " + v + " (source https://github.com/vigolium/vigolium)"
+}
 
 // Server is the HTTP API server.
 type Server struct {
@@ -98,7 +115,7 @@ func NewServer(cfg ServerConfig, q queue.Queue, db *database.DB, repo *database.
 	}
 
 	app := fiber.New(fiber.Config{
-		ServerHeader: "Vigolium v" + cfg.Version + " (AGPL-3.0; source https://github.com/vigolium/vigolium)",
+		ServerHeader: serverHeader(cfg.Version),
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,

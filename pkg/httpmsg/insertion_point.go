@@ -7,7 +7,11 @@ package httpmsg
 //   - insertion_point_param.go: ParameterInsertionPoint (parameter-aware with encoding)
 //   - insertion_point_encoded.go: EncodedInsertionPoint (custom encoder support)
 
-import "sort"
+import (
+	"bytes"
+	"slices"
+	"sort"
+)
 
 // InsertionPointType represents where payload injection occurs in an HTTP request.
 type InsertionPointType byte
@@ -155,13 +159,11 @@ func CreateAllInsertionPoints(request []byte, includeNested bool) ([]InsertionPo
 		return nil, err
 	}
 
-	// Single clone shared across all insertion points from this call.
+	// Single clone shared across all insertion points from this call, along with
+	// the Content-Length layout they all resolve against.
 	// BuildRequest() never mutates baseRequest (it allocates a new result slice),
 	// so sharing without synchronization is safe.
-	shared := &sharedBaseRequest{
-		raw: make([]byte, len(request)),
-	}
-	copy(shared.raw, request)
+	shared := newSharedBaseRequest(bytes.Clone(request))
 
 	// Step 2: Create standard insertion points for each parameter
 	points := make([]InsertionPoint, 0, len(info.Parameters))
@@ -174,6 +176,7 @@ func CreateAllInsertionPoints(request []byte, includeNested bool) ([]InsertionPo
 	// Step 3: Optionally discover and create nested insertion points
 	if includeNested {
 		nestedIPs := discoverNestedInsertionPointsShared(shared, info.Parameters)
+		points = slices.Grow(points, len(nestedIPs))
 		for _, nip := range nestedIPs {
 			points = append(points, nip)
 		}
