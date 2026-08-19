@@ -90,7 +90,7 @@ var serverOpts = &serverOptions{
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
-	Short: "Start API server",
+	Short: "Serve the REST API, ingest live traffic, and scan it as it arrives",
 	Long: `Start the Vigolium REST API server (Fiber-based). Exposes scan endpoints, traffic ingestion, agent runs, and a Swagger UI.
 
 Common modes:

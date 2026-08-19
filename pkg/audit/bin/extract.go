@@ -105,8 +105,21 @@ func extract() (string, error) {
 		return dst, nil
 	}
 
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o755); err != nil {
+	// A per-process temp name, not a shared dst+".tmp": two vigolium processes
+	// extracting for the first time would otherwise write the same file and
+	// race each other's rename.
+	tmpFile, err := os.CreateTemp(cacheDir, name+".*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create vigolium-audit temp file: %w", err)
+	}
+	tmp := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("write vigolium-audit binary: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return "", fmt.Errorf("write vigolium-audit binary: %w", err)
 	}
 	if err := os.Chmod(tmp, 0o755); err != nil {
@@ -115,6 +128,14 @@ func extract() (string, error) {
 	}
 	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
+		// Windows refuses to replace a file another process holds open for
+		// execution, so a concurrent extractor that already installed this
+		// binary turns our rename into an error. The cache dir is keyed by
+		// content hash, so anything complete at dst is byte-identical to what
+		// we just built — adopt it instead of failing.
+		if info, statErr := os.Stat(dst); statErr == nil && info.Mode().IsRegular() && info.Size() == int64(len(data)) {
+			return dst, nil
+		}
 		return "", fmt.Errorf("install vigolium-audit binary: %w", err)
 	}
 	return dst, nil

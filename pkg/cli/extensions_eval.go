@@ -6,30 +6,37 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/vigolium/vigolium/internal/config"
-	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/jsext"
 )
 
 var (
 	evalStdin   bool
 	evalExtFile string
+	evalTimeout time.Duration
 )
 
 var extensionsEvalCmd = &cobra.Command{
 	Use:     "eval [code]",
-	Aliases: []string{"run", "exec"},
+	Aliases: []string{"exec"},
 	Short:   "Evaluate JavaScript code with vigolium.* APIs available",
-	Long:    `Run ad-hoc JavaScript with access to the full vigolium.* API surface.`,
-	Args:    cobra.MaximumNArgs(1),
-	RunE:    runExtensionsEval,
+	Long: `Run ad-hoc JavaScript with access to the full vigolium.* API surface.
+
+Takes the code as a positional argument, from a file (--ext-file, .ts is
+transpiled), or on stdin (--stdin). See also "vigolium js", which runs the
+same API surface and additionally sets a TARGET variable (--target) and
+selects an output format (--format).`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runExtensionsEval,
 }
 
 func init() {
 	extensionsEvalCmd.Flags().BoolVar(&evalStdin, "stdin", false, "Read JS code from stdin")
 	extensionsEvalCmd.Flags().StringVar(&evalExtFile, "ext-file", "", "Path to JS file to evaluate")
+	extensionsEvalCmd.Flags().DurationVar(&evalTimeout, "timeout", 30*time.Second, "Execution timeout")
 }
 
 func runExtensionsEval(cmd *cobra.Command, args []string) error {
@@ -47,31 +54,18 @@ func runExtensionsEval(cmd *cobra.Command, args []string) error {
 		settings = config.DefaultSettings()
 	}
 
-	// Build API options
-	opts := jsext.APIOptions{
-		ScriptID:    "eval",
-		ConfigVars:  settings.DynamicAssessment.Extensions.Variables,
-		AllowExec:   settings.DynamicAssessment.Extensions.AllowExec,
-		SandboxDir:  config.ExpandPath(settings.DynamicAssessment.Extensions.SandboxDir),
-		ExecTimeout: settings.DynamicAssessment.Extensions.ExecTimeout(),
+	// Build the API surface (DB, scope, HTTP stack) shared with
+	// `vigolium js`.
+	opts, cleanup, err := buildJSEvalOptions("eval", settings)
+	if err != nil {
+		return err
 	}
+	defer cleanup()
 
-	// Set up optional database repository
-	db, err := getDB()
-	if err == nil && db != nil {
-		defer closeDatabaseOnExit()
-		opts.Repository = database.NewRepository(db)
-	}
-
-	// Set up scope if configured
-	if settings.Scope.Host.Include != nil || settings.Scope.Path.Include != nil {
-		matcher := config.NewScopeMatcher(settings.Scope)
-		opts.ScopeMatcher = matcher
-		opts.ScopeConfig = &settings.Scope
-	}
-
-	// Evaluate
-	result := jsext.Eval(source, opts)
+	// Evaluate under the same bounded-execution helper as `vigolium js`,
+	// so an accidental infinite loop in a pasted snippet cannot hang the
+	// process.
+	result := evalWithTimeout(source, opts, "", evalTimeout)
 	if result.Error != nil {
 		return fmt.Errorf("eval error: %w", result.Error)
 	}

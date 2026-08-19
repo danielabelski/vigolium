@@ -160,8 +160,8 @@ Burp/proxy traffic as files in real time (`ls`/`grep`/`jq`).
 | `GET` | `/` | Swagger UI dashboard |
 
 All data endpoints are project-scoped via the `X-Project-UUID` header (mirrors
-the CLI `--project` flag). Ingestion endpoints additionally accept any
-`--alternative-ingest-key`.
+the CLI `--project-uuid` / `--project-name` flags). Ingestion endpoints
+additionally accept any `--alternative-ingest-key`.
 
 ## Examples
 

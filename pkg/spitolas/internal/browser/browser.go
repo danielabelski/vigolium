@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -627,6 +628,14 @@ func (b *Browser) IsConnected() bool {
 // to the same path are collapsed by systemBrowserBins. Parameterized by GOOS so
 // the ordering can be unit-tested on any host.
 func browserPreferenceOrderFor(goos string) []string {
+	return browserPreferenceOrderForEnv(goos, os.Getenv)
+}
+
+// browserPreferenceOrderForEnv is browserPreferenceOrderFor with the environment
+// lookup injected. The Windows list is built from LOCALAPPDATA/ProgramFiles, so
+// without this seam it could only be exercised on a Windows host — the same
+// reason systemBrowserBins takes its lookPath as a parameter.
+func browserPreferenceOrderForEnv(goos string, getenv func(string) string) []string {
 	switch goos {
 	case "linux":
 		return []string{
@@ -649,10 +658,53 @@ func browserPreferenceOrderFor(goos string) []string {
 			"chromium",
 		}
 	case "windows":
-		return []string{"chrome", "chromium"}
+		// Chrome is essentially never on PATH on Windows, so the absolute
+		// install locations carry this list; the bare names stay first so a
+		// user who *did* put one on PATH keeps that choice. Per-user installs
+		// (LOCALAPPDATA) are listed before machine-wide ones because when both
+		// exist the per-user one is what that user actually launches.
+		paths := []string{"chrome"}
+		local := getenv("LOCALAPPDATA")
+		progFiles := envOr(getenv, "ProgramFiles", `C:\Program Files`)
+		progFiles86 := envOr(getenv, "ProgramFiles(x86)", `C:\Program Files (x86)`)
+		if local != "" {
+			paths = append(paths, winPath(local, `Google\Chrome\Application\chrome.exe`))
+		}
+		paths = append(paths,
+			winPath(progFiles, `Google\Chrome\Application\chrome.exe`),
+			winPath(progFiles86, `Google\Chrome\Application\chrome.exe`),
+		)
+		if local != "" {
+			// Canary, after stable Chrome and before Chromium (mirrors darwin).
+			paths = append(paths, winPath(local, `Google\Chrome SxS\Application\chrome.exe`))
+		}
+		paths = append(paths, "chromium")
+		if local != "" {
+			paths = append(paths, winPath(local, `Chromium\Application\chrome.exe`))
+		}
+		return append(paths, winPath(progFiles, `Chromium\Application\chrome.exe`))
 	default:
 		return []string{"chrome", "chromium"}
 	}
+}
+
+// envOr returns the named environment variable, or fallback when it is unset.
+// The literal fallbacks matter on a stripped environment (a service account, a
+// CI shell) where ProgramFiles may be absent but the standard location is still
+// correct.
+func envOr(getenv func(string) string, name, fallback string) string {
+	if v := getenv(name); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// winPath joins a Windows base directory and a relative Windows path with a
+// literal backslash. filepath.Join is deliberately not used: it joins with the
+// *host's* separator, so building these on a linux/darwin machine (which the
+// unit tests do) would emit "C:\Program Files/Google\Chrome\...".
+func winPath(base, rel string) string {
+	return strings.TrimRight(base, `\`) + `\` + rel
 }
 
 // lookPathFound resolves name via exec.LookPath, returning the absolute path and
@@ -693,6 +745,17 @@ func systemBrowserBins(order []string, lookPath func(string) (string, bool), val
 // installs a shell script at /usr/bin/chromium-browser that just prints
 // "Please install it with: snap install chromium" and exits.
 func validateBrowserBin(binPath string) bool {
+	// Chrome on Windows is a GUI-subsystem binary: `chrome.exe --version` has
+	// no console to write to, so it exits without printing anything. Probing by
+	// output would therefore reject every real Chrome on Windows. Fall back to
+	// "the file is there and is a file" — the candidate paths this validates
+	// are specific install locations, not guesses, and a genuinely broken
+	// binary surfaces when the launch itself fails rather than silently.
+	if runtime.GOOS == "windows" {
+		info, err := os.Stat(binPath)
+		return err == nil && info.Mode().IsRegular()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

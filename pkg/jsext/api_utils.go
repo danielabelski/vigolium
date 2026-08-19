@@ -235,7 +235,11 @@ func utilsFuncDefs() []JSFuncDef {
 					ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 					defer cancel()
 
-					c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+					// /bin/sh off Windows (present on minimal containers where bash
+					// is not); an installed POSIX bash or PowerShell on Windows,
+					// which has neither.
+					shellName, shellArgs := procutil.ShellArgv("/bin/sh", "-c")
+					c := exec.CommandContext(ctx, shellName, append(append([]string{}, shellArgs...), cmd)...)
 					procutil.SetupProcessGroup(c) // kill the whole group on timeout, not just /bin/sh
 					c.WaitDelay = 2 * time.Second
 					stdout := &cappedWriter{max: maxExecCapture}
@@ -359,7 +363,12 @@ func utilsFuncDefs() []JSFuncDef {
 					lines := strings.Split(string(data), "\n")
 					jsArr := make([]interface{}, len(lines))
 					for i, l := range lines {
-						jsArr[i] = l
+						// Strip only the CR of a CRLF terminator. A wordlist or
+						// payload file authored on Windows would otherwise hand
+						// every entry back with a trailing \r, which an extension
+						// then injects verbatim. Trailing spaces are left intact —
+						// they can be significant in a payload.
+						jsArr[i] = strings.TrimSuffix(l, "\r")
 					}
 					return vm.ToValue(jsArr)
 				}

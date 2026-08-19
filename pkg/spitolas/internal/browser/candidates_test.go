@@ -264,6 +264,66 @@ func TestBrowserPreferenceOrderPlatformEntries(t *testing.T) {
 	if len(win) == 0 || win[0] != "chrome" {
 		t.Errorf("windows order should lead with chrome: %v", win)
 	}
+}
+
+// TestBrowserPreferenceOrderWindowsInstallPaths pins the Windows list to the
+// real install locations. Chrome is effectively never on PATH on Windows, so
+// before these were added the whole list was two bare names that never resolve
+// — every Windows user silently fell through to a Chrome-for-Testing download
+// even with Chrome installed. The env lookup is stubbed so this runs anywhere.
+func TestBrowserPreferenceOrderWindowsInstallPaths(t *testing.T) {
+	env := map[string]string{
+		"LOCALAPPDATA":      `C:\Users\tester\AppData\Local`,
+		"ProgramFiles":      `C:\Program Files`,
+		"ProgramFiles(x86)": `C:\Program Files (x86)`,
+	}
+	got := browserPreferenceOrderForEnv("windows", func(k string) string { return env[k] })
+
+	for _, want := range []string{
+		"chrome",
+		`C:\Users\tester\AppData\Local\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:\Users\tester\AppData\Local\Google\Chrome SxS\Application\chrome.exe`,
+		"chromium",
+		`C:\Program Files\Chromium\Application\chrome.exe`,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("windows order missing %q: %v", want, got)
+		}
+	}
+
+	// Real Chrome must sort ahead of Chromium, matching the documented policy.
+	chromeAt := slices.Index(got, `C:\Program Files\Google\Chrome\Application\chrome.exe`)
+	chromiumAt := slices.Index(got, `C:\Program Files\Chromium\Application\chrome.exe`)
+	if chromeAt < 0 || chromiumAt < 0 || chromeAt > chromiumAt {
+		t.Errorf("Chrome should precede Chromium: chrome=%d chromium=%d in %v", chromeAt, chromiumAt, got)
+	}
+
+	// Separators must be literal backslashes regardless of the host running the
+	// test — filepath.Join would emit "/" here on linux/darwin.
+	for _, p := range got {
+		if strings.Contains(p, "/") {
+			t.Errorf("windows path contains a forward slash: %q", p)
+		}
+	}
+}
+
+// TestBrowserPreferenceOrderWindowsBareEnv covers a stripped environment (a
+// service account, a locked-down CI shell): ProgramFiles may be unset, and the
+// standard literal locations must still be offered rather than a bare "C:\".
+func TestBrowserPreferenceOrderWindowsBareEnv(t *testing.T) {
+	got := browserPreferenceOrderForEnv("windows", func(string) string { return "" })
+	if !slices.Contains(got, `C:\Program Files\Google\Chrome\Application\chrome.exe`) {
+		t.Errorf("empty env should still yield the default Program Files path: %v", got)
+	}
+	// LOCALAPPDATA-derived entries have no sane default, so they are omitted
+	// rather than guessed at a wrong user profile.
+	for _, p := range got {
+		if strings.Contains(p, "AppData") {
+			t.Errorf("unset LOCALAPPDATA should not produce an AppData path: %q", p)
+		}
+	}
 
 	// An unknown GOOS must still yield a usable (non-empty) fallback list.
 	other := browserPreferenceOrderFor("freebsd")

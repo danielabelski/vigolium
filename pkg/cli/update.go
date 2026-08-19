@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,6 +24,10 @@ const (
 	// release from CDN metadata, verifies the checksum, and installs to
 	// ~/.local/bin/vigolium.
 	installScriptURL = "https://vigolium.com/install.sh"
+
+	// releasesPageURL is the manual-download fallback quoted to Windows users,
+	// where the shell installer above cannot run.
+	releasesPageURL = "https://github.com/vigolium/vigolium/releases"
 
 	nucleiTemplatesRepo = "https://github.com/projectdiscovery/nuclei-templates.git"
 
@@ -171,6 +176,15 @@ func runUpdateCmd(cmd *cobra.Command, args []string) error {
 // stderr wired to w. Shared by `vigolium update` (which streams to the console)
 // and the silent auto-update path (which captures to a buffer).
 func runInstallScript(ctx context.Context, w io.Writer) error {
+	// install.sh is a POSIX shell installer that writes to ~/.local/bin; there
+	// is no Windows equivalent, and a stock Windows host has neither bash nor
+	// curl on PATH. Fail with the actual upgrade path rather than letting
+	// exec surface a bare "bash: file not found".
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("self-update is not supported on Windows: %s is a POSIX shell installer.\n"+
+			"  Upgrade by downloading the latest vigolium_<version>_windows_amd64.zip from\n"+
+			"  %s and replacing the vigolium.exe on your PATH", installScriptURL, releasesPageURL)
+	}
 	cmd := exec.CommandContext(ctx, "bash", "-c", "curl -fsSL "+installScriptURL+" | bash")
 	cmd.Stdout = w
 	cmd.Stderr = w

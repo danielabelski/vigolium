@@ -95,10 +95,12 @@ the same source tree under a single AgenticScan, with post-pass findings
 deduplication.
 
 Driver selection (--driver):
-  auto       preflight the resolved coding-agent CLI (claude or codex) on
-             PATH; if present run audit, else fall back to piolium without
+  auto       preflight the audit leg: the resolved coding-agent CLI (claude
+             or codex) on PATH, the audit binary embedded, and at least one
+             audit-supported mode in the chain. If all hold, run audit and
+             never consult piolium; otherwise fall back to piolium without
              ever launching the embedded binary (default). Mid-run audit
-             failures surface — piolium is not silently retried.
+             failures surface - piolium is not silently retried.
   both       run audit then piolium unconditionally (sequential)
   audit      run only audit
   piolium    run only piolium (no audit, no fallback)
@@ -157,7 +159,7 @@ func init() {
 // read from the same state regardless of which entry point is invoked.
 func registerAuditFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
-	f.StringVar(&auditDriver, "driver", agent.AuditDriverAuto, "Audit driver: auto (audit; fall back to piolium when claude/codex CLI missing), both (audit then piolium), audit, or piolium (default auto)")
+	f.StringVar(&auditDriver, "driver", agent.AuditDriverAuto, "Audit driver: auto (run audit; fall back to piolium only when audit cannot start - claude/codex CLI missing, binary not embedded, or no audit-supported mode in the chain), both (audit then piolium), audit, or piolium (default auto)")
 	f.StringVar(&auditIntensity, "intensity", "balanced", "Audit intensity preset: quick, balanced, or deep")
 	f.StringVar(&auditMode, "mode", "", "Audit mode override (overrides --intensity). Shared modes: lite, balanced, deep, revisit, confirm, merge. Driver-specific: piolium=longshot/smoke/diff/status, audit=reinvest/refresh/mock/diff/status")
 	f.StringVar(&auditModes, "modes", "", "Run a chain of modes back-to-back (comma-separated, e.g. deep,refresh,confirm). Overrides --mode/--intensity. Stops on the first non-complete mode. audit runs the chain natively (--modes); piolium chains via sequential runs collapsed into one row; with driver=auto/both, modes a driver can't run are skipped on that driver's leg.")
@@ -1121,10 +1123,13 @@ func ensureAuditDriversFeasible(driver string) error {
 //   - both              → run audit (if embedded) then piolium (if its
 //     runtime is available), each independently; a failure of one does
 //     not abort the other.
-//   - auto              → run audit; if it succeeds the audit is done
-//     and piolium is never consulted. Only when audit fails (or isn't
-//     embedded) does piolium run as a fallback — and only then is its
-//     availability checked and any "skipping piolium" message shown.
+//   - auto              → preflight the audit leg (coding-agent CLI on
+//     PATH, binary embedded, at least one audit-supported mode in the
+//     chain). If the preflight passes, audit runs and piolium is never
+//     consulted - whatever the audit's own outcome. Only when the
+//     preflight fails is audit skipped without launching and piolium
+//     run as the fallback, and only then is piolium's availability
+//     checked and any "skipping piolium" message shown.
 func orchestrateAuditDrivers(ctx context.Context, driver, parentSessionDir, parentUUID, projectUUID, absTarget string,
 	settings *config.Settings, repo *database.Repository, streamToConsole bool, authOverride agent.AuthOverride) []*driverPlan {
 

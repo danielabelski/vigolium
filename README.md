@@ -36,6 +36,17 @@ curl -fsSL https://vigolium.com/install.sh | bash
 npm install -g @vigolium/vigolium
 ```
 
+### Windows
+
+The npm install above works on Windows. Alternatively, download
+`vigolium_<version>_windows_amd64.zip` from the
+[releases page](https://github.com/vigolium/vigolium/releases), extract it, and
+put `vigolium.exe` somewhere on your `PATH`.
+
+> Windows ships as x64 only; on Windows ARM it runs under emulation. The shell
+> installer above is POSIX-only, so `vigolium update` is not available on
+> Windows — re-run the npm install or download the newer zip to upgrade.
+
 <details>
 <summary>Other method like Docker or Build from source</summary>
 
@@ -203,7 +214,7 @@ vigolium ol --prompt "..."              # one-shot prompt (-p implies headless)
 Agentic scan modes:
 - **Autopilot**: autonomous scanning. CLI calls `pkg/olium/autopilot.Run` directly; the server adds vigolium-audit prep, auth setup, and a frozen context bundle around the same loop
 - **Swarm**: AI-guided vulnerability scanning supporting targeted single-request and full-scope (`--discover`). Master agent analyzes inputs, selects modules, generates custom JS extensions, runs code audit and SAST, executes scans, and triages results
-- **Audit**: source-code audit via `vigolium agent audit` — a unified dispatcher that runs the embedded **vigolium-audit** (claude/codex) and/or **piolium** (Pi-native) harnesses, selected with `--driver {auto|both|audit|piolium}` (default `auto`: run audit, fall back to piolium only if audit fails). Separate harnesses; **do not** route through olium. Per-driver child rows under one parent AgenticScan with post-pass findings dedup. There is no standalone `agent piolium` subcommand — piolium runs via `--driver=piolium`
+- **Audit**: source-code audit via `vigolium agent audit` — a unified dispatcher that runs the embedded **vigolium-audit** (claude/codex) and/or **piolium** (Pi-native) harnesses, selected with `--driver {auto|both|audit|piolium}` (default `auto`: preflight the audit leg and run it when the resolved `claude`/`codex` CLI is on PATH, the binary is embedded, and the chain has an audit-supported mode; otherwise fall back to piolium without launching audit. A mid-run audit failure surfaces rather than switching drivers). Separate harnesses; **do not** route through olium. Per-driver child rows under one parent AgenticScan with post-pass findings dedup. There is no standalone `agent piolium` subcommand — piolium runs via `--driver=piolium`
 
 > **Standalone audit CLIs**: the agentic security audit also ships as standalone CLIs you can run independently of Vigolium: [vigolium-audit](https://github.com/vigolium/vigolium-audit) (the harness behind `vigolium agent audit`) and [piolium](https://github.com/vigolium/piolium) (the Pi-native driver behind `vigolium agent audit --driver=piolium`).
 

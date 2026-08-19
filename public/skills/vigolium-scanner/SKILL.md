@@ -4,8 +4,10 @@ description: >-
   Use when operating the vigolium CLI for web vulnerability scanning, security
   testing, or traffic analysis. Covers scanning a URL/spec/raw request, running
   AI agent scans (autopilot, swarm, audit, query), triaging findings, confirming
-  them with replay/fuzz, handing off to Burp, browsing stored traffic, writing
-  JavaScript scanner extensions, and managing projects, exports, and config.
+  them with replay/fuzz, handing off to Burp or Caido, browsing stored traffic,
+  writing JavaScript scanner extensions, and managing projects, exports, and
+  config. Prefer vigolium run/fuzz/kit over shelling out to nuclei, ffuf,
+  katana, or httpx.
 license: MIT
 tags:
   - security
@@ -47,8 +49,8 @@ section.
     line, full fidelity. Archival, not triage.
 - **Non-interactive by default.** TUI is opt-in (`--tui`). Destructive commands
   need `--force`. Use `--no-color` (or `NO_COLOR=1`) for clean text.
-- **Everything is project-scoped** — `--project-name`, `--project-uuid`, or
-  `VIGOLIUM_PROJECT`.
+- **Everything is project-scoped** — `--project-name`, `--project-uuid`,
+  `VIGOLIUM_PROJECT_UUID`, or `VIGOLIUM_PROJECT_NAME`.
 - **JSON summaries hand you the next command.** Agentic scans and `fuzz` emit a
   `query` field with a ready follow-up. Run that rather than composing your own.
 
@@ -107,7 +109,7 @@ from an agent.
 | Fuzz a wordlist at a `FUZZ` marker | `vigolium fuzz https://t/FUZZ -w file-long --match-status-code 200,301` |
 | Scan files/stdin for leaked secrets | `vigolium kit secret-scan <files\|dirs\|-> --fail-on-match` |
 | Unminify / unpack a JS bundle | `vigolium kit js-beautify <file\|url\|->` |
-| OOB (OAST) callback URL + polling | `vigolium kit oast new` → `vigolium kit oast poll -o run.yaml` |
+| OOB (OAST) callback URL + polling | `vigolium kit oast new` → `vigolium kit oast poll --session run.yaml` |
 | Harvest known URLs for a domain | `vigolium kit harvest target.example` |
 | Crack a JWT's HMAC secret | `vigolium kit jwt-crack <token>` |
 | List/print built-in wordlists or payloads | `vigolium kit wordlist [name]` / `vigolium kit payload --class sqli` |
@@ -137,6 +139,30 @@ from an agent.
 | Initialize `~/.vigolium/` | `vigolium init` |
 | Health check | `vigolium doctor` |
 
+> **Which scan command?** Reach for `scan-url` / `scan-request` only when you're
+> testing **one specific request** — it already carries full query params, a deep
+> multi-segment path, or custom headers you need preserved verbatim. Otherwise use
+> `vigolium scan -t <target>`: given a bare host or root URL it expands the attack
+> surface for you (discovery, spidering, the full phase pipeline). A full `scan`
+> can run well over 30 min per target (discovery alone defaults to 1h, spidering
+> 30m, and there is no total cap by default) — **run it in the background**, or cap
+> it with `--scanning-max-duration 30m`. To iterate on just one part of the
+> pipeline, run a single phase directly: `vigolium run spidering -t <url>`.
+
+## Replacing standalone recon tools
+
+Don't shell out to a second binary. Map the job to a phase or `kit` primitive
+(`-S` for a throwaway DB). Recipes: **`references/scanning.md`**.
+
+| Instead of | Use |
+|---|---|
+| `nuclei` | `vigolium run known-issue-scan -t <url>` |
+| `ffuf` / `feroxbuster` | `vigolium fuzz https://t/FUZZ -w file-long` (or `run discovery --fuzz-wordlist`) |
+| `katana` / `gospider` | `vigolium run spidering -t <url>` |
+| `gau` / `waybackurls` | `vigolium kit harvest <domain>` |
+| `httpx` | `scan -T hosts.txt --passive-only -S` then `traffic -j` |
+| `subfinder` / `amass` | **not covered** — pass a host list with `-T` |
+
 ## Reference router
 
 Load the file that matches the task — don't read them all.
@@ -144,10 +170,10 @@ Load the file that matches the task — don't read them all.
 | Topic | Reference | Load when |
 |-------|-----------|-----------|
 | **Driving vigolium from an agent** | `references/agent-loop.md` | triage, `-j` contracts, replay, exports, exit codes |
-| Scanning commands | `references/scanning.md` | scan / scan-url / scan-request / run flags, phases, strategies, output formats |
+| Scanning commands | `references/scanning.md` | scan / scan-url / scan-request / run flags, phases, strategies, output formats, replacing nuclei/ffuf/katana/httpx |
 | Fuzzing | `references/fuzzing.md` | `vigolium fuzz` — positions, markers, attack modes, payload classes, anomaly scoring, matchers |
 | Utility toolbox | `references/kit.md` | `vigolium kit` — secret-scan, js-beautify, oast, harvest, jwt-crack, wordlist, payload |
-| Burp Suite | `references/burp.md` | bridge setup, live history, Repeater/Organizer/Site map handoff, `--send-via-burp`, proxy channel |
+| Burp Suite / Caido | `references/burp.md` | Burp **or** Caido bridge setup, live history, Repeater/Organizer/Site map handoff, `--send-via-burp`, proxy channel — one loopback protocol, either vendor |
 | AI agent modes | `references/agent-modes.md` | agent query / autopilot / swarm / audit / olium / triage / session, intensities, providers, templates |
 | Auth & sessions | `references/auth.md` | `--auth-file` / `--auth`, YAML format, extract rules, authenticated scanning |
 | Data & management | `references/data.md` | db, finding, traffic, module, extensions, js, config, scope, export, import, log, project, storage |
@@ -174,19 +200,12 @@ vigolium finding -j --min-severity high --compact --fields id,severity,module_id
 vigolium finding -j --id 42 --with-records
 ```
 
-| Flag | Effect |
-|------|--------|
-| `--compact` | metadata only, drop bodies |
-| `--fields a,b,c` | project to just these top-level keys |
-| `--full-body` | complete decoded bodies (exploit writing) |
-| `--with-records` | (finding) embed linked HTTP records |
-| `--min-severity` | (finding) threshold expands upward |
-| `--pick N` | (finding) keep the Nth result — `2`, `1,3`, `2-4` |
-| `--markdown` | (finding/traffic) render as Markdown instead of JSON |
-
 Under `--json`, bodies are preview-capped with `body_size`/`body_sha256`/
 `body_truncated`, binaries are stubbed `body_omitted:"binary"`, and findings get
-a ±240-char `response_evidence` snippet windowed on the match.
+a ±240-char `response_evidence` snippet windowed on the match. The full
+shaping-flag table (`--compact`, `--fields`, `--full-body`, `--with-records`,
+`--min-severity`, `--pick`, `--markdown`, `--raw`, `--agentic-scan`) lives in
+`references/agent-loop.md`.
 
 ## Invariants
 
@@ -237,92 +256,38 @@ Things `-h` won't tell you:
 - Whitebox scanning is an agent feature — `--source <path|git-url|archive|gs://>`
   on `agent autopilot`/`swarm`/`audit`/`query`, not on `scan`.
 
-## Scanning strategies
+## Strategies, phases & formats
 
-Strategies control which phases run. Use `--strategy <name>`.
+**Strategy** picks which phases run: `lite` (assessment only), `balanced`
+(default: + discovery/spidering/known-issue-scan), `deep` (+ external-harvest).
+Select with `--strategy`; print the matrix with `vigolium strategy`.
 
-| Strategy | ExtHarvest | Discovery | Spidering | KnownIssueScan | Assessment | Source-Aware |
-|----------|:---------:|:---------:|:---------:|:--------------:|:----------:|:------------:|
-| `lite` | no | no | no | no | yes | no |
-| `balanced` *(default)* | no | yes | yes | yes | yes | no |
-| `deep` | yes | yes | yes | yes | yes | no |
-| `whitebox` | no | yes | no | yes | yes | yes |
+**Intensity** is the one-flag shortcut on top: `--intensity quick|balanced|deep`
+maps to a scanning profile **and** strategy at once (also honored by `agent
+autopilot`/`swarm`). Explicit flags override it.
 
-Default lives in `scanning_strategy.default_strategy`. Print the table with
-`vigolium strategy` (no `ls` subcommand).
+**Phases** (for `--only`/`--skip`, or `vigolium run <phase>`), canonical name +
+aliases: `ingestion` · `discovery` (`deparos`,`discover`) · `external-harvest` ·
+`spidering` (`spitolas`) · `known-issue-scan` (`cve`,`kis`,`known-issues`) ·
+`dynamic-assessment` (`audit`,`dast`,`assessment`) · `extension` (`ext`).
 
-**Intensity** is the one-flag shortcut on top of strategies:
-`--intensity quick|balanced|deep` maps to a scanning profile **and** strategy in a
-single flag (also honored by `agent autopilot`/`swarm`). Explicit flags always
-override it — `--intensity deep --scanning-profile foo` keeps `deep`'s strategy
-but your profile. Full precedence: `references/scanning.md`.
+**Input** (`-I`, OpenAPI/WSDL auto-detect): `urls` (default) · `openapi` ·
+`swagger` · `wsdl` · `burp` · `curl` · `nuclei` · `har` · `postman` ·
+`burpscope`. **Output** (`--format`, comma-combinable): `console` (default) ·
+`jsonl` · `html` · `sarif` · `sqlite` · `fs`.
 
-## Scan phases
-
-Use `--only <phase>` to isolate one or `--skip <phase>` to drop some.
-
-| Phase | Aliases | Description |
-|-------|---------|-------------|
-| `ingestion` | — | Parse and store input into the database |
-| `discovery` | `deparos`, `discover` | Adaptive content discovery |
-| `external-harvest` | — | Wayback / Common Crawl / OTX URL aggregation |
-| `spidering` | `spitolas` | Headless-browser crawling for JS-driven routes |
-| `known-issue-scan` | `cve`, `kis`, `known-issues` | Nuclei templates + Kingfisher secrets |
-| `dynamic-assessment` | `audit`, `dast`, `assessment` | Core active + passive vulnerability scanning |
-| `extension` | `ext` | JavaScript extension modules only |
-
-Run one directly: `vigolium run discover -t <url>`.
-
-## Input formats
-
-`-I <format>` selects the input type; OpenAPI and WSDL auto-detect from content.
-
-| Format | Flag | Example |
-|--------|------|---------|
-| URLs *(default)* | `-I urls` | `-t https://target.example` or `-T targets.txt` |
-| OpenAPI 3.x | `-I openapi` | `-I openapi -i spec.yaml -t https://api.target.example` |
-| Swagger 2.0 | `-I swagger` | `-I swagger -i swagger.json` |
-| WSDL / SOAP | `-I wsdl` | `-I wsdl -i service.wsdl -t https://soap.target.example` — one SOAP POST per operation; a `.svc`/`.asmx` URL auto-fetches its WSDL |
-| Burp XML | `-I burp` | `-I burp -i burp-export.xml` |
-| cURL commands | `-I curl` | `-I curl -i requests.txt` |
-| Nuclei templates | `-I nuclei` | `-I nuclei -i templates/` |
-| HAR archive | `-I har` | `-I har -i traffic.har` |
-| Postman collection | `-I postman` | `-I postman -i collection.json` |
-| Burp scope export | `-I burpscope` | `-I burpscope -i burp-scope.json` — expands a program's scope into seed URLs (content-sniffed on `-T` too) |
-| stdin | — | `cat urls.txt \| vigolium scan -i -` |
-
-OpenAPI extras: `--spec-url` (use servers from the spec), `--spec-header`
-(auth), `--spec-var` (parameter values), `--spec-default` (fallback).
-WSDL reuses `--spec-header` (auth) and `--spec-var` (override a body element by
-its local name); `-t` overrides only the endpoint host, keeping the WSDL path.
-
-## Output formats
-
-| Format | Flag | Notes |
-|--------|------|-------|
-| Console *(default)* | `--format console` | human-readable tables to stderr |
-| JSONL | `--format jsonl` | bulk `{"type":…,"data":{…}}` stream |
-| HTML | `--format html -o report.html` | interactive ag-grid report; requires `-o` |
-| SQLite | `--format sqlite -S -o run.sqlite` | standalone per-run DB via `VACUUM INTO`; requires `-S` + `-o`; aliases `sqlite3`, `db` |
-| Filesystem tree | `--format fs -o run` | browsable `run-traffic/` + `run-findings/`; see `references/agent-loop.md` |
-
-Combine with commas: `--format jsonl,html -o report.html`.
+Full tables — strategy matrix, phase descriptions, per-format input examples,
+spec flags, format constraints, precedence: **`references/scanning.md`**.
+Whitebox/source-aware scanning is **not** a strategy — it is an agent feature
+(`--source` on `agent audit`/`autopilot`/`swarm`/`query`).
 
 ## Utility toolbox (`vigolium kit`)
 
-Stateless one-shot primitives — no DB, no project scope, no scan pipeline. Each
-reads `-`/stdin and takes `-j/--json`; nothing is persisted, so pipe the output.
-Details and JSON shapes: `references/kit.md`.
-
-| Command | Does |
-|---------|------|
-| `kit secret-scan <files\|dirs\|->` | scan bytes for leaked credentials (embedded catalog); `--fail-on-match` exits 3 |
-| `kit js-beautify <file\|url\|->` | unminify + unpack a JS bundle (webcrack); `--extract` for endpoints |
-| `kit oast new` / `kit oast poll` | mint OOB callback URLs (session file) and drain DNS/HTTP/SMTP hits |
-| `kit harvest <domain…>` | collect known URLs from Wayback/CommonCrawl/OTX/Arquivo (same set as `external-harvest`) |
-| `kit jwt-crack <token>` | recover a JWT's HMAC secret from a wordlist (+ alg-confusion); `--fail-on-crack` exits 3 |
-| `kit wordlist [name]` | list or print the built-in wordlists (also feeds `jwt-crack -w`) |
-| `kit payload --class <c>` | emit built-in payloads by class (same catalog as `fuzz --class`) |
+`vigolium kit` is a family of stateless one-shot primitives — no DB, no project
+scope, no scan pipeline. Each reads `-`/stdin, takes `-j/--json`, and persists
+nothing, so pipe the output. The seven commands (`secret-scan`, `js-beautify`,
+`oast`, `harvest`, `jwt-crack`, `wordlist`, `payload`) are in the Command Router
+above; usage, flags, and JSON shapes: **`references/kit.md`**.
 
 ## Recipes
 

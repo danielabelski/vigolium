@@ -15,7 +15,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/core/network"
 	hostlimit "github.com/vigolium/vigolium/pkg/core/ratelimit"
 	"github.com/vigolium/vigolium/pkg/core/services"
-	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/jsext"
@@ -64,42 +63,13 @@ func runJsCmd(cmd *cobra.Command, args []string) error {
 		settings = config.DefaultSettings()
 	}
 
-	// Build API options
-	opts := jsext.APIOptions{
-		ScriptID:    "js",
-		ConfigVars:  settings.DynamicAssessment.Extensions.Variables,
-		AllowExec:   settings.DynamicAssessment.Extensions.AllowExec,
-		SandboxDir:  config.ExpandPath(settings.DynamicAssessment.Extensions.SandboxDir),
-		ExecTimeout: settings.DynamicAssessment.Extensions.ExecTimeout(),
+	// Build the API surface (DB, scope, HTTP stack) shared with
+	// `vigolium extensions eval`.
+	opts, cleanup, err := buildJSEvalOptions("js", settings)
+	if err != nil {
+		return err
 	}
-
-	// Set up optional database
-	db, err := getDB()
-	if err == nil && db != nil {
-		defer closeDatabaseOnExit()
-		repo := database.NewRepository(db)
-		opts.Repository = repo
-
-		// Set project UUID
-		projUUID, projErr := resolveProjectUUID()
-		if projErr == nil {
-			opts.ProjectUUID = projUUID
-		}
-	}
-
-	// Set up scope if configured
-	if settings.Scope.Host.Include != nil || settings.Scope.Path.Include != nil {
-		matcher := config.NewScopeMatcher(settings.Scope)
-		opts.ScopeMatcher = matcher
-		opts.ScopeConfig = &settings.Scope
-	}
-
-	// Set up HTTP client
-	httpRequester, cleanup, err := setupJsHTTPStack(settings)
-	if err == nil {
-		defer cleanup()
-		opts.HTTPClient = httpRequester
-	}
+	defer cleanup()
 
 	// Create VM and execute with timeout
 	result := evalWithTimeout(source, opts, jsOpts.target, jsOpts.timeout)

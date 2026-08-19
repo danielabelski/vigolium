@@ -55,6 +55,12 @@ vigolium traffic -B http://127.0.0.1:9009 --host acme.test
   (a flag-name alias, so it renders no line of its own in `--help`), not two
   flags — either name sets the same value, and the env var is
   `$VIGOLIUM_BURP_BRIDGE_URL` under both.
+- **Everything in this file works identically against Caido.** Burp and Caido
+  serve the *same* bridge protocol on the same loopback URL (default port 9009),
+  so which vendor is listening is auto-detected per reply — no flag declares it.
+  Records are then labelled `source: "burp"` or `source: "caido"` accordingly,
+  and `--source caido` filters to Caido's. Read every `-B http://127.0.0.1:9009`
+  below as "your Burp or Caido bridge."
 - The URL is validated: `http://` only, a **loopback host** (`127.0.0.1`, `::1`,
   or `localhost`), an explicit **port**, and **no path**. Anything else is a hard
   error before a request is made.
@@ -105,12 +111,13 @@ a `browser` object instead of a comparison.
 | `vigolium agent autopilot -t <url> -B <url>` | pulls live Burp history into the project DB **before** the run, so the pre-scan and operator can mine it |
 | `vigolium server -B <url>` | merges live Burp traffic into `/api/http-records` |
 
-Live records carry `"source": "burp"` and a `burp:`-prefixed UUID. They have no
+Live records carry `"source": "burp"` (or `"caido"` when a Caido bridge answered
+— the vendor is detected per reply) and a `burp:`-prefixed UUID. They have no
 database row, which is why `replay --in-replace` refuses them.
 
 The bridge query is **skipped** (database-only) when the filter set can't be
-expressed over Burp's history: `--source` set to anything other than `burp`, or
-any min-risk-score / remark filter.
+expressed over the live history: `--source` set to anything other than the
+listening vendor (`burp`/`caido`), or any min-risk-score / remark filter.
 
 `import -B` is idempotent — changed responses are refreshed, unchanged requests
 are not duplicated — so re-running it during an engagement is safe. It takes no

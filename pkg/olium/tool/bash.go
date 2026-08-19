@@ -91,8 +91,19 @@ func (*bashTool) Name() string     { return "bash" }
 func (*bashTool) Label() string    { return "Run shell command" }
 func (*bashTool) Category() string { return CategoryBuiltin }
 func (*bashTool) IsReadOnly() bool { return false }
+
+// bashShell/bashFlag are the POSIX shell this tool uses everywhere except
+// Windows, where procutil.ShellArgv substitutes an installed POSIX bash or
+// PowerShell. The resolved shell is named in the description and schema so the
+// model writes for the dialect it will actually be run through.
+const (
+	bashShell = "bash"
+	bashFlag  = "-lc"
+)
+
 func (*bashTool) Description() string {
-	return "Execute a shell command with bash -lc. Returns combined stdout+stderr. Use for compilation, tests, git operations, searches, anything scriptable."
+	return fmt.Sprintf("Execute a shell command with %s. Returns combined stdout+stderr. Use for compilation, tests, git operations, searches, anything scriptable.",
+		procutil.ShellLabel(bashShell, bashFlag))
 }
 
 func (*bashTool) Schema() map[string]any {
@@ -101,7 +112,7 @@ func (*bashTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"command": map[string]any{
 				"type":        "string",
-				"description": "Shell command to execute. Runs via bash -lc.",
+				"description": "Shell command to execute. Runs via " + procutil.ShellLabel(bashShell, bashFlag) + ".",
 			},
 			"timeout_seconds": map[string]any{
 				"type":        "integer",
@@ -134,7 +145,11 @@ func (*bashTool) Execute(ctx context.Context, args map[string]any, onUpdate Upda
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, "bash", "-lc", cmdStr)
+	// IsCatastrophic above is written against POSIX shell syntax. On a Windows
+	// host that falls through to PowerShell it still blocks the POSIX spellings
+	// but not their PowerShell equivalents — it is a backstop, not the sandbox.
+	shellName, shellArgs := procutil.ShellArgv(bashShell, bashFlag)
+	cmd := exec.CommandContext(runCtx, shellName, append(append([]string{}, shellArgs...), cmdStr)...)
 	// Kill the whole process group on timeout/cancel, and give children a short
 	// grace window to drain the pipe before Wait gives up on them.
 	procutil.SetupProcessGroup(cmd)

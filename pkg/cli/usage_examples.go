@@ -577,9 +577,11 @@ var runExamples = FormatExamples(
 	"",
 	"# Short alias",
 	"vigolium r discovery -t https://example.com",
-	"# Phase aliases: deparos=discovery, discover=discovery, spitolas=spidering, audit/dast/assessment=dynamic-assessment, ext=extension",
+	"# Phase aliases: deparos=discovery, discover=discovery, spitolas=spidering, dast/assessment=dynamic-assessment, ext=extension",
 	"vigolium run deparos -t https://example.com",
 	"vigolium run dast -t https://example.com",
+	"# 'audit' works on --only/--skip but not here: 'vigolium run audit' is rejected",
+	"# as ambiguous with 'vigolium agent audit' (the AI source-code audit)",
 )
 
 var agentExamples = FormatExamples(

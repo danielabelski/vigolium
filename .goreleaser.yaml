@@ -35,17 +35,28 @@ builds:
     goos:
       - linux
       - darwin
-      # - windows
+      - windows
     goarch:
       - amd64
       - arm64
-    # ignore:
-    #   - goos: windows
-    #     goarch: arm64
+    # windows/arm64 is deliberately not shipped: the two embedded helper
+    # binaries (vigolium-audit, jstangle) are `bun build --compile` outputs and
+    # Bun has no bun-windows-arm64 target, so an arm64 Windows build would ship
+    # with the audit driver broken and jstangle silently stubbed out. Windows on
+    # ARM runs the amd64 build under emulation instead.
+    ignore:
+      - goos: windows
+        goarch: arm64
 
 archives:
   - formats:
       - tar.gz
+    # zip on Windows: tar.gz needs a third-party tool on older Windows, and zip
+    # is what every Windows install path (Explorer, Expand-Archive) handles.
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
     name_template: "vigolium_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:

@@ -69,6 +69,92 @@ jobs:
       - name: Enforce coverage floor
         run: make coverage-gate
 
+  cross-compile:
+    name: Cross-compile ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    # The shipped matrix includes windows/amd64, but every other job here runs
+    # natively on linux — so nothing else would notice a unix-only import (a
+    # bare syscall call, an os/exec of `bash`) until release day. This job is
+    # the guard: it compiles and vets the whole tree for the target GOOS.
+    # windows/arm64 is deliberately absent — the Bun-compiled helper binaries
+    # have no such target, so it is not shipped (see .goreleaser.yaml).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      # The target platform's jstangle binary must exist for its go:embed to
+      # resolve. Only that one is built — the other four are irrelevant here.
+      - name: Stage jstangle for ${{ matrix.goos }}/${{ matrix.goarch }}
+        run: make build-jstangle-target JSTANGLE_TARGET=${{ matrix.goos }}-${{ matrix.goarch }}
+
+      # vet type-checks every package including tests; the build additionally
+      # proves the main binary links. The audit blob is not needed — `all:_bin`
+      # matches the empty embed dir and surfaces as a runtime error instead.
+      - name: Vet and build for ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go vet $(go list ./... | grep -Ev '/pkg/spitolas/rod|/platform/|/node_modules/')
+          go build -o vigolium-${{ matrix.goos }}-${{ matrix.goarch }}.exe ./cmd/vigolium
+
+      - name: Upload binary for the runtime smoke test
+        uses: actions/upload-artifact@v4
+        with:
+          name: vigolium-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: vigolium-${{ matrix.goos }}-${{ matrix.goarch }}.exe
+          retention-days: 1
+
+  windows-smoke:
+    name: Windows runtime smoke
+    needs: cross-compile
+    runs-on: windows-latest
+    # Cross-compiling proves the tree builds for Windows; it proves nothing
+    # about whether the binary RUNS there. This job exercises the artifact the
+    # release actually ships — process start, config load, DB open, command
+    # dispatch — none of which a linux-hosted `go build` can reach. It
+    # deliberately downloads the cross-built exe rather than rebuilding, so the
+    # runner needs neither Go nor Bun.
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: vigolium-windows-amd64
+
+      - name: Version and command dispatch
+        shell: pwsh
+        run: |
+          $exe = ".\vigolium-windows-amd64.exe"
+          & $exe version
+          if ($LASTEXITCODE -ne 0) { throw "version exited $LASTEXITCODE" }
+          & $exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "--help exited $LASTEXITCODE" }
+
+      # Opens the SQLite store and writes to %USERPROFILE% — the paths most
+      # likely to break on Windows and invisible to a compile-only check.
+      - name: Database and project initialization
+        shell: pwsh
+        run: |
+          $exe = ".\vigolium-windows-amd64.exe"
+          & $exe project list
+          if ($LASTEXITCODE -ne 0) { throw "project list exited $LASTEXITCODE" }
+          & $exe module ls | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "module ls exited $LASTEXITCODE" }
+
   coverage-report:
     name: Combined coverage (report only)
     runs-on: ubuntu-latest

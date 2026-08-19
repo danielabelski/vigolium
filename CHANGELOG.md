@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.4.3] - 2026-08-19
+
+A **Windows support** release: vigolium now ships a windows/amd64 build, and every path that quietly assumed POSIX (shell, browser discovery, installers, line endings) is platform-aware. No module changes (registry stays at 207 active + 116 passive).
+
+### Added
+
+- Windows (amd64) builds across goreleaser, `make public-release`, and the npm package, shipped as a `.zip`.
+- The embedded `vigolium-audit` and `jstangle` helpers are built and staged for Windows.
+- `procutil.ShellArgv` resolves the host shell: POSIX `bash`/`sh` elsewhere, an installed Git Bash/MSYS2 bash or PowerShell on Windows (WSL's `System32\bash.exe` is rejected).
+- CI cross-compiles and vets the tree for windows/amd64, then smoke-tests that artifact on a Windows runner.
+- `make sync-skills` mirrors `public/skills/` to the standalone skills repo; `make build-jstangle-target` stages one target triple.
+
+### Fixed
+
+- Chrome was never found on Windows: the candidate list was two bare PATH names, so every crawl silently downloaded Chrome for Testing instead.
+- `chrome.exe --version` prints nothing on Windows (GUI subsystem), so validation rejected every real install; it now stats the file.
+- `vigolium update` on Windows failed with a bare `bash: file not found` instead of naming the zip download path.
+- `doctor --fix` ran `curl … | bash` for bun and claude on Windows; it now uses each vendor's PowerShell installer.
+- `findBun` returned the extensionless candidate path, which fails to exec against `bun.exe`.
+- Two processes extracting the embedded audit binary raced on a shared `.tmp` name; extraction is now per-process and adopts an identical binary a peer already installed.
+- The audit blob platform guard read every PE image as "windows, unknown arch"; it now decodes the COFF machine field.
+- `vigolium.readFile()` kept the `\r` of a CRLF file on every line, which extensions then injected verbatim.
+- `build/npm/bin/vigolium.js` was swallowed by a `bin` ignore rule and never committed, so `make npm-build` failed on a fresh clone.
+
+### Changed
+
+- **Breaking:** the legacy `VIGOLIUM_PROJECT` env var is gone — use `VIGOLIUM_PROJECT_UUID` or the new `VIGOLIUM_PROJECT_NAME`; an explicit `--project-uuid`/`--project-name` still wins.
+- windows/arm64 is not shipped (Bun has no `bun-windows-arm64` target); the npm x64 package claims `arm64` so ARM hosts install and emulate.
+- The `vigolium-scanner` skill maps standalone recon tools (nuclei, ffuf, katana, gau, httpx) onto vigolium phases and `kit`, and documents scan-vs-scan-url choice, scan duration, the strategy matrix, and the Caido bridge.
+- The duplicated skill tree under `platform/vigolium-audit/` was removed; `public/skills/` is the single source.
+
 ## [v0.4.2] - 2026-08-15
 
 A **hardening and performance** release for the REST API server and the scan hot paths: bounded memory everywhere a caller could previously make the server allocate without limit, plus a cross-project record-scoping fix. No module changes (registry stays at 207 active + 116 passive).

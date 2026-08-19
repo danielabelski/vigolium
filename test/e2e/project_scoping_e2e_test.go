@@ -107,9 +107,9 @@ func runVigolium(t *testing.T, bin, home string, timeout time.Duration, args ...
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
-		// Must be empty: an inherited VIGOLIUM_PROJECT would silently decide
+		// Must be empty: an inherited project env var would silently decide
 		// the very scoping this test is asserting.
-		"VIGOLIUM_PROJECT=",
+		"VIGOLIUM_PROJECT_NAME=",
 		"VIGOLIUM_PROJECT_UUID=",
 		"VIGOLIUM_DB_PATH=",
 	)

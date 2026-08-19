@@ -310,18 +310,41 @@ func findBun() (string, error) {
 		return p, nil
 	}
 	candidate := config.ExpandPath("~/.bun/bin/bun")
-	if _, err := exec.LookPath(candidate); err == nil {
-		return candidate, nil
+	// Return LookPath's resolved path, not the candidate: on Windows the file
+	// on disk is bun.exe, and LookPath appends the PATHEXT extension it matched.
+	// Handing back the extensionless candidate would fail at exec time.
+	if p, err := exec.LookPath(candidate); err == nil {
+		return p, nil
 	}
 	return "", fmt.Errorf("bun not found in PATH or ~/.bun/bin/bun")
 }
 
-func fixBun(ctx context.Context, _ *config.Settings) error {
-	cmd := exec.CommandContext(ctx, "bash", "-c", "curl -fsSL https://bun.sh/install | bash")
+// runVendorInstaller runs a third-party install script, picking the flavor that
+// exists on this host: the POSIX `curl … | bash` one-liner everywhere, and the
+// vendor's PowerShell installer on Windows (a stock Windows box has neither
+// bash nor curl on PATH, so the POSIX form fails with a bare
+// "bash: file not found" that says nothing about what to do next).
+func runVendorInstaller(ctx context.Context, label, posixURL, windowsURL string) error {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// -NoProfile keeps a user's profile from altering the install, and
+		// irm|iex is the invocation both vendors document for Windows.
+		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+			"-Command", "irm "+windowsURL+" | iex")
+	} else {
+		cmd = exec.CommandContext(ctx, "bash", "-c", "curl -fsSL "+posixURL+" | bash")
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("bun install script failed: %w", err)
+		return fmt.Errorf("%s install script failed: %w", label, err)
+	}
+	return nil
+}
+
+func fixBun(ctx context.Context, _ *config.Settings) error {
+	if err := runVendorInstaller(ctx, "bun", "https://bun.sh/install", "https://bun.sh/install.ps1"); err != nil {
+		return err
 	}
 	// Verify installation.
 	if _, err := findBun(); err != nil {
@@ -331,13 +354,7 @@ func fixBun(ctx context.Context, _ *config.Settings) error {
 }
 
 func fixClaude(ctx context.Context, _ *config.Settings) error {
-	cmd := exec.CommandContext(ctx, "bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("claude install script failed: %w", err)
-	}
-	return nil
+	return runVendorInstaller(ctx, "claude", "https://claude.ai/install.sh", "https://claude.ai/install.ps1")
 }
 
 func fixChromium(ctx context.Context, _ *config.Settings) error {

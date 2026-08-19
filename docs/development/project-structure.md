@@ -100,8 +100,9 @@ internal/runner, pkg/server, pkg/cli   ← top-level wiring
 ## Multi-tenancy
 
 All scan data is scoped to a **project** via `project_uuid` on every data table.
-The global `--project-uuid` / `--project-name` flags or `VIGOLIUM_PROJECT`
-environment variable scope CLI operations; the `X-Project-UUID` header scopes
+The global `--project-uuid` / `--project-name` flags or the
+`VIGOLIUM_PROJECT_UUID` / `VIGOLIUM_PROJECT_NAME`
+environment variables scope CLI operations; the `X-Project-UUID` header scopes
 server API operations. See
 [../projects.md](../projects.md).
 

@@ -34,7 +34,7 @@ Higher-precedence sources override lower ones. Within the config file, environme
 | `VIGOLIUM_API_KEY` | API key for the REST server and ingestor client authentication |
 | `VIGOLIUM_DB_PATH` | Default SQLite database path when `--db` is not set — pins a shell to one session database (see [Session database](#session-database)) |
 | `VIGOLIUM_PROJECT_UUID` | Active project UUID when no project flag is supplied |
-| `VIGOLIUM_PROJECT` | Legacy alias for `VIGOLIUM_PROJECT_UUID` |
+| `VIGOLIUM_PROJECT_NAME` | Active project name when no project flag is supplied (looked up in the database; `VIGOLIUM_PROJECT_UUID` wins if both are set) |
 | `VIGOLIUM_PROXY` | HTTP/SOCKS proxy URL, used when `--proxy` is not set |
 | `VIGOLIUM_DEFAULT_UA` | Override the configured outbound User-Agent selector or value |
 | `VIGOLIUM_BURP_BRIDGE_URL` | Default loopback Burp bridge URL for bridge-aware commands |
@@ -58,7 +58,7 @@ The value goes through the same expansion as the config file's `database.sqlite.
 
 **Reads** additionally treat the file as a standalone source with project scoping off — the same thing `-S/--stateless` does — so every row in it is visible regardless of which project UUID wrote it. This applies to every command that reads through the shared query path (`finding`, `traffic`, `replay`, `export`, and record lookups like `fuzz -u <uuid>`), and is skipped until the file exists, so the first read on a fresh session prints an empty table instead of failing. **Writes are unaffected**: `scan` and `ingest` write to the pinned database normally, and the variable never sets the `--stateless` flag itself — on `scan`/`scan-url`/`scan-request`/`run` that flag means "scan into a throwaway temp database and discard it" (and is mutually exclusive with `--db`), while on `ingest` `-S` is `--scan-on-receive`.
 
-Because reads are unscoped, `--project` / `VIGOLIUM_PROJECT_UUID` become inert on `finding` and `traffic` while a session database is pinned — the file's own contents are the scope.
+Because reads are unscoped, `--project-uuid` / `--project-name` / `VIGOLIUM_PROJECT_UUID` / `VIGOLIUM_PROJECT_NAME` become inert on `finding` and `traffic` while a session database is pinned — the file's own contents are the scope.
 
 Precedence and opt-outs:
 

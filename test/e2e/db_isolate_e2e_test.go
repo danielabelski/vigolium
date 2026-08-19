@@ -54,7 +54,8 @@ func runIsolatedDiscover(t *testing.T, bin, target, destDB, home, scratchTmp str
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
 		"TMPDIR="+scratchTmp,
-		"VIGOLIUM_PROJECT=",
+		"VIGOLIUM_PROJECT_UUID=",
+		"VIGOLIUM_PROJECT_NAME=",
 	)
 	var out strings.Builder
 	cmd.Stdout = &out

@@ -22,7 +22,7 @@ Built-in defaults
 ```
 
 - **Default project** — `00000000-0000-0000-defa-c01001000001`, used whenever no project is selected.
-- **Selection precedence** — `--project-uuid` > `--project-name` > `VIGOLIUM_PROJECT_UUID` > legacy `VIGOLIUM_PROJECT` > `~/.vigolium/active-project` > default. On the server, `X-Project-UUID` selects the project.
+- **Selection precedence** — `--project-uuid` > `--project-name` > `VIGOLIUM_PROJECT_UUID` > `VIGOLIUM_PROJECT_NAME` > `~/.vigolium/active-project` > default. On the server, `X-Project-UUID` selects the project.
 - **Project config** is a partial YAML overlay (same shape as a scanning profile) at `~/.vigolium/projects/<uuid>/config.yaml`; only the keys it sets are overridden.
 - **Management safety** — `VIGOLIUM_PROJECT_READONLY=true` disables mutating
   `project` CLI subcommands. Project selection scopes data; it is not an

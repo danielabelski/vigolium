@@ -1,6 +1,7 @@
 package bin
 
 import (
+	"encoding/binary"
 	"errors"
 	"runtime"
 	"testing"
@@ -33,7 +34,20 @@ func synthHeader(goos, goarch string) []byte {
 		}
 		return h
 	case "windows":
-		return []byte{'M', 'Z', 0x90, 0x00}
+		// DOS stub + e_lfanew at 0x3C pointing at a PE signature, then the
+		// COFF Machine field. 0x48 bytes is the smallest layout that carries
+		// a decodable machine word.
+		h := make([]byte, 0x48)
+		copy(h, []byte{'M', 'Z', 0x90, 0x00})
+		binary.LittleEndian.PutUint32(h[0x3C:], 0x40) // e_lfanew
+		copy(h[0x40:], []byte("PE\x00\x00"))
+		switch goarch {
+		case "amd64":
+			binary.LittleEndian.PutUint16(h[0x44:], 0x8664) // IMAGE_FILE_MACHINE_AMD64
+		case "arm64":
+			binary.LittleEndian.PutUint16(h[0x44:], 0xAA64) // IMAGE_FILE_MACHINE_ARM64
+		}
+		return h
 	}
 	return nil
 }
@@ -50,7 +64,13 @@ func TestDetectBlobPlatform(t *testing.T) {
 		{"elf-arm64", synthHeader("linux", "arm64"), "linux", "arm64", true},
 		{"macho-amd64", synthHeader("darwin", "amd64"), "darwin", "amd64", true},
 		{"macho-arm64", synthHeader("darwin", "arm64"), "darwin", "arm64", true},
-		{"pe-windows", synthHeader("windows", ""), "windows", "", true},
+		{"pe-amd64", synthHeader("windows", "amd64"), "windows", "amd64", true},
+		{"pe-arm64", synthHeader("windows", "arm64"), "windows", "arm64", true},
+		// An unrecognized machine word still identifies the OS; an empty arch
+		// means "known OS, unknown arch" and must not fail the guard.
+		{"pe-unknown-machine", synthHeader("windows", ""), "windows", "", true},
+		// A bare DOS stub with no reachable PE header: still Windows, no arch.
+		{"pe-truncated", []byte{'M', 'Z', 0x90, 0x00}, "windows", "", true},
 		{"too-short", []byte{0x7f, 'E'}, "", "", false},
 		{"garbage", []byte("not an executable header at all"), "", "", false},
 		{"empty", nil, "", "", false},

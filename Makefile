@@ -1,7 +1,7 @@
 .PHONY: build build-prof build-embedded build-all snapshot release public public-release github-release prepare-public-scripts clean test test-unit test-integration test-spitolas-browser test-e2e test-e2e-api test-e2e-agent test-e2e-rest-scan test-e2e-postgres test-canary sanity-check test-e2e-vampi test-e2e-dvwa test-e2e-juiceshop test-e2e-browser-fallback test-e2e-piolium test-benchmark test-benchmark-whitebox test-benchmark-blackbox test-benchmark-all test-benchmark-crapi test-benchmark-vuln-java test-benchmark-vuln-nginx test-benchmark-coverage test-agent-benchmark test-agent-parsing test-agent-quality test-agent-handoff test-agent-benchmark-e2e benchmark-agent-generate test-coverage coverage-gate coverage-combined test-coverage-check test-race test-ci test-xbow test-xbow-ssti test-xbow-xss test-xbow-sqli test-xbow-lfi test-xbow-cmdi test-xbow-ssrf test-xbow-xxe xbow-build lint verify-generated fmt tidy deps deps-chrome deps-chrome-update install install-gotestsum swagger help postgres-up postgres-down postgres-logs postgres-status crapi-up crapi-down crapi-logs crapi-status juiceshop-up juiceshop-down juiceshop-logs juiceshop-status vampi-up vampi-down vampi-logs vampi-status vulnerable-java-up vulnerable-java-down vulnerable-java-logs vulnerable-java-status vulnerable-nginx-up vulnerable-nginx-down vulnerable-nginx-logs vulnerable-nginx-status apps-up apps-down docker docker-build docker-build-prod docker-run docker-push docker-buildx-setup docker-publish update-jstangle ensure-jstangle sync-audit update-audit ensure-audit ensure-audit-dist restage-host-audit build-audit update-ui ssh-testbed-keygen ssh-testbed-up ssh-testbed-down ssh-testbed-status ssh-testbed-logs generate-metadata prepare-release-scripts cdn-sync bump-version npm-build npm-pack npm-publish
 # Phony targets defined in their own sections below (declared here so a stray
 # same-named file can never shadow them).
-.PHONY: all build-linux build-darwin build-windows deps-chrome-cft sync-platform \
+.PHONY: all build-linux build-darwin build-windows deps-chrome-cft sync-platform sync-skills \
 	test-canary-postgres test-pg-full test-e2e-autonomous test-e2e-scorecard \
 	access-lab-up access-lab-down access-lab-logs access-lab-status \
 	setup-agent-codex test-smoke-autopilot test-smoke-autopilot-rest test-smoke-autopilot-prior test-smoke-autopilot-ginandjuice \
@@ -77,7 +77,10 @@ INSTALL_BASE_URL=https://cdn.vigolium.com/$(R2_PREFIX)
 R2_PUBLIC_PREFIX=vigolium-release
 PUBLIC_INSTALL_BASE_URL=https://cdn.vigolium.com/$(R2_PUBLIC_PREFIX)
 PUBLIC_DIST_DIR=build/dist-public
-PUBLIC_TARGETS=linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+# windows/arm64 is intentionally absent: the embedded vigolium-audit and
+# jstangle helpers are Bun-compiled and Bun has no bun-windows-arm64 target.
+# Windows on ARM runs the amd64 artifact under emulation.
+PUBLIC_TARGETS=linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 # Version without leading 'v' — matches the install.sh tarball-name convention.
 PUBLIC_VERSION=$(patsubst v%,%,$(VERSION))
 
@@ -732,7 +735,7 @@ test-smoke-autopilot-juiceshop: build juiceshop-up
 
 # jstangle binary management
 # update-jstangle and ensure-jstangle are already declared .PHONY at the top.
-.PHONY: verify-jstangle-fresh build-jstangle-current
+.PHONY: verify-jstangle-fresh build-jstangle-current build-jstangle-target
 JSTANGLE_SRC_DIR=platform/jstangle/bin
 JSTANGLE_DST_DIR=internal/resources/deparos/jstangle
 
@@ -764,6 +767,29 @@ build-jstangle-current:
 	cd ../..; \
 	mkdir -p $(JSTANGLE_RES_DST_DIR); \
 	cp "$(JSTANGLE_SRC_DIR)/$$name" "$(JSTANGLE_RES_DST_DIR)/$$name"
+
+# Build and stage the jstangle helper for ONE target triple, e.g.
+#     make build-jstangle-target JSTANGLE_TARGET=windows-amd64
+# The cross-compile CI job needs the target platform's binary present to satisfy
+# its go:embed (internal/resources/deparos/embed_jstangle_<os>_<arch>.go) but has
+# no reason to spend time on the other four.
+build-jstangle-target:
+	@set -e; \
+	target="$(JSTANGLE_TARGET)"; \
+	if [ -z "$$target" ]; then \
+		echo "\033[31m[!] usage: make build-jstangle-target JSTANGLE_TARGET=<os>-<arch>\033[0m"; \
+		exit 1; \
+	fi; \
+	name="jstangle-$$target"; \
+	case "$$target" in windows-*) name="$$name.exe" ;; esac; \
+	cd platform/jstangle; \
+	bun install --linker isolated --ignore-scripts; \
+	mkdir -p bin; \
+	bun run scripts/build-binaries.ts --target=$$target; \
+	cd ../..; \
+	mkdir -p $(JSTANGLE_RES_DST_DIR); \
+	cp "$(JSTANGLE_SRC_DIR)/$$name" "$(JSTANGLE_RES_DST_DIR)/$$name"; \
+	echo "$(PREFIX) Staged $$name for cross-compile"
 
 # Pre-test step: compare the executable's compiled source fingerprint and
 # protocol contract with the current TypeScript tree. A source edit that keeps
@@ -839,7 +865,8 @@ sync-audit:
 # build.ts ALL_TARGETS list. The host's matching artifact is staged at
 # $(AUDIT_BIN_HOST) for go:embed; the rest stay under the dist dir for
 # cross-compile workflows that swap _bin/vigolium-audit manually.
-AUDIT_BIN_TARGETS=darwin-arm64 darwin-x64 linux-arm64 linux-x64
+# windows is x64-only: Bun has no bun-windows-arm64 compile target.
+AUDIT_BIN_TARGETS=darwin-arm64 darwin-x64 linux-arm64 linux-x64 windows-x64
 AUDIT_DIST_DIR=$(AUDIT_TS_DIR)/build/dist
 
 # Build vigolium-audit binary for every supported os/arch and stage the host's
@@ -853,6 +880,7 @@ update-audit:
 	@set -e; \
 	for target in $(AUDIT_BIN_TARGETS); do \
 		bin="$(AUDIT_DIST_DIR)/vigolium-audit-$$target"; \
+		case "$$target" in windows-*) bin="$$bin.exe" ;; esac; \
 		if [ ! -x "$$bin" ]; then \
 			echo "\033[31m[!] vigolium-audit binary not produced at $$bin\033[0m"; \
 			exit 1; \
@@ -891,7 +919,9 @@ build-audit: update-audit
 ensure-audit-dist:
 	@missing=0; \
 	for target in $(AUDIT_BIN_TARGETS); do \
-		if [ ! -x "$(AUDIT_DIST_DIR)/vigolium-audit-$$target" ]; then missing=1; fi; \
+		bin="$(AUDIT_DIST_DIR)/vigolium-audit-$$target"; \
+		case "$$target" in windows-*) bin="$$bin.exe" ;; esac; \
+		if [ ! -x "$$bin" ]; then missing=1; fi; \
 	done; \
 	if [ "$$missing" = "1" ]; then \
 		echo "$(PREFIX) vigolium-audit cross-compile blobs missing, building all targets..."; \
@@ -955,6 +985,32 @@ update-ui:
 # Sync platform sub-repos to standalone repos
 sync-platform:
 	@bash build/scripts/sync-platform.sh
+
+# Standalone skills checkout (github.com/vigolium/skills), expected as a sibling
+# of the vigolium repo. Override on the command line, e.g.
+# `make sync-skills SKILLS_UPSTREAM=/path/to/skills`.
+SKILLS_UPSTREAM ?= ../skills
+SKILLS_SRC=public/skills
+
+# Mirror public/skills/ into the standalone skills repo. Unlike sync-platform
+# (which does every sub-repo, then commits and pushes), this touches only the
+# skills tree and leaves the commit to you. Run `make skill-flags` first if the
+# CLI flag surface changed, so flags.generated.md ships current.
+# Warns and exits 0 when the checkout is absent, so CI invocations don't fail
+# just because the sibling clone isn't present.
+sync-skills:
+	@set -e; \
+	if [ ! -d "$(SKILLS_UPSTREAM)" ]; then \
+		echo "\033[33m[!] skills checkout not found at $(SKILLS_UPSTREAM); skipping sync.\033[0m"; \
+		echo "    Clone github.com/vigolium/skills as a sibling of this repo, or override with"; \
+		echo "    'make sync-skills SKILLS_UPSTREAM=/path/to/skills'."; \
+		exit 0; \
+	fi; \
+	echo "$(PREFIX) Syncing $(SKILLS_SRC)/ -> $(SKILLS_UPSTREAM)/"; \
+	rsync -a --delete --exclude='.git' --exclude='.DS_Store' \
+		"$(SKILLS_SRC)/" "$(SKILLS_UPSTREAM)/"; \
+	echo "$(PREFIX) Sync complete. Review and commit in $(SKILLS_UPSTREAM):"; \
+	git -C "$(SKILLS_UPSTREAM)" status --short || true
 
 # Docker parameters
 DOCKER_IMAGE=vigolium
@@ -1111,6 +1167,7 @@ release: prepare-release-scripts ensure-audit-dist
 			fi; \
 		done; \
 		mc cp build/dist/*.tar.gz r2/vigolium-dist/$(R2_PREFIX)/; \
+		mc cp build/dist/*.zip r2/vigolium-dist/$(R2_PREFIX)/; \
 		mc cp build/dist/checksums.txt r2/vigolium-dist/$(R2_PREFIX)/; \
 		mc cp build/dist/metadata.json r2/vigolium-dist/$(R2_PREFIX)/; \
 		mc cp build/scripts/nightly-install.sh r2/vigolium-dist/$(R2_PREFIX)/install.sh; \
@@ -1131,6 +1188,7 @@ public-release: prepare-public-scripts ensure-audit-dist
 	@for target in $(PUBLIC_TARGETS); do \
 		GOOS=$${target%/*}; GOARCH=$${target#*/}; \
 		bin_name="vigolium"; \
+		if [ "$${GOOS}" = "windows" ]; then bin_name="vigolium.exe"; fi; \
 		pkg_name="vigolium_$(PUBLIC_VERSION)_$${GOOS}_$${GOARCH}"; \
 		stage_dir="$(PUBLIC_DIST_DIR)/$${pkg_name}"; \
 		echo "$(PREFIX)   -> $${GOOS}/$${GOARCH}"; \
@@ -1140,15 +1198,19 @@ public-release: prepare-public-scripts ensure-audit-dist
 			$(GOBUILD) $(LDFLAGS) \
 			-o $${stage_dir}/$${bin_name} ./cmd/vigolium \
 			|| exit 1; \
-		COPYFILE_DISABLE=1 tar --no-xattrs -czf $(PUBLIC_DIST_DIR)/$${pkg_name}.tar.gz -C $${stage_dir} $${bin_name} \
-			|| exit 1; \
+		if [ "$${GOOS}" = "windows" ]; then \
+			(cd $${stage_dir} && zip -q -X ../$${pkg_name}.zip $${bin_name}) || exit 1; \
+		else \
+			COPYFILE_DISABLE=1 tar --no-xattrs -czf $(PUBLIC_DIST_DIR)/$${pkg_name}.tar.gz -C $${stage_dir} $${bin_name} \
+				|| exit 1; \
+		fi; \
 		rm -rf $${stage_dir}; \
 	done
 	@$(MAKE) restage-host-audit
 	@echo "$(PREFIX) Writing checksums.txt..."
 	@cd $(PUBLIC_DIST_DIR) && \
-		(command -v shasum >/dev/null 2>&1 && shasum -a 256 *.tar.gz > checksums.txt \
-		 || sha256sum *.tar.gz > checksums.txt)
+		(command -v shasum >/dev/null 2>&1 && shasum -a 256 *.tar.gz *.zip > checksums.txt \
+		 || sha256sum *.tar.gz *.zip > checksums.txt)
 	@echo "$(PREFIX) Writing metadata.json..."
 	@printf '{\n  "version": "%s",\n  "commit": "%s",\n  "build_time": "%s"\n}\n' \
 		"$(VERSION)" "$(COMMIT_HASH)" "$(BUILD_TIME)" > $(PUBLIC_DIST_DIR)/metadata.json
@@ -1156,6 +1218,7 @@ public-release: prepare-public-scripts ensure-audit-dist
 	@mc rm --recursive --force r2/vigolium-dist/$(R2_PUBLIC_PREFIX)/ || true
 	@echo "$(PREFIX) Uploading public artifacts to R2..."
 	mc cp $(PUBLIC_DIST_DIR)/*.tar.gz r2/vigolium-dist/$(R2_PUBLIC_PREFIX)/
+	mc cp $(PUBLIC_DIST_DIR)/*.zip r2/vigolium-dist/$(R2_PUBLIC_PREFIX)/
 	mc cp $(PUBLIC_DIST_DIR)/checksums.txt r2/vigolium-dist/$(R2_PUBLIC_PREFIX)/
 	mc cp $(PUBLIC_DIST_DIR)/metadata.json r2/vigolium-dist/$(R2_PUBLIC_PREFIX)/
 	mc cp build/public-install.sh r2/vigolium-dist/$(R2_PUBLIC_PREFIX)/install.sh
@@ -1444,7 +1507,9 @@ help:
 	@echo "    make deps-chrome-update  Update browser version+URL (NAME= PLATFORM= VERSION= URL=)"
 	@echo "    make swagger          Sync Swagger spec to embedded copy"
 	@echo "    make update-ui        Copy fresh UI builds into public/ (report template + dashboard)"
+	@echo "    make skill-flags      Regenerate the coding-agent skill's flag reference"
 	@echo "    make sync-platform    Sync platform sub-repos to their standalone repos"
+	@echo "    make sync-skills      Mirror public/skills/ into the sibling skills repo (no commit)"
 	@echo ""
 	@echo "\033[33m  VULNERABLE APPS (Docker)\033[0m"
 	@echo "    make apps-up          Start all vulnerable apps"

@@ -22,8 +22,21 @@ case "$goarch" in
   *) echo "[stage-audit-blob] unsupported goarch: $goarch" >&2; exit 1 ;;
 esac
 
+# Bun emits the windows target with an .exe suffix. The destination name stays
+# extensionless for every target because it is a fixed go:embed path
+# (pkg/audit/bin/embed.go); the extractor re-adds .exe at runtime on Windows.
+blob_ext=""
+if [ "$goos" = "windows" ]; then
+  blob_ext=".exe"
+  if [ "$goarch" != "amd64" ]; then
+    echo "[stage-audit-blob] windows/$goarch is not a supported target -- Bun has no" >&2
+    echo "  bun-windows-arm64 compile target, so no audit blob exists for it." >&2
+    exit 1
+  fi
+fi
+
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
-src="$repo_root/platform/vigolium-audit/build/dist/vigolium-audit-$goos-$blob_arch"
+src="$repo_root/platform/vigolium-audit/build/dist/vigolium-audit-$goos-$blob_arch$blob_ext"
 dst="$repo_root/pkg/audit/bin/_bin/vigolium-audit"
 
 if [ ! -f "$src" ]; then
@@ -42,9 +55,12 @@ case "$goos" in
   darwin)
     echo "$desc" | grep -q "Mach-O" || {
       echo "[stage-audit-blob] $src is not a Mach-O binary (got: $desc)" >&2; exit 1; } ;;
+  windows)
+    echo "$desc" | grep -q "PE32" || {
+      echo "[stage-audit-blob] $src is not a PE binary (got: $desc)" >&2; exit 1; } ;;
 esac
 
 mkdir -p "$(dirname "$dst")"
 cp "$src" "$dst"
 chmod +x "$dst"
-echo "[stage-audit-blob] staged vigolium-audit-$goos-$blob_arch -> _bin/vigolium-audit ($desc)"
+echo "[stage-audit-blob] staged vigolium-audit-$goos-$blob_arch$blob_ext -> _bin/vigolium-audit ($desc)"

@@ -137,7 +137,7 @@ vigolium import ./src/vigolium-results --format html -o audit-report.html
 Notes:
 - Imported findings inherit the current project's UUID and default `finding_source = "import"` when the field is empty.
 - Unknown envelope types are counted and reported at the end (e.g. for forward-compatibility).
-- Use `--project-uuid` / `--project-name` (or `VIGOLIUM_PROJECT`) to target a specific project.
+- Use `--project-uuid` / `--project-name` (or `VIGOLIUM_PROJECT_UUID` / `VIGOLIUM_PROJECT_NAME`) to target a specific project.
 
 ---
 
@@ -279,7 +279,7 @@ List database records with filtering, sorting, and display options. The target t
 
 ### Agent JSON output flags
 
-With `-j`/`--json`, `db ls` emits the same compact, token-aware object as `finding`/`traffic` and accepts the shared shaping flags: `--compact` (metadata only), `--fields a,b,c` (project top-level keys), `--full-body` (complete bodies). `--with-records` is finding-only; `db stats -j` is the exception that emits its raw stats struct. See SKILL.md recipe 14c.
+With `-j`/`--json`, `db ls` emits the same compact, token-aware object as `finding`/`traffic` and accepts the shared shaping flags: `--compact` (metadata only), `--fields a,b,c` (project top-level keys), `--full-body` (complete bodies). `--with-records` is finding-only; `db stats -j` is the exception that emits its raw stats struct. See [agent-loop.md → Token discipline](agent-loop.md#token-discipline).
 
 ### Examples
 
@@ -487,7 +487,7 @@ With `-j`/`--json`, `finding` emits **one compact, token-aware object** (bodies 
 | `--full-body` | — | bool | `false` | Complete bodies — no preview caps, no binary/static stubbing |
 | `--with-records` | — | bool | `false` | Embed each finding's linked HTTP records as a `records:[…]` triage bundle |
 
-`--compact`, `--fields`, and `--full-body` are shared with `traffic` and `db ls`; `--with-records`, `--min-severity`, and `--agentic-scan` are finding-only. See SKILL.md recipe 14c.
+`--compact`, `--fields`, and `--full-body` are shared with `traffic` and `db ls`; `--with-records`, `--min-severity`, and `--agentic-scan` are finding-only. See [agent-loop.md → Token discipline](agent-loop.md#token-discipline).
 
 ### Available columns
 
@@ -1035,7 +1035,7 @@ vigolium project delete <project-uuid>             # aliases: rm, remove
 
 **Usage:** `vigolium storage <subcommand>`
 
-Manage cloud-storage objects scoped to the **active project** (selected via `--project-uuid`, `--project-name`, or `VIGOLIUM_PROJECT`). Mirrors the REST endpoints under `/api/storage/*`.
+Manage cloud-storage objects scoped to the **active project** (selected via `--project-uuid`, `--project-name`, `VIGOLIUM_PROJECT_UUID`, or `VIGOLIUM_PROJECT_NAME`). Mirrors the REST endpoints under `/api/storage/*`.
 
 **Requires** `storage.enabled: true` in `vigolium-configs.yaml` (or `VIGOLIUM_STORAGE_ENABLED=true`) plus `storage.driver`, `storage.bucket`, `storage.access_key`, and `storage.secret_key`. When storage is disabled, every subcommand prints a tip showing how to enable it and exits cleanly (no error).
 

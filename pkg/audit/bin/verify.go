@@ -56,14 +56,43 @@ func detectBlobPlatform(data []byte) (goos, goarch string, ok bool) {
 		return "darwin", goarch, true
 	}
 
-	// PE / Windows. Arch detection is skipped: vigolium-audit is not shipped
-	// for windows today, but recognizing the OS keeps the guard honest if it
-	// ever is mis-staged.
+	// PE / Windows. The DOS stub starts with "MZ"; e_lfanew (a 4-byte LE file
+	// offset at 0x3C) points at the "PE\0\0" signature, and the COFF Machine
+	// field is the 2 bytes immediately after it.
 	if len(data) >= 2 && data[0] == 'M' && data[1] == 'Z' {
-		return "windows", "", true
+		goarch = peMachineArch(data)
+		return "windows", goarch, true
 	}
 
 	return "", "", false
+}
+
+// peMachineArch decodes the COFF Machine field of a PE image and maps it to a
+// Go GOARCH name. It returns "" for a truncated, malformed, or unrecognized
+// image — detectBlobPlatform still reports "windows" in that case, and an
+// empty goarch is treated by verifyBlobForHost as "known OS, unknown arch",
+// which never fails the guard on uncertainty.
+func peMachineArch(data []byte) string {
+	// e_lfanew lives at 0x3C and is only meaningful once the header is present.
+	if len(data) < 0x40 {
+		return ""
+	}
+	peOff := int64(binary.LittleEndian.Uint32(data[0x3C:0x40]))
+	// Machine occupies [peOff+4, peOff+6). Bound with int64 so a hostile or
+	// corrupt e_lfanew near 2^32 cannot overflow into a valid-looking index.
+	if peOff < 0 || peOff+6 > int64(len(data)) {
+		return ""
+	}
+	if string(data[peOff:peOff+4]) != "PE\x00\x00" {
+		return ""
+	}
+	switch binary.LittleEndian.Uint16(data[peOff+4 : peOff+6]) {
+	case 0x8664: // IMAGE_FILE_MACHINE_AMD64
+		return "amd64"
+	case 0xAA64: // IMAGE_FILE_MACHINE_ARM64
+		return "arm64"
+	}
+	return ""
 }
 
 // verifyBlobForHost confirms the embedded vigolium-audit blob targets the

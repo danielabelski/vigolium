@@ -62,11 +62,13 @@ The CLI resolves the active project in this order:
 1. `--project-uuid`
 2. `--project-name`
 3. `VIGOLIUM_PROJECT_UUID`
-4. legacy `VIGOLIUM_PROJECT`
+4. `VIGOLIUM_PROJECT_NAME`
 5. `~/.vigolium/active-project`
 6. the built-in default project
 
-`--project-uuid` and `--project-name` are mutually exclusive.
+`--project-uuid` and `--project-name` are mutually exclusive. Likewise,
+`VIGOLIUM_PROJECT_UUID` takes precedence over `VIGOLIUM_PROJECT_NAME` when both
+are set.
 
 ```bash
 # Scan by project name

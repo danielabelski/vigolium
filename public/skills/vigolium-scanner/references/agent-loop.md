@@ -33,22 +33,16 @@ scope → scan → read → confirm → hand off
 
 ## Mental model
 
-- **The database is the state.** A scan *writes* findings + HTTP records; query
-  commands *read* them back. Commands compose through the DB, not through pipes.
-  Every row is scoped to a project.
-- **Two JSON contracts — do not confuse them:**
-  - `-j/--json` on read commands (`finding`, `traffic`, `db`) → **one** compact,
-    token-bounded object. This is what you parse during triage.
-  - `--format jsonl` / `vigolium export` → the bulk `{"type":…,"data":{…}}`
-    stream, one object per line, full fidelity. For archival, not triage.
-- **Non-interactive by default.** The TUI is opt-in (`--tui`), never
-  auto-launched. Destructive commands require `--force`. Add `--no-color` (or
-  `NO_COLOR=1`) for clean text.
-- **Scoping:** `--project-uuid <uuid>`, `--project-name <name>`, or
-  `VIGOLIUM_PROJECT=<name>`.
-- **Every JSON summary tells you the next command.** Agentic scans and `fuzz`
-  emit a `query` field containing a ready-to-run follow-up. Prefer running that
-  over composing your own.
+The four load-bearing facts — **the database is the state** (scans write,
+queries read, commands compose through the DB not pipes), **two JSON contracts**
+(`-j/--json` = one compact object for triage; `--format jsonl`/`export` = bulk
+full-fidelity stream for archival), **non-interactive by default** (TUI is
+`--tui`, destructive needs `--force`), and **every JSON summary hands you the
+next command** (the `query` field) — are stated in full in `SKILL.md`, always in
+context. This file assumes them and drills into each step.
+
+Scoping: `--project-uuid <uuid>`, `--project-name <name>`,
+`VIGOLIUM_PROJECT_UUID=<uuid>`, or `VIGOLIUM_PROJECT_NAME=<name>`.
 
 ## Token discipline
 
@@ -112,6 +106,19 @@ printf 'GET /api?q=1 HTTP/1.1\r\nHost: target.example\r\n\r\n' \
 
 `scan-url` / `scan-request` under `--json` emit:
 `{"target","method","scan_duration_ms","modules_run","findings":[…],"errors":[]}`.
+
+**Which command?** Use `scan-url` / `scan-request` only when you're confirming
+**one specific request** — full params, a deep path, or custom headers you need
+sent verbatim. For a bare host/root URL, `scan -t` expands the surface for you.
+
+A full `scan -t` can run well past 30 min (discovery defaults to 1h, spidering
+30m, no total cap) — **launch it in the background** and poll the DB, or bound it:
+
+```bash
+vigolium scan -t https://target.example --scanning-max-duration 30m --fail-on high
+```
+
+For a quick single-phase pass, run it directly: `vigolium run spidering -t <url>`.
 
 ## Step 3 — Read the results
 

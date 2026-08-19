@@ -37,6 +37,14 @@ bin
 !pkg/audit/bin/_bin/
 !pkg/audit/bin/_bin/.gitkeep
 !pkg/audit/bin/_bin/.gitignore
+
+# Same trap, second victim: build/npm/bin/vigolium.js is the npm launcher that
+# build/npm/build.mjs copies into the published package (LAUNCHER_SRC). The
+# `bin` rules above kept it untracked, so it was never committed and every
+# fresh clone failed `make npm-build` with ENOENT on copyFileSync. It is
+# hand-written source, not a build artifact.
+!build/npm/bin/
+!build/npm/bin/vigolium.js
 .vscode
 
 # Go build artifacts

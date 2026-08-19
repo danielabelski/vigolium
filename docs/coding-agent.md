@@ -22,8 +22,8 @@ default human output is unchanged; you opt into machine output with `-j/--json`.
     (one object per line), full fidelity. Use for archival/bulk, not triage.
 - Non-interactive by default: the TUI is opt-in (`--tui`), never auto-launched.
   Destructive commands need `--force`. Add `--no-color` (or `NO_COLOR=1`) for
-  clean text; scope with `--project-uuid <uuid>`, `--project-name <name>`, or
-  `VIGOLIUM_PROJECT`.
+  clean text; scope with `--project-uuid <uuid>`, `--project-name <name>`,
+  `VIGOLIUM_PROJECT_UUID`, or `VIGOLIUM_PROJECT_NAME`.
 
 ## Token-aware output (the important part)
 

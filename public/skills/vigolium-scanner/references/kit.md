@@ -91,10 +91,10 @@ minting and polling are separate fire-and-forget invocations (no long-running
 process).
 
 ```bash
-vigolium kit oast new -n 2 -o run.yaml          # mint 2 URLs, save session
+vigolium kit oast new -n 2 --session run.yaml          # mint 2 URLs, save session
 # ...inject the URL(s) somewhere, wait...
-vigolium kit oast poll -o run.yaml --wait 30s -j   # drain interactions as JSON
-vigolium kit oast poll -o run.yaml --deregister    # final drain + tear down
+vigolium kit oast poll --session run.yaml --wait 30s -j   # drain interactions as JSON
+vigolium kit oast poll --session run.yaml --deregister    # final drain + tear down
 ```
 
 | Flag | Command | Effect |

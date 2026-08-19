@@ -17,8 +17,9 @@ var (
 
 // ResolveProjectUUID returns the effective project UUID, resolved once per
 // process. Resolution order:
-//  1. projectUUID (from --project-uuid / VIGOLIUM_PROJECT[_UUID])
-//  2. projectName (DB lookup, opening the database via getDB)
+//  1. projectUUID (from --project-uuid / VIGOLIUM_PROJECT_UUID)
+//  2. projectName (DB lookup, opening the database via getDB; from
+//     --project-name / VIGOLIUM_PROJECT_NAME)
 //  3. ~/.vigolium/active-project file (set by `vigolium project use`)
 //  4. database.DefaultProjectUUID
 //

@@ -64,12 +64,22 @@ const REPOSITORY = {
 };
 const ENGINES = { node: ">=16" };
 
+// windows is x64-only, matching the shipped matrix in .goreleaser.yaml: the
+// embedded vigolium-audit and jstangle helpers are `bun build --compile`
+// outputs and Bun has no bun-windows-arm64 target. Windows on ARM installs the
+// x64 package and runs it under emulation.
 const PLATFORMS = [
   { tag: "linux-x64", goos: "linux", goarch: "amd64", os: "linux", cpu: "x64" },
   { tag: "linux-arm64", goos: "linux", goarch: "arm64", os: "linux", cpu: "arm64" },
   { tag: "darwin-x64", goos: "darwin", goarch: "amd64", os: "darwin", cpu: "x64" },
   { tag: "darwin-arm64", goos: "darwin", goarch: "arm64", os: "darwin", cpu: "arm64" },
+  { tag: "windows-x64", goos: "windows", goarch: "amd64", os: "win32", cpu: "x64" },
 ];
+
+// The file name goreleaser gives the built binary, per GOOS.
+function binaryNameFor(goos) {
+  return goos === "windows" ? "vigolium.exe" : "vigolium";
+}
 
 const args = process.argv.slice(2);
 const doPack = args.includes("--pack");
@@ -126,8 +136,11 @@ const platformVersion = (tag) => `${baseVersion}-${tag}`;
 // no matter how build.mjs is invoked (make target or direct `node`).
 function verifyReleaseVersion(expected) {
   if (!existsSync(DIST_DIR)) return; // findSourceBinary fails later with a clearer message
+  // .zip as well as .tar.gz: the windows archive is a zip (archives.
+  // format_overrides in .goreleaser.yaml), and matching only tar.gz would quietly
+  // exclude the Windows artifact from this stale-version guard.
   const archiveRe =
-    /^vigolium_(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)_(?:linux|darwin|windows)_(?:amd64|arm64)\.tar\.gz$/;
+    /^vigolium_(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)_(?:linux|darwin|windows)_(?:amd64|arm64)\.(?:tar\.gz|zip)$/;
   const built = new Set();
   for (const f of readdirSync(DIST_DIR)) {
     const m = f.match(archiveRe);
@@ -169,9 +182,10 @@ function findSourceBinary(goos, goarch) {
     );
   }
   const re = new RegExp(`^vigolium_${goos}_${goarch}(?:_.+)?$`);
+  const binName = binaryNameFor(goos);
   const dirs = readdirSync(DIST_DIR)
     .filter((d) => re.test(d))
-    .filter((d) => existsSync(path.join(DIST_DIR, d, "vigolium")))
+    .filter((d) => existsSync(path.join(DIST_DIR, d, binName)))
     .sort();
   if (dirs.length === 0) return null;
   if (dirs.length > 1) {
@@ -180,7 +194,7 @@ function findSourceBinary(goos, goarch) {
         `${dirs.join(", ")} — using ${dirs[0]}\x1b[0m`,
     );
   }
-  return path.join(DIST_DIR, dirs[0], "vigolium");
+  return path.join(DIST_DIR, dirs[0], binName);
 }
 
 // --- embedded audit blob verification -------------------------------------
@@ -215,6 +229,10 @@ function verifyEmbeddedAudit(buf, p) {
   let foreign = [];
   if (p.os === "linux") foreign = MACHO_MARKERS.filter(has);
   else if (p.os === "darwin") foreign = ELF_INTERP_MARKERS.filter(has);
+  // A Windows build links neither loader, so BOTH families are foreign there.
+  // Verified empirically against a windows/amd64 build carrying the windows
+  // audit blob: zero markers from either list.
+  else if (p.os === "win32") foreign = [...MACHO_MARKERS, ...ELF_INTERP_MARKERS].filter(has);
 
   if (foreign.length) {
     fail(
@@ -279,7 +297,12 @@ async function stagePlatformPackage(p) {
     homepage: HOMEPAGE,
     repository: REPOSITORY,
     os: [p.os],
-    cpu: [p.cpu],
+    // npm refuses to install a package whose cpu list excludes the host, so
+    // the windows x64 package claims arm64 too — that is the emulation story
+    // the rest of the matrix already assumes (there is no bun-windows-arm64
+    // target, so an arm64-native build cannot exist). Without this an arm64
+    // Windows user's install silently resolves zero platform packages.
+    cpu: p.os === "win32" ? [p.cpu, "arm64"] : [p.cpu],
     engines: ENGINES,
     files: ["vendor"],
   });

@@ -175,12 +175,14 @@ Run 'vigolium <command> --help' for command-specific flags and examples, or 'vig
 			globalProxy = os.Getenv("VIGOLIUM_PROXY")
 		}
 
-		// Env var fallback for --project-uuid flag
-		if globalProjectUUID == "" {
+		// Env var fallback for the project selection flags, applied only when
+		// neither flag was given (an explicit flag always wins). VIGOLIUM_PROJECT_UUID
+		// takes precedence over VIGOLIUM_PROJECT_NAME, mirroring the flag order.
+		if globalProjectUUID == "" && globalProjectName == "" {
 			if v := os.Getenv("VIGOLIUM_PROJECT_UUID"); v != "" {
 				globalProjectUUID = v
-			} else if v := os.Getenv("VIGOLIUM_PROJECT"); v != "" {
-				globalProjectUUID = v
+			} else if v := os.Getenv("VIGOLIUM_PROJECT_NAME"); v != "" {
+				globalProjectName = v
 			}
 		}
 
@@ -295,8 +297,8 @@ func init() {
 	pf.BoolVar(&globalFullExample, "full-example", false, "Show full example commands organized by section")
 	pf.StringArrayVar(&globalExtScripts, "ext", nil, "Load JavaScript extension script (repeatable)")
 	pf.StringVar(&globalExtDir, "ext-dir", "", "Override extension scripts directory")
-	pf.StringVar(&globalProjectUUID, "project-uuid", "", "Project UUID to scope all operations to (defaults to the default project)")
-	pf.StringVar(&globalProjectName, "project-name", "", "Project name to scope all operations to (must match exactly one project)")
+	pf.StringVar(&globalProjectUUID, "project-uuid", "", "Project UUID to scope all operations to (defaults to the default project). Also honors $VIGOLIUM_PROJECT_UUID")
+	pf.StringVar(&globalProjectName, "project-name", "", "Project name to scope all operations to (must match exactly one project). Also honors $VIGOLIUM_PROJECT_NAME")
 }
 
 // memLimitCommands are the leaf command names that drive a native scan and so

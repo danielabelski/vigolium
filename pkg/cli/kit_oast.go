@@ -34,11 +34,11 @@ interactions they received — the primitive behind blind SSRF/XXE/RCE/log4shell
 confirmation. State is kept in a session file so minting and polling can be
 separate, fire-and-forget invocations (no long-running process).
 
-  vigolium kit oast new                              # mint a URL, save the session
-  vigolium kit oast new -n 3 -o run.yaml             # mint 3 URLs into run.yaml
+  vigolium kit oast new                                     # mint a URL, save the session
+  vigolium kit oast new -n 3 --session run.yaml             # mint 3 URLs into run.yaml
   # ...inject the URL(s) somewhere, wait...
-  vigolium kit oast poll -o run.yaml --wait 30s -j   # drain interactions as JSON
-  vigolium kit oast poll -o run.yaml --deregister    # final drain + tear down
+  vigolium kit oast poll --session run.yaml --wait 30s -j   # drain interactions as JSON
+  vigolium kit oast poll --session run.yaml --deregister    # final drain + tear down
 
 The session file holds the interactsh private key + correlation id; keep it
 until you are done polling. Uses the public oast.pro server by default; point
@@ -59,7 +59,11 @@ var kitOASTPollCmd = &cobra.Command{
 }
 
 func init() {
-	kitOASTCmd.PersistentFlags().StringVarP(&kitOASTSession, "session", "o", kitOASTDefaultSession, "Session file path (holds the interactsh keys/correlation id)")
+	// Long-only on purpose: -o means output everywhere else in the CLI
+	// (export, fuzz, replay, scan, import, db export), so binding it to
+	// the session file here would be the one place -o writes something
+	// the operator did not ask to write.
+	kitOASTCmd.PersistentFlags().StringVar(&kitOASTSession, "session", kitOASTDefaultSession, "Session file path (holds the interactsh keys/correlation id)")
 
 	nf := kitOASTNewCmd.Flags()
 	nf.StringVar(&kitOASTServer, "server", "oast.pro", "interactsh server URL")
@@ -114,7 +118,7 @@ func runKitOASTNew(cmd *cobra.Command, args []string) error {
 	for _, u := range urls {
 		fmt.Println(u)
 	}
-	fmt.Fprintf(os.Stderr, "%s session saved to %s — poll it with: vigolium kit oast poll -o %s\n",
+	fmt.Fprintf(os.Stderr, "%s session saved to %s - poll it with: vigolium kit oast poll --session %s\n",
 		terminal.InfoSymbol(), kitOASTSession, kitOASTSession)
 	return nil
 }
@@ -241,7 +245,7 @@ func loadOASTSession(path string) (*interactshoptions.SessionInfo, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("session file %s not found — run `vigolium kit oast new -o %s` first", path, path)
+			return nil, fmt.Errorf("session file %s not found - run `vigolium kit oast new --session %s` first", path, path)
 		}
 		return nil, err
 	}

@@ -14,11 +14,14 @@ import (
 // disabled (NewExtractor returns ErrUnsupportedPlatform). That exact gap once
 // shipped linux/arm64 and darwin/amd64 without jstangle. Keep this list in sync
 // with the release matrix.
+// windows/arm64 is not in this list because it is not shipped: jstangle is a
+// `bun build --compile` output and Bun has no bun-windows-arm64 target.
 var releaseTargets = [][2]string{
 	{"linux", "amd64"},
 	{"linux", "arm64"},
 	{"darwin", "amd64"},
 	{"darwin", "arm64"},
+	{"windows", "amd64"},
 }
 
 // TestJSTangleEmbedCoverage asserts each released platform has a matching
